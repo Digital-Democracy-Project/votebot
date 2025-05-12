@@ -1,4 +1,12 @@
-Flask App middleware.py
+# This flask app is acting as a sort of proxy server to receive an API request and forward
+# it to the Voatz API, but routed through the Digital Democracy Project EC2 instance
+# which has a white-labeled IP address with Voatz. The API call must first use the /get_tokens
+# endpoint to authenticate with the DDP Bearer token and the Voatz user credentials
+# then receive the WS and CSRF tokens in response.  From there, a second API call can be made to
+# /get_users to return the full list of Voatz users and attributes.  The /user_updates endpoint
+# will check the Voatz API and Brevo API to determine if there have been any additions or
+# departures of Voatz users compared to what is in the Brevo CRM, then only output the changes
+# in the response body.
 
 from flask import Flask, request, jsonify
 import requests
