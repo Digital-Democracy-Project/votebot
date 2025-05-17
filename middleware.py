@@ -320,5 +320,59 @@ def compare_users():
         "removed_count": len(removed_users)
     }), 200
 
+@app.route('/get_events', methods=['POST'])
+def get_events():
+    data = request.get_json()
+    organization_id = data.get('organizationId')
+    ws_token = data.get('WS')
+    csrf_token = data.get('Csrf-Token')
+    limit = data.get('limit')  # Optional
+    min_ts = data.get('minTs')  # Optional
+
+    if not organization_id or not ws_token or not csrf_token:
+        return jsonify({"status": "error", "message": "Missing required fields: organizationId, WS, or Csrf-Token"}), 400
+
+    url = "https://vapi-vrb.nimsim.com/voatz/events/listbyorganization/chrono"
+    headers = {
+        'Accept-Encoding': 'identity',
+        'Content-Type': 'application/json',
+        'Origin': 'http://vapi-vrb.nimsim.com',
+        'WS': ws_token,
+        'Csrf-Token': csrf_token,
+        'Cookie': f"WS={ws_token}; Csrf-Token={csrf_token}"
+    }
+
+    payload = {
+        "organizationId": organization_id
+    }
+    if limit:
+        payload["limit"] = limit
+    if min_ts:
+        payload["minTs"] = min_ts
+
+    response = requests.post(url, headers=headers, json=payload)
+
+    if response.status_code != 200:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to fetch events",
+            "code": response.status_code,
+            "text": response.text
+        }), response.status_code
+
+    try:
+        events_data = response.json()
+    except Exception:
+        return jsonify({
+            "status": "error",
+            "message": "Invalid JSON in response",
+            "raw_response": response.text
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "events": events_data
+    }), 200
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
