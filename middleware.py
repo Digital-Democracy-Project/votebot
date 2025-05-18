@@ -250,13 +250,21 @@ def compare_users():
         min_id = resp.json().get("minId")
 
     def flatten_user(user):
-        flattened = {k: v for k, v in user.items() if k != 'orgVerificationStatus'}
+        # Start with top-level keys of interest
+        flattened = {
+            "emailAddress": user.get("emailAddress"),
+            "firstName": user.get("firstName"),
+            "lastName": user.get("lastName")
+        }
+
+        # Look for Voter_Id in orgVerificationStatus
         kv_pairs = user.get("orgVerificationStatus", {}).get("keyValues", [])
         for pair in kv_pairs:
             key = pair.get("key")
             value = pair.get("value")
-            if key and value is not None:
-                flattened[key] = value
+            if key == "Voter_Id" and value:
+                flattened["Voter_Id"] = str(value).strip()
+
         return flattened
 
     voter_ids_from_api = []
