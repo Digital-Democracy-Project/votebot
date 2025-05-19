@@ -252,9 +252,14 @@ def compare_users():
     def flatten_user(user):
         flattened = {
             "Voter_Id": None,
-            "emailAddress": user.get("email"),
             "firstName": None,
-            "lastName": None
+            "lastName": None,
+            "emailAddress": user.get("email"),
+            "phone": user.get("phone"),
+            "precinct": None,
+            "birthDate": None,
+            "zip5": None,
+            "timestamp": user.get("timestamp")
         }
 
         kv_pairs = user.get("orgVerificationStatus", {}).get("keyValues", [])
@@ -269,6 +274,12 @@ def compare_users():
                 flattened["firstName"] = str(value).strip()
             elif key == "Last_Name":
                 flattened["lastName"] = str(value).strip()
+            elif key == "Precinct":
+                flattened["precinct"] = str(value).strip()
+            elif key == "Birth_Date":
+                flattened["birthDate"] = str(value).strip()
+            elif key == "Zip5":
+                flattened["zip5"] = str(value).strip()
 
         return flattened
 
