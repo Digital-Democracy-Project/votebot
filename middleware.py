@@ -9,6 +9,7 @@
 # in the response body.
 
 from flask import Flask, request, jsonify
+import json
 import requests
 Import os
 
@@ -198,7 +199,6 @@ def get_users():
     else:
         return jsonify({"status": "success", "users": users}), 200
 
-
 @app.route('/user_updates', methods=['POST'])
 def compare_users():
     data = request.get_json()
@@ -250,21 +250,17 @@ def compare_users():
         min_id = resp.json().get("minId")
 
     def flatten_user(user):
-        # Start with top-level keys of interest
         flattened = {
             "emailAddress": user.get("emailAddress"),
             "firstName": user.get("firstName"),
             "lastName": user.get("lastName")
         }
-
-        # Look for Voter_Id in orgVerificationStatus
         kv_pairs = user.get("orgVerificationStatus", {}).get("keyValues", [])
         for pair in kv_pairs:
             key = pair.get("key")
             value = pair.get("value")
             if key == "Voter_Id" and value:
                 flattened["Voter_Id"] = str(value).strip()
-
         return flattened
 
     voter_ids_from_api = []
@@ -284,6 +280,7 @@ def compare_users():
 
     # Fetch voter list from Brevo
     brevo_ids = []
+    brevo_details_by_id = {}
     headers_brevo = {
         "Accept": "application/json",
         "api-key": brevo_api_key
@@ -298,12 +295,20 @@ def compare_users():
         if brevo_resp.status_code != 200:
             return jsonify({"status": "error", "message": "Brevo API failed", "text": brevo_resp.text}), brevo_resp.status_code
 
-        data = brevo_resp.json()
-        contacts = data.get("contacts", [])
+        brevo_data = brevo_resp.json()
+        contacts = brevo_data.get("contacts", [])
         for contact in contacts:
             voter_id = contact.get("attributes", {}).get("VOTER_ID")
-            if voter_id and str(voter_id).strip() not in blacklist:
-                brevo_ids.append(str(voter_id).strip())
+            if voter_id:
+                voter_id_str = str(voter_id).strip()
+                if voter_id_str and voter_id_str not in blacklist:
+                    brevo_ids.append(voter_id_str)
+                    brevo_details_by_id[voter_id_str] = {
+                        "Voter_Id": voter_id_str,
+                        "emailAddress": contact.get("email"),
+                        "firstName": contact.get("attributes", {}).get("FIRSTNAME"),
+                        "lastName": contact.get("attributes", {}).get("LASTNAME")
+                    }
 
         if len(contacts) < limit:
             break
@@ -314,14 +319,14 @@ def compare_users():
     added_ids = api_set - brevo_set - blacklist
     removed_ids = brevo_set - api_set - blacklist
 
-    added_users = [voter_details_by_id[v_id] for v_id in added_ids]
-    removed_users = [v_id for v_id in removed_ids]
+    added_users = [voter_details_by_id[v_id] for v_id in added_ids if v_id in voter_details_by_id]
+    removed_users = [brevo_details_by_id[v_id] for v_id in removed_ids if v_id in brevo_details_by_id]
 
     return jsonify({
         "status": "success",
         "diff_mode": True,
         "added_users": added_users,
-        "removed_voter_ids": removed_users,
+        "removed_users": removed_users,
         "api_total": len(api_set),
         "brevo_total": len(brevo_set),
         "new_count": len(added_users),
