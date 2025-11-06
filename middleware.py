@@ -11,7 +11,7 @@
 from flask import Flask, request, jsonify
 import json
 import requests
-Import os
+import os
 
 # Define the token (saved as an environment variable)
 API_BEARER_TOKEN = os.getenv("API_BEARER_TOKEN")
