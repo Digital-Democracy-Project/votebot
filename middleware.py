@@ -407,5 +407,40 @@ def get_events():
         "events": events_data
     }), 200
 
+
+@app.route('/create_event', methods=['POST'])
+def create_event():
+    data = request.get_json()
+    organization_id = data.get('organizationId')
+    ws_token = data.get('WS')
+    csrf_token = data.get('Csrf-Token')
+    if not organization_id or not ws_token or not csrf_token:
+        return jsonify({"status": "error", "message": "Missing required fields: organizationId, WS, or Csrf-Token"}), 400
+
+    url = "https://vapi-vrb.nimsim.com/voatz/events/create"
+    headers = {
+        'Accept-Encoding': 'identity',
+        'Content-Type': 'application/json',
+        'Origin': 'http://vapi-vrb.nimsim.com',
+        'WS': ws_token,
+        'Csrf-Token': csrf_token,
+        'Cookie': f"WS={ws_token}; Csrf-Token={csrf_token}"
+    }
+    payload = data.copy()
+    payload.pop('WS', None)
+    payload.pop('Csrf-Token', None)
+    payload.pop('organizationId', None)
+
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code != 200:
+        return jsonify({"status": "error", "message": "Failed to create event", "code": response.status_code, "text": response.text}), response.status_code
+
+    try:
+        result = response.json()
+    except Exception:
+        return jsonify({"status": "success", "raw_response": response.text}), 200
+
+    return jsonify({"status": "success", "result": result}), 200
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
