@@ -490,7 +490,8 @@ def update_segment_attribute():
 	offset = 0
 	limit = 500
 	while True:
-		params = {'segmentId': int(segment_id), 'limit': limit, 'offset': offset}
+		# Fetch contacts in the given segment (filter by segmentIds as required by Brevo API)
+		params = {'segmentIds': int(segment_id), 'limit': limit, 'offset': offset}
 		# retry GET on rate limit
 		for attempt in range(MAX_RETRIES + 1):
 			rep = BREVO_SESSION.get('https://api.brevo.com/v3/contacts', headers=headers_brevo, params=params)
