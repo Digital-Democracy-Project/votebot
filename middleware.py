@@ -11,10 +11,31 @@
 from flask import Flask, request, jsonify
 import json
 import requests
+# system modules
 import os
+import time
+# session with retry for Brevo API to handle rate limiting (HTTP 429)
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Define the token (saved as an environment variable)
 API_BEARER_TOKEN = os.getenv("API_BEARER_TOKEN")
+
+# requests session configured to retry GET/PUT on 429
+BREVO_SESSION = requests.Session()
+_brevo_retry = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429],
+    allowed_methods=["GET", "PUT"],
+)
+BREVO_SESSION.mount("https://", HTTPAdapter(max_retries=_brevo_retry))
+BREVO_SESSION.mount("http://", HTTPAdapter(max_retries=_brevo_retry))
+# manual retry count for rate-limited Brevo API calls
+MAX_RETRIES = 3
+# rate-limit target (requests per hour) for Brevo API
+RATE_LIMIT_RPH = int(os.getenv('BREVO_RATE_LIMIT_RPH', '36000'))
+REQUEST_DELAY = 3600.0 / RATE_LIMIT_RPH
 
 app = Flask(__name__)
 
@@ -441,6 +462,80 @@ def create_event():
         return jsonify({"status": "success", "raw_response": response.text}), 200
 
     return jsonify({"status": "success", "result": result}), 200
+
+@app.route('/update_segment_attribute', methods=['POST'])
+def update_segment_attribute():
+	# Require bearer token for this proxy
+	auth_header = request.headers.get('Authorization')
+	if not auth_header or not auth_header.startswith('Bearer '):
+		return jsonify({'status': 'error', 'message': 'Missing or malformed Authorization header'}), 401
+	token = auth_header.split('Bearer ')[1]
+	if token != API_BEARER_TOKEN:
+		return jsonify({'status': 'error', 'message': 'Invalid Bearer token'}), 403
+
+	data = request.get_json() or {}
+	brevo_api_key = data.get('brevo_api_key')
+	segment_id = data.get('segment_id')
+	attr_name = data.get('attribute_name')
+	attr_value = data.get('attribute_value')
+	if not brevo_api_key or segment_id is None or not attr_name:
+		return jsonify({'status': 'error', 'message': 'Missing required fields: brevo_api_key, segment_id, attribute_name'}), 400
+
+	# Fetch contacts in segment (paginated)
+	headers_brevo = {
+		'Accept': 'application/json',
+		'api-key': brevo_api_key
+	}
+	contacts = []
+	offset = 0
+	limit = 500
+	while True:
+		params = {'segmentId': int(segment_id), 'limit': limit, 'offset': offset}
+		# retry GET on rate limit
+		for attempt in range(MAX_RETRIES + 1):
+			rep = BREVO_SESSION.get('https://api.brevo.com/v3/contacts', headers=headers_brevo, params=params)
+			if rep.status_code == 429:
+				time.sleep(REQUEST_DELAY)
+				continue
+			resp = rep
+			break
+		if resp.status_code != 200:
+			return jsonify({'status': 'error', 'message': 'Failed to fetch contacts', 'code': resp.status_code, 'text': resp.text}), resp.status_code
+		page = resp.json().get('contacts', [])
+		if not page:
+			break
+		contacts.extend(page)
+		offset += limit
+		time.sleep(REQUEST_DELAY)
+
+	# Update each contact's attribute
+	success, failed = [], []
+	for c in contacts:
+		cid = c.get('id')
+		if not cid:
+			continue
+		url = f'https://api.brevo.com/v3/contacts/{cid}?identifierType=contact_id'
+		payload = {'attributes': {attr_name: attr_value}}
+		# retry PUT on rate limit
+		for attempt in range(MAX_RETRIES + 1):
+			rep = BREVO_SESSION.put(url, headers={**headers_brevo, 'Content-Type': 'application/json'}, json=payload)
+			if rep.status_code == 429:
+				time.sleep(REQUEST_DELAY)
+				continue
+			r = rep
+			break
+		time.sleep(REQUEST_DELAY)
+		if r.status_code == 200:
+			success.append(cid)
+		else:
+			failed.append({'id': cid, 'code': r.status_code, 'text': r.text})
+
+	return jsonify({
+		'status': 'success',
+		'total': len(contacts),
+		'updated': len(success),
+		'failures': failed
+	}), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
