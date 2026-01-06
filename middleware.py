@@ -509,34 +509,46 @@ def update_segment_attribute():
 		offset += limit
 		time.sleep(REQUEST_DELAY)
 
-	# Update each contact's attribute
-	success, failed = [], []
-	for c in contacts:
-		cid = c.get('id')
-		if not cid:
-			continue
-		url = f'https://api.brevo.com/v3/contacts/{cid}?identifierType=contact_id'
-		payload = {'attributes': {attr_name: attr_value}}
-		# retry PUT on rate limit
+		# Bulk update contacts' attribute via Brevo import endpoint as JSON
+		import_url = 'https://api.brevo.com/v3/contacts/import'
+		# Build JSON payload with listIds and attribute update for each contact
+		payload = {
+			'listIds': [57],
+			'updateExistingContacts': True,
+			'contacts': []
+		}
+		for c in contacts:
+			cid = c.get('id')
+			if cid:
+				payload['contacts'].append({
+					'id': cid,
+					'attributes': {attr_name: attr_value}
+				})
+		# retry POST on rate limit
 		for attempt in range(MAX_RETRIES + 1):
-			rep = BREVO_SESSION.put(url, headers={**headers_brevo, 'Content-Type': 'application/json'}, json=payload)
+			rep = BREVO_SESSION.post(
+				import_url,
+				headers={**headers_brevo, 'Content-Type': 'application/json'},
+				json=payload
+			)
 			if rep.status_code == 429:
 				time.sleep(REQUEST_DELAY)
 				continue
 			r = rep
 			break
-		time.sleep(REQUEST_DELAY)
-		if r.status_code in (200, 204):
-			success.append(cid)
+		# Determine result counts
+		if 200 <= r.status_code < 300:
+			updated = len(payload['contacts'])
+			failures = []
 		else:
-			failed.append({'id': cid, 'code': r.status_code, 'text': r.text})
-
-	return jsonify({
-		'status': 'success',
-		'total': len(contacts),
-		'updated': len(success),
-		'failures': failed
-	}), 200
+			updated = 0
+			failures = [{'code': r.status_code, 'text': r.text}]
+		return jsonify({
+			'status': 'success',
+			'total': len(payload['contacts']),
+			'updated': updated,
+			'failures': failures
+		}), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)

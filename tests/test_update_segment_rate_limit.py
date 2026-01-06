@@ -35,18 +35,18 @@ class TestUpdateSegmentAttributeRateLimit(unittest.TestCase):
             return resp
         middleware.BREVO_SESSION.get = fake_get
 
-        # Simulate PUT failing twice then succeeding
-        put_seq = [
+        # Simulate POST to import endpoint failing twice then succeeding
+        post_seq = [
             DummyResp(429, text='Rate limit'),
             DummyResp(429, text='Rate limit'),
             DummyResp(200, data={}),
         ]
         idx2 = {'i': 0}
-        def fake_put(*args, **kwargs):
-            resp = put_seq[idx2['i']]
+        def fake_post(*args, **kwargs):
+            resp = post_seq[idx2['i']]
             idx2['i'] += 1
             return resp
-        middleware.BREVO_SESSION.put = fake_put
+        middleware.BREVO_SESSION.post = fake_post
 
         rv = self.client.post(
             '/update_segment_attribute',
