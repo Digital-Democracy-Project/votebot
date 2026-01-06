@@ -525,7 +525,7 @@ def update_segment_attribute():
 			r = rep
 			break
 		time.sleep(REQUEST_DELAY)
-		if r.status_code == 200:
+		if r.status_code in (200, 204):
 			success.append(cid)
 		else:
 			failed.append({'id': cid, 'code': r.status_code, 'text': r.text})
