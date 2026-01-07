@@ -491,7 +491,7 @@ def update_segment_attribute():
 	limit = 500
 	while True:
 		# Fetch contacts in the given segment (filter by segmentIds as required by Brevo API)
-		params = {'segmentIds': int(segment_id), 'limit': limit, 'offset': offset}
+		params = {'segmentId': int(segment_id), 'limit': limit, 'offset': offset}
 		# retry GET on rate limit
 		for attempt in range(MAX_RETRIES + 1):
 			rep = BREVO_SESSION.get('https://api.brevo.com/v3/contacts', headers=headers_brevo, params=params)
@@ -509,24 +509,27 @@ def update_segment_attribute():
 		offset += limit
 		time.sleep(REQUEST_DELAY)
 
-		# Bulk update contacts' attribute via Brevo import endpoint as JSON
-		import_url = 'https://api.brevo.com/v3/contacts/import'
-		# Build JSON payload with listIds and attribute update for each contact
-		inner = {
+	# Bulk update contacts' attribute via Brevo import endpoint as JSON
+	import_url = 'https://api.brevo.com/v3/contacts/import'
+	# Build list of contact entries (email + attributes) for import
+	contacts_json = []
+	for c in contacts:
+		if email := c.get('email'):
+			contacts_json.append({
+				'email': email,
+				'attributes': {attr_name: attr_value}
+			})
+	total = len(contacts_json)
+	updated = 0
+	failures = []
+	CHUNK_SIZE = 2000
+	for i in range(0, total, CHUNK_SIZE):
+		chunk = contacts_json[i:i + CHUNK_SIZE]
+		payload = {
+			'jsonBody': chunk,
 			'listIds': [57],
-			'updateExistingContacts': True,
-			'contacts': []
+			'updateExistingContacts': True
 		}
-		for c in contacts:
-			cid = c.get('id')
-			if cid:
-				inner['contacts'].append({
-					'id': cid,
-					'attributes': {attr_name: attr_value}
-				})
-		total = len(inner['contacts'])
-		# wrap in Brevo import JSON body
-		payload = {'jsonBody': inner}
 		# retry POST on rate limit
 		for attempt in range(MAX_RETRIES + 1):
 			rep = BREVO_SESSION.post(
@@ -539,19 +542,18 @@ def update_segment_attribute():
 				continue
 			r = rep
 			break
-		# Determine result counts
 		if 200 <= r.status_code < 300:
-			updated = total
-			failures = []
+			updated += len(chunk)
 		else:
-			updated = 0
-			failures = [{'code': r.status_code, 'text': r.text}]
-		return jsonify({
-			'status': 'success',
-			'total': total,
-			'updated': updated,
-			'failures': failures
-		}), 200
+			failures.append({'start': i, 'code': r.status_code, 'text': r.text})
+		# honor rate-limit delay between chunks
+		time.sleep(REQUEST_DELAY)
+	return jsonify({
+		'status': 'success',
+		'total': total,
+		'updated': updated,
+		'failures': failures
+	}), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)

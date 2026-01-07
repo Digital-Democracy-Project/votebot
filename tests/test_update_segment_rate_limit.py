@@ -25,7 +25,7 @@ class TestUpdateSegmentAttributeRateLimit(unittest.TestCase):
         # Simulate GET first returning 429, then contacts page, then empty
         get_seq = [
             DummyResp(429, text='Rate limit'),
-            DummyResp(200, data={'contacts': [{'id': '1'}]}),
+            DummyResp(200, data={'contacts': [{'id': '1', 'email': 'user@example.com'}]}),
             DummyResp(200, data={'contacts': []}),
         ]
         idx = {'i': 0}
