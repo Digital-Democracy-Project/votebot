@@ -1,2 +1,1 @@
-# Package marker for test discovery
- 
+"""DDP-API and VoteBot test suite."""
