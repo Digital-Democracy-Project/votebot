@@ -1,103 +1,117 @@
-"""API key authentication middleware."""
+"""Bearer token authentication middleware."""
 
 import secrets
 from typing import Annotated
 
 import structlog
 from fastapi import Depends, HTTPException, Security, status
-from fastapi.security import APIKeyHeader
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from votebot.config import Settings, get_settings
 
 logger = structlog.get_logger()
 
-# API key header scheme
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+# Bearer token scheme
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
-async def api_key_auth(
-    api_key: Annotated[str | None, Security(api_key_header)],
+async def bearer_auth(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer_scheme)],
     settings: Settings = Depends(get_settings),
 ) -> str:
     """
-    Validate API key from request header.
+    Validate Bearer token from Authorization header.
 
     Args:
-        api_key: API key from X-API-Key header
+        credentials: Bearer token from Authorization header
         settings: Application settings
 
     Returns:
-        The validated API key
+        The validated token
 
     Raises:
-        HTTPException: If API key is missing or invalid
+        HTTPException: If token is missing or invalid
     """
-    if api_key is None:
-        logger.warning("Missing API key in request")
+    if credentials is None:
+        logger.warning("Missing Bearer token in request")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing API key. Include X-API-Key header.",
+            detail="Missing Bearer token. Include Authorization: Bearer <token> header.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
+
+    token = credentials.credentials
 
     # Use constant-time comparison to prevent timing attacks
-    expected_key = settings.api_key.get_secret_value()
-    if not secrets.compare_digest(api_key, expected_key):
-        logger.warning("Invalid API key attempt")
+    expected_token = settings.api_key.get_secret_value()
+    if not secrets.compare_digest(token, expected_token):
+        logger.warning("Invalid Bearer token attempt")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
+            detail="Invalid Bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return api_key
+    return token
 
 
-class APIKeyValidator:
+# Alias for backward compatibility
+api_key_auth = bearer_auth
+
+
+class BearerTokenValidator:
     """
-    Callable class for API key validation with support for multiple keys.
+    Callable class for Bearer token validation with support for multiple tokens.
 
-    Useful for scenarios where different clients have different API keys.
+    Useful for scenarios where different clients have different tokens.
     """
 
-    def __init__(self, valid_keys: list[str] | None = None):
+    def __init__(self, valid_tokens: list[str] | None = None):
         """
         Initialize the validator.
 
         Args:
-            valid_keys: List of valid API keys. If None, uses settings.
+            valid_tokens: List of valid tokens. If None, uses settings.
         """
-        self.valid_keys = valid_keys
+        self.valid_tokens = valid_tokens
 
     async def __call__(
         self,
-        api_key: Annotated[str | None, Security(api_key_header)],
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer_scheme)],
         settings: Settings = Depends(get_settings),
     ) -> str:
-        """Validate the API key."""
-        if api_key is None:
+        """Validate the Bearer token."""
+        if credentials is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing API key",
+                detail="Missing Bearer token",
+                headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # Use configured key if no specific keys provided
-        keys_to_check = self.valid_keys or [settings.api_key.get_secret_value()]
+        token = credentials.credentials
 
-        for valid_key in keys_to_check:
-            if secrets.compare_digest(api_key, valid_key):
-                return api_key
+        # Use configured token if no specific tokens provided
+        tokens_to_check = self.valid_tokens or [settings.api_key.get_secret_value()]
+
+        for valid_token in tokens_to_check:
+            if secrets.compare_digest(token, valid_token):
+                return token
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
+            detail="Invalid Bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
 
-def get_optional_api_key(
-    api_key: Annotated[str | None, Security(api_key_header)],
+def get_optional_bearer_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer_scheme)],
 ) -> str | None:
     """
-    Get API key without requiring authentication.
+    Get Bearer token without requiring authentication.
 
     Useful for endpoints that have optional authentication.
     """
-    return api_key
+    if credentials is None:
+        return None
+    return credentials.credentials

@@ -30,10 +30,10 @@ class TestHealthEndpoints:
 
 
 class TestAuthMiddleware:
-    """Tests for API key authentication."""
+    """Tests for Bearer token authentication."""
 
-    def test_missing_api_key(self, client):
-        """Test that missing API key returns 401."""
+    def test_missing_bearer_token(self, client):
+        """Test that missing Bearer token returns 401."""
         response = client.post(
             "/votebot/v1/chat",
             json={
@@ -44,13 +44,13 @@ class TestAuthMiddleware:
         )
 
         assert response.status_code == 401
-        assert "Missing API key" in response.json()["detail"]
+        assert "Missing Bearer token" in response.json()["detail"]
 
-    def test_invalid_api_key(self, client):
-        """Test that invalid API key returns 401."""
+    def test_invalid_bearer_token(self, client):
+        """Test that invalid Bearer token returns 401."""
         response = client.post(
             "/votebot/v1/chat",
-            headers={"X-API-Key": "wrong-key"},
+            headers={"Authorization": "Bearer wrong-token"},
             json={
                 "message": "test",
                 "session_id": "123",
@@ -59,7 +59,7 @@ class TestAuthMiddleware:
         )
 
         assert response.status_code == 401
-        assert "Invalid API key" in response.json()["detail"]
+        assert "Invalid Bearer token" in response.json()["detail"]
 
 
 class TestChatEndpoint:

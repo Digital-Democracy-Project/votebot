@@ -48,8 +48,8 @@ async def async_client() -> AsyncGenerator[AsyncClient, None]:
 
 @pytest.fixture
 def api_headers() -> dict:
-    """Get headers with API key for authenticated requests."""
-    return {"X-API-Key": "test-api-key"}
+    """Get headers with Bearer token for authenticated requests."""
+    return {"Authorization": "Bearer test-api-key"}
 
 
 @pytest.fixture
