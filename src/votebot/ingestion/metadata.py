@@ -28,7 +28,7 @@ class DocumentMetadata:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for storage."""
+        """Convert to dictionary for storage (Pinecone-compatible)."""
         result = {
             "document_id": self.document_id,
             "document_type": self.document_type,
@@ -51,8 +51,17 @@ class DocumentMetadata:
         result["created_at"] = self.created_at.isoformat()
         result["updated_at"] = self.updated_at.isoformat()
 
-        # Add extra fields
-        result.update(self.extra)
+        # Add extra fields, filtering out None values and converting lists to strings
+        # (Pinecone metadata doesn't support None or nested structures)
+        for key, value in self.extra.items():
+            if value is None:
+                continue
+            if isinstance(value, list):
+                result[key] = ", ".join(str(v) for v in value)
+            elif isinstance(value, dict):
+                continue  # Skip nested dicts
+            else:
+                result[key] = value
 
         return result
 

@@ -7,8 +7,9 @@ import structlog
 from bs4 import BeautifulSoup
 
 from votebot.config import Settings, get_settings
-from votebot.ingestion.metadata import MetadataExtractor
+from votebot.ingestion.metadata import DocumentMetadata, MetadataExtractor
 from votebot.ingestion.pipeline import DocumentSource
+from votebot.ingestion.sources.pdf import PDFSource
 
 logger = structlog.get_logger()
 
@@ -18,8 +19,8 @@ class WebflowSource:
     Data source connector for Webflow CMS.
 
     Fetches DDP content including:
+    - Bill pages with PDF text extraction
     - Educational materials
-    - Bill pages
     - Legislator profiles
     - General content
     """
@@ -40,104 +41,285 @@ class WebflowSource:
         """
         self.settings = settings or get_settings()
         self.metadata_extractor = metadata_extractor or MetadataExtractor()
-        # Webflow API key would be in settings
-        self.api_key = ""  # TODO: Add to settings
+        self.api_key = self.settings.webflow_api_key.get_secret_value()
+        self.site_id = self.settings.webflow_site_id
+        self.bills_collection_id = self.settings.webflow_bills_collection_id
+        self.pdf_source = PDFSource(self.settings, self.metadata_extractor)
 
     async def fetch(
         self,
-        site_id: str,
         collection_id: str | None = None,
         limit: int = 100,
+        include_pdfs: bool = True,
         **kwargs,
     ) -> AsyncIterator[DocumentSource]:
         """
         Fetch content from Webflow CMS.
 
         Args:
-            site_id: Webflow site ID
-            collection_id: Optional collection ID to filter
+            collection_id: Optional collection ID (defaults to bills collection)
             limit: Maximum number of items to fetch
+            include_pdfs: Whether to download and process gov-url PDFs
 
         Yields:
             DocumentSource objects for each content item
         """
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        coll_id = collection_id or self.bills_collection_id
+
+        if not coll_id:
+            logger.error("No collection ID provided and no bills collection configured")
+            return
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "accept": "application/json",
             }
 
-            # First get collections if no specific collection
-            if collection_id:
-                collections = [{"_id": collection_id}]
-            else:
-                try:
-                    response = await client.get(
-                        f"{self.BASE_URL}/sites/{site_id}/collections",
-                        headers=headers,
-                    )
-                    response.raise_for_status()
-                    collections = response.json().get("collections", [])
-                except Exception as e:
-                    logger.error("Failed to fetch Webflow collections", error=str(e))
-                    return
+            logger.info(
+                "Fetching from Webflow collection",
+                collection_id=coll_id,
+                limit=limit,
+            )
 
-            # Fetch items from each collection
-            for collection in collections:
-                coll_id = collection.get("_id")
-                if not coll_id:
-                    continue
-
-                logger.info(
-                    "Fetching from Webflow collection",
-                    collection_id=coll_id,
+            try:
+                response = await client.get(
+                    f"{self.BASE_URL}/collections/{coll_id}/items",
+                    headers=headers,
+                    params={"limit": min(limit, 100)},
                 )
+                response.raise_for_status()
+                items = response.json().get("items", [])
+            except Exception as e:
+                logger.error(
+                    "Failed to fetch Webflow collection items",
+                    collection_id=coll_id,
+                    error=str(e),
+                )
+                return
 
+            logger.info(f"Found {len(items)} items in collection")
+
+            for item in items:
                 try:
-                    response = await client.get(
-                        f"{self.BASE_URL}/collections/{coll_id}/items",
-                        headers=headers,
-                        params={"limit": min(limit, 100)},
-                    )
-                    response.raise_for_status()
-                    items = response.json().get("items", [])
+                    async for doc in self._process_bill_item(item, include_pdfs):
+                        yield doc
                 except Exception as e:
                     logger.warning(
-                        "Failed to fetch collection items",
-                        collection_id=coll_id,
+                        "Failed to process Webflow item",
+                        item_id=item.get("id"),
                         error=str(e),
                     )
                     continue
 
-                for item in items:
-                    try:
-                        content = self._extract_item_content(item)
-                        if not content:
-                            continue
+    async def fetch_bills(
+        self,
+        limit: int = 100,
+        include_pdfs: bool = True,
+    ) -> AsyncIterator[DocumentSource]:
+        """
+        Fetch bills from the configured bills collection.
 
-                        metadata = self.metadata_extractor.extract_web_content_metadata(
-                            url=item.get("_cmsUrl", ""),
-                            title=item.get("name"),
-                            content_type="cms",
-                        )
+        Args:
+            limit: Maximum number of bills to fetch
+            include_pdfs: Whether to download and process gov-url PDFs
 
-                        # Add Webflow-specific metadata
-                        metadata.extra["webflow_id"] = item.get("_id")
-                        metadata.extra["collection_id"] = coll_id
-                        metadata.source = "webflow"
+        Yields:
+            DocumentSource objects for each bill
+        """
+        async for doc in self.fetch(
+            collection_id=self.bills_collection_id,
+            limit=limit,
+            include_pdfs=include_pdfs,
+        ):
+            yield doc
 
-                        yield DocumentSource(
-                            content=content,
-                            metadata=metadata,
-                        )
+    async def _process_bill_item(
+        self,
+        item: dict,
+        include_pdfs: bool = True,
+    ) -> AsyncIterator[DocumentSource]:
+        """
+        Process a single bill item from the CMS.
 
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to process Webflow item",
-                            item_id=item.get("_id"),
-                            error=str(e),
-                        )
-                        continue
+        Args:
+            item: Webflow CMS item data
+            include_pdfs: Whether to download and process the gov-url PDF
+
+        Yields:
+            DocumentSource objects (CMS content and optionally PDF content)
+        """
+        fields = item.get("fieldData", {})
+        item_id = item.get("id", "")
+        name = fields.get("name", "Unknown Bill")
+
+        logger.info(f"Processing bill: {name}")
+
+        # Extract CMS content
+        cms_content = self._extract_bill_content(fields)
+
+        # Create base metadata
+        metadata = DocumentMetadata(
+            document_id=f"bill-webflow-{item_id}",
+            document_type="bill",
+            source="webflow-cms",
+            title=name,
+            jurisdiction=self._get_jurisdiction(fields),
+            bill_id=self._get_bill_id(fields),
+            url=fields.get("gov-url"),
+            extra={
+                "webflow_id": item_id,
+                "description": fields.get("description", "")[:500],
+                "status": fields.get("status"),
+                "session": fields.get("bill-session"),
+                "bill_prefix": fields.get("bill-prefix"),
+                "bill_number": fields.get("bill-number"),
+            },
+        )
+
+        # Yield CMS content first
+        if cms_content:
+            yield DocumentSource(
+                content=cms_content,
+                metadata=metadata,
+            )
+
+        # Process PDF if gov-url is available
+        gov_url = fields.get("gov-url")
+        if include_pdfs and gov_url and gov_url.endswith(".pdf"):
+            pdf_doc = await self._process_bill_pdf(gov_url, fields, item_id)
+            if pdf_doc:
+                yield pdf_doc
+
+    async def _process_bill_pdf(
+        self,
+        pdf_url: str,
+        fields: dict,
+        item_id: str,
+    ) -> DocumentSource | None:
+        """
+        Download and process a bill PDF.
+
+        Args:
+            pdf_url: URL to the PDF
+            fields: CMS field data
+            item_id: Webflow item ID
+
+        Returns:
+            DocumentSource with PDF content or None
+        """
+        logger.info(f"Downloading PDF: {pdf_url}")
+
+        try:
+            doc = await self.pdf_source.process_url(pdf_url)
+            if not doc:
+                return None
+
+            # Create metadata for PDF content
+            name = fields.get("name", "Unknown Bill")
+            metadata = DocumentMetadata(
+                document_id=f"bill-pdf-{item_id}",
+                document_type="bill-text",
+                source="webflow-pdf",
+                title=f"{name} - Full Text",
+                jurisdiction=self._get_jurisdiction(fields),
+                bill_id=self._get_bill_id(fields),
+                url=pdf_url,
+                extra={
+                    "webflow_id": item_id,
+                    "content_type": "pdf",
+                    "session": fields.get("bill-session"),
+                    "bill_prefix": fields.get("bill-prefix"),
+                    "bill_number": fields.get("bill-number"),
+                },
+            )
+
+            return DocumentSource(
+                content=doc.content,
+                metadata=metadata,
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Failed to process bill PDF",
+                url=pdf_url,
+                error=str(e),
+            )
+            return None
+
+    def _extract_bill_content(self, fields: dict) -> str:
+        """Extract text content from bill CMS fields."""
+        parts = []
+
+        # Name/Title
+        if fields.get("name"):
+            parts.append(f"# {fields['name']}")
+
+        # Description
+        if fields.get("description"):
+            parts.append(f"## Description\n{fields['description']}")
+
+        # Status and session info
+        info_parts = []
+        if fields.get("status"):
+            info_parts.append(f"**Status:** {fields['status']}")
+        if fields.get("bill-session"):
+            info_parts.append(f"**Session:** {fields['bill-session']}")
+        if fields.get("bill-prefix") and fields.get("bill-number"):
+            info_parts.append(f"**Bill Number:** {fields['bill-prefix']} {fields['bill-number']}")
+        if info_parts:
+            parts.append("\n".join(info_parts))
+
+        # Support arguments
+        if fields.get("support"):
+            support_text = self._html_to_text(fields["support"])
+            if support_text:
+                parts.append(f"## Arguments in Support\n{support_text}")
+
+        # Opposition arguments
+        if fields.get("oppose"):
+            oppose_text = self._html_to_text(fields["oppose"])
+            if oppose_text:
+                parts.append(f"## Arguments in Opposition\n{oppose_text}")
+
+        # Post body (main content)
+        if fields.get("post-body"):
+            body_text = self._html_to_text(fields["post-body"])
+            if body_text:
+                parts.append(f"## Details\n{body_text}")
+
+        return "\n\n".join(parts) if parts else ""
+
+    def _html_to_text(self, html: str) -> str:
+        """Convert HTML to plain text."""
+        if not html:
+            return ""
+        soup = BeautifulSoup(html, "html.parser")
+        return soup.get_text(separator="\n", strip=True)
+
+    def _get_jurisdiction(self, fields: dict) -> str:
+        """Extract jurisdiction from bill fields."""
+        # This might be a reference field, so we may need to handle it
+        jurisdiction = fields.get("jurisdiction")
+        if isinstance(jurisdiction, str):
+            return jurisdiction
+        if isinstance(jurisdiction, dict):
+            return jurisdiction.get("name", "US")
+        return "US"
+
+    def _get_bill_id(self, fields: dict) -> str:
+        """Construct bill ID from fields."""
+        prefix = fields.get("bill-prefix", "")
+        number = fields.get("bill-number", "")
+        session = fields.get("session-code", fields.get("bill-session", ""))
+
+        if prefix and number:
+            bill_id = f"{prefix}-{number}"
+            if session:
+                bill_id = f"{bill_id}-{session}"
+            return bill_id
+
+        return fields.get("govid", fields.get("name", "unknown"))
 
     async def fetch_page(self, url: str) -> DocumentSource | None:
         """
@@ -187,72 +369,6 @@ class WebflowSource:
                 content=content,
                 metadata=metadata,
             )
-
-    async def fetch_sitemap(
-        self,
-        site_url: str,
-        limit: int = 100,
-    ) -> AsyncIterator[DocumentSource]:
-        """
-        Fetch all pages from a Webflow site using its sitemap.
-
-        Args:
-            site_url: Base URL of the site
-            limit: Maximum number of pages to fetch
-
-        Yields:
-            DocumentSource objects for each page
-        """
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            sitemap_url = f"{site_url.rstrip('/')}/sitemap.xml"
-
-            try:
-                response = await client.get(sitemap_url)
-                response.raise_for_status()
-                sitemap_xml = response.text
-            except Exception as e:
-                logger.error(
-                    "Failed to fetch sitemap",
-                    url=sitemap_url,
-                    error=str(e),
-                )
-                return
-
-            # Parse sitemap
-            soup = BeautifulSoup(sitemap_xml, "xml")
-            urls = [loc.text for loc in soup.find_all("loc")][:limit]
-
-            logger.info(f"Found {len(urls)} URLs in sitemap")
-
-            for url in urls:
-                doc = await self.fetch_page(url)
-                if doc:
-                    yield doc
-
-    def _extract_item_content(self, item: dict) -> str:
-        """Extract text content from a Webflow CMS item."""
-        parts = []
-
-        # Name/Title
-        if item.get("name"):
-            parts.append(f"# {item['name']}")
-
-        # Iterate through all fields
-        for key, value in item.items():
-            if key.startswith("_"):
-                continue
-            if isinstance(value, str) and len(value) > 10:
-                # Check if it's HTML
-                if "<" in value and ">" in value:
-                    soup = BeautifulSoup(value, "html.parser")
-                    text = soup.get_text(separator="\n", strip=True)
-                    if text:
-                        parts.append(f"## {key.replace('-', ' ').title()}")
-                        parts.append(text)
-                else:
-                    parts.append(f"**{key.replace('-', ' ').title()}:** {value}")
-
-        return "\n\n".join(parts) if parts else ""
 
     def _extract_html_content(self, soup: BeautifulSoup) -> str:
         """Extract text content from parsed HTML."""

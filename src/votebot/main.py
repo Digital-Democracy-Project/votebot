@@ -13,6 +13,8 @@ from votebot.api.schemas.common import ErrorResponse
 from votebot.config import get_settings
 from votebot.utils.logging import setup_logging
 
+# Clear settings cache to ensure fresh env vars on reload
+get_settings.cache_clear()
 settings = get_settings()
 logger = structlog.get_logger()
 

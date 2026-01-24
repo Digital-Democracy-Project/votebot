@@ -10,6 +10,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from votebot.config import get_settings
+
+# Clear settings cache to ensure fresh env vars are loaded
+get_settings.cache_clear()
+
 from votebot.ingestion.pipeline import IngestionPipeline
 from votebot.utils.logging import setup_logging
 

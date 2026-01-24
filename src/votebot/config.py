@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     chunk_size: int = 750
     chunk_overlap: int = 150
     max_retrieval_chunks: int = 10
-    similarity_threshold: float = 0.7
+    similarity_threshold: float = 0.4
 
     # Performance
     request_timeout_seconds: int = 30
@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # External APIs
     congress_api_key: SecretStr = Field(default=SecretStr(""))
     openstates_api_key: SecretStr = Field(default=SecretStr(""))
+
+    # Webflow CMS
+    webflow_api_key: SecretStr = Field(default=SecretStr(""))
+    webflow_site_id: str = ""
+    webflow_bills_collection_id: str = ""
 
     # AWS (for production deployment)
     aws_region: str = "us-east-1"
