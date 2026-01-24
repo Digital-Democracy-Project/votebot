@@ -15,7 +15,12 @@ from votebot.config import get_settings
 get_settings.cache_clear()
 
 from votebot.ingestion.pipeline import IngestionPipeline
+from votebot.ingestion.sources.webflow import WebflowSource
 from votebot.utils.logging import setup_logging
+
+# Default paths
+RAG_TRAINING_DOCS_DIR = Path(__file__).parent.parent / "RAG training docs"
+WEBSITE_PAGES_FILE = RAG_TRAINING_DOCS_DIR / "website_pages.txt"
 
 
 async def ingest_congress(pipeline: IngestionPipeline, args: argparse.Namespace) -> None:
@@ -78,6 +83,99 @@ async def ingest_pdf(pipeline: IngestionPipeline, args: argparse.Namespace) -> N
         print(f"  Errors: {len(result.errors)}")
 
 
+async def ingest_webflow(pipeline: IngestionPipeline, args: argparse.Namespace) -> None:
+    """Ingest from Webflow CMS."""
+    print(f"Ingesting from Webflow CMS (limit {args.limit}, include_pdfs={args.include_pdfs})...")
+
+    result = await pipeline.ingest_from_source(
+        "webflow",
+        {
+            "limit": args.limit,
+            "include_pdfs": args.include_pdfs,
+        },
+    )
+
+    print(f"  Documents processed: {result.documents_processed}")
+    print(f"  Chunks created: {result.chunks_created}")
+    print(f"  Chunks upserted: {result.chunks_upserted}")
+    if result.errors:
+        print(f"  Errors: {len(result.errors)}")
+        for error in result.errors[:5]:
+            print(f"    - {error}")
+
+
+async def ingest_website(pipeline: IngestionPipeline, args: argparse.Namespace) -> None:
+    """Ingest website pages from the website_pages.txt file."""
+    pages_file = Path(args.file) if args.file else WEBSITE_PAGES_FILE
+
+    if not pages_file.exists():
+        print(f"Error: Website pages file not found: {pages_file}")
+        sys.exit(1)
+
+    # Read URLs from file
+    urls = []
+    with open(pages_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            # Skip empty lines and comments
+            if line and not line.startswith("#"):
+                urls.append(line)
+
+    if not urls:
+        print("No URLs found in website pages file.")
+        return
+
+    print(f"Ingesting {len(urls)} website pages from {pages_file}...")
+
+    result = await pipeline.ingest_from_source(
+        "website",
+        {"urls": urls},
+    )
+
+    print(f"  Pages processed: {result.documents_processed}")
+    print(f"  Chunks created: {result.chunks_created}")
+    print(f"  Chunks upserted: {result.chunks_upserted}")
+    if result.errors:
+        print(f"  Errors: {len(result.errors)}")
+        for error in result.errors[:5]:
+            print(f"    - {error}")
+
+
+async def ingest_training_docs(pipeline: IngestionPipeline, args: argparse.Namespace) -> None:
+    """Ingest RAG training documents from the training docs folder."""
+    docs_dir = Path(args.path) if args.path else RAG_TRAINING_DOCS_DIR
+
+    if not docs_dir.exists():
+        print(f"Error: Training docs directory not found: {docs_dir}")
+        sys.exit(1)
+
+    # Find all text files (excluding website_pages.txt which is a config file)
+    doc_files = []
+    for ext in ["*.txt", "*.md"]:
+        for f in docs_dir.glob(ext):
+            if f.name != "website_pages.txt":
+                doc_files.append(f)
+
+    if not doc_files:
+        print("No training documents found.")
+        return
+
+    print(f"Ingesting {len(doc_files)} training documents from {docs_dir}...")
+
+    result = await pipeline.ingest_from_source(
+        "training_docs",
+        {"files": [str(f) for f in doc_files]},
+    )
+
+    print(f"  Documents processed: {result.documents_processed}")
+    print(f"  Chunks created: {result.chunks_created}")
+    print(f"  Chunks upserted: {result.chunks_upserted}")
+    if result.errors:
+        print(f"  Errors: {len(result.errors)}")
+        for error in result.errors[:5]:
+            print(f"    - {error}")
+
+
 async def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -115,6 +213,38 @@ async def main() -> None:
         "--recursive", action="store_true", help="Search directories recursively"
     )
 
+    # Webflow CMS subcommand
+    webflow_parser = subparsers.add_parser("webflow", help="Ingest from Webflow CMS")
+    webflow_parser.add_argument(
+        "--limit", type=int, default=100, help="Maximum items to fetch (default: 100)"
+    )
+    webflow_parser.add_argument(
+        "--no-pdfs", dest="include_pdfs", action="store_false",
+        help="Skip downloading PDFs from gov-url"
+    )
+
+    # Website pages subcommand
+    website_parser = subparsers.add_parser("website", help="Ingest website pages")
+    website_parser.add_argument(
+        "--file", type=str, help=f"Path to URL list file (default: {WEBSITE_PAGES_FILE})"
+    )
+
+    # Training docs subcommand
+    training_parser = subparsers.add_parser("training", help="Ingest RAG training documents")
+    training_parser.add_argument(
+        "--path", type=str, help=f"Path to training docs folder (default: {RAG_TRAINING_DOCS_DIR})"
+    )
+
+    # All sources subcommand
+    all_parser = subparsers.add_parser("all", help="Ingest from all configured sources")
+    all_parser.add_argument(
+        "--webflow-limit", type=int, default=100, help="Max Webflow items (default: 100)"
+    )
+    all_parser.add_argument(
+        "--no-pdfs", dest="include_pdfs", action="store_false",
+        help="Skip downloading PDFs from gov-url"
+    )
+
     # Common arguments
     parser.add_argument(
         "--log-level",
@@ -144,6 +274,34 @@ async def main() -> None:
             await ingest_openstates(pipeline, args)
         elif args.source == "pdf":
             await ingest_pdf(pipeline, args)
+        elif args.source == "webflow":
+            await ingest_webflow(pipeline, args)
+        elif args.source == "website":
+            await ingest_website(pipeline, args)
+        elif args.source == "training":
+            await ingest_training_docs(pipeline, args)
+        elif args.source == "all":
+            print("=" * 60)
+            print("INGESTING ALL SOURCES")
+            print("=" * 60)
+
+            # Create namespace objects for each source
+            print("\n[1/3] Training Documents")
+            training_args = argparse.Namespace(path=None)
+            await ingest_training_docs(pipeline, training_args)
+
+            print("\n[2/3] Website Pages")
+            website_args = argparse.Namespace(file=None)
+            await ingest_website(pipeline, website_args)
+
+            print("\n[3/3] Webflow CMS")
+            webflow_args = argparse.Namespace(
+                limit=args.webflow_limit,
+                include_pdfs=args.include_pdfs,
+            )
+            await ingest_webflow(pipeline, webflow_args)
+
+            print("\n" + "=" * 60)
         else:
             print(f"Unknown source: {args.source}")
             sys.exit(1)

@@ -235,12 +235,18 @@ class IngestionPipeline:
         Ingest documents from a configured source.
 
         Args:
-            source_name: Name of the source (congress, openstates, webflow, pdf)
+            source_name: Name of the source (congress, openstates, webflow, pdf, website, training_docs)
             source_config: Configuration for the source
 
         Returns:
             IngestionResult with processing stats
         """
+        # Handle special sources that don't follow the standard pattern
+        if source_name == "website":
+            return await self._ingest_website_pages(source_config)
+        elif source_name == "training_docs":
+            return await self._ingest_training_docs(source_config)
+
         from votebot.ingestion.sources import (
             CongressAPISource,
             OpenStatesSource,
@@ -272,6 +278,97 @@ class IngestionPipeline:
             documents.append(doc_source)
 
         return await self.ingest_batch(documents)
+
+    async def _ingest_website_pages(self, config: dict[str, Any]) -> IngestionResult:
+        """Ingest website pages from a list of URLs."""
+        from votebot.ingestion.sources.webflow import WebflowSource
+
+        urls = config.get("urls", [])
+        if not urls:
+            return IngestionResult(
+                documents_processed=0,
+                chunks_created=0,
+                chunks_upserted=0,
+                errors=["No URLs provided"],
+            )
+
+        webflow = WebflowSource(self.settings, self.metadata_extractor)
+        documents = []
+        errors = []
+
+        for url in urls:
+            try:
+                doc = await webflow.fetch_page(url)
+                if doc:
+                    documents.append(doc)
+                    logger.info(f"Fetched: {url}")
+                else:
+                    errors.append(f"No content from {url}")
+            except Exception as e:
+                errors.append(f"Failed to fetch {url}: {str(e)}")
+                logger.warning(f"Failed to fetch {url}: {e}")
+
+        result = await self.ingest_batch(documents)
+        result.errors.extend(errors)
+        return result
+
+    async def _ingest_training_docs(self, config: dict[str, Any]) -> IngestionResult:
+        """Ingest training documents from text files."""
+        from pathlib import Path
+
+        files = config.get("files", [])
+        if not files:
+            return IngestionResult(
+                documents_processed=0,
+                chunks_created=0,
+                chunks_upserted=0,
+                errors=["No files provided"],
+            )
+
+        documents = []
+        errors = []
+
+        for file_path in files:
+            path = Path(file_path)
+            if not path.exists():
+                errors.append(f"File not found: {file_path}")
+                continue
+
+            try:
+                # Try multiple encodings
+                content = None
+                for encoding in ["utf-8", "latin-1", "cp1252"]:
+                    try:
+                        content = path.read_text(encoding=encoding)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+
+                if content is None:
+                    errors.append(f"Could not decode: {file_path}")
+                    continue
+
+                # Create metadata
+                metadata = DocumentMetadata(
+                    document_id=f"training-{path.stem}",
+                    document_type="training",
+                    source="training-docs",
+                    title=path.stem.replace("-", " ").replace("_", " ").title(),
+                    extra={
+                        "filename": path.name,
+                    },
+                )
+
+                documents.append(DocumentSource(content=content, metadata=metadata))
+                logger.info(f"Loaded: {path.name}")
+
+            except Exception as e:
+                errors.append(f"Failed to read {file_path}: {str(e)}")
+                logger.warning(f"Failed to read {file_path}: {e}")
+
+        result = await self.ingest_batch(documents)
+        result.errors.extend(errors)
+        return result
 
     async def delete_document(self, document_id: str) -> bool:
         """

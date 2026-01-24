@@ -1,0 +1,21 @@
+# Digital Democracy Project Website Pages for Ingestion
+# Add one URL per line. Lines starting with # are comments.
+# These pages will be ingested into Pinecone for RAG retrieval.
+
+# Core Pages (High Priority)
+https://digitaldemocracyproject.org/about
+https://digitaldemocracyproject.org/faq
+https://digitaldemocracyproject.org/vote
+https://digitaldemocracyproject.org/tally
+https://digitaldemocracyproject.org/score
+
+# Organization Pages (Medium Priority)
+https://digitaldemocracyproject.org/team
+https://digitaldemocracyproject.org/volunteer
+https://digitaldemocracyproject.org/supporters
+https://digitaldemocracyproject.org/media
+
+# Note: The following branches are excluded as content comes from the CMS:
+# - /bills/* (ingested from Webflow CMS)
+# - /legislators/* (ingested from Webflow CMS)
+# - /member-organizations/* (ingested from Webflow CMS)
