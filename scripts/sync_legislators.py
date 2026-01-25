@@ -67,6 +67,7 @@ async def enrich_with_openstates(
     webflow_docs: list[DocumentSource],
     openstates: OpenStatesSource,
     rate_limit: float = 0.5,
+    max_retries: int = 3,
 ) -> list[DocumentSource]:
     """
     Enrich Webflow legislators with OpenStates data.
@@ -75,11 +76,14 @@ async def enrich_with_openstates(
         webflow_docs: Legislators from Webflow
         openstates: OpenStatesSource instance
         rate_limit: Seconds between API calls
+        max_retries: Maximum retries for rate-limited requests
 
     Returns:
         List of enriched DocumentSource objects
     """
     enriched = []
+    enriched_count = 0
+    failed_count = 0
 
     for i, webflow_doc in enumerate(webflow_docs):
         legislator_id = webflow_doc.metadata.legislator_id
@@ -96,7 +100,9 @@ async def enrich_with_openstates(
 
         try:
             # Fetch from OpenStates
-            os_doc = await openstates.fetch_legislator_by_id(legislator_id)
+            os_doc = await openstates.fetch_legislator_by_id(
+                legislator_id, max_retries=max_retries
+            )
 
             if os_doc:
                 # Combine content from both sources
@@ -112,20 +118,26 @@ async def enrich_with_openstates(
                     content=combined_content,
                     metadata=combined_metadata,
                 ))
+                enriched_count += 1
                 logger.debug(f"Enriched {name} with OpenStates data")
             else:
                 # Use Webflow data only
                 enriched.append(webflow_doc)
+                failed_count += 1
                 logger.debug(f"No OpenStates data for {name}, using Webflow only")
 
         except Exception as e:
             logger.warning(f"Failed to enrich {name}: {e}")
             enriched.append(webflow_doc)
+            failed_count += 1
 
         # Rate limiting
         if i < len(webflow_docs) - 1 and rate_limit > 0:
             await asyncio.sleep(rate_limit)
 
+    logger.info(
+        f"Enrichment complete: {enriched_count} enriched, {failed_count} Webflow-only"
+    )
     return enriched
 
 
@@ -249,6 +261,7 @@ async def sync_legislators(
     skip_openstates: bool = False,
     rate_limit: float = 0.5,
     dry_run: bool = False,
+    max_retries: int = 3,
 ) -> dict:
     """
     Main sync function that orchestrates the legislator ingestion.
@@ -258,6 +271,7 @@ async def sync_legislators(
         skip_openstates: Skip OpenStates enrichment
         rate_limit: Seconds between OpenStates API calls
         dry_run: If True, don't actually ingest
+        max_retries: Maximum retries for rate-limited OpenStates requests
 
     Returns:
         Summary dict with stats
@@ -286,9 +300,9 @@ async def sync_legislators(
         print("\n[2/3] Skipping OpenStates enrichment (--skip-openstates)")
         final_docs = webflow_docs
     else:
-        print(f"\n[2/3] Enriching with OpenStates data (rate limit: {rate_limit}s)...")
+        print(f"\n[2/3] Enriching with OpenStates data (rate limit: {rate_limit}s, max retries: {max_retries})...")
         final_docs = await enrich_with_openstates(
-            webflow_docs, openstates, rate_limit=rate_limit
+            webflow_docs, openstates, rate_limit=rate_limit, max_retries=max_retries
         )
         print(f"      Enriched {len(final_docs)} legislators")
 
@@ -368,6 +382,16 @@ async def main():
         help="Print what would be done without ingesting",
     )
     parser.add_argument(
+        "--overnight",
+        action="store_true",
+        help="Overnight mode: 10s rate limit, 10 retries, for slow batch enrichment",
+    )
+    parser.add_argument(
+        "--enrich-only",
+        action="store_true",
+        help="Only enrich existing Webflow data with OpenStates (update in place)",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -375,6 +399,11 @@ async def main():
     )
 
     args = parser.parse_args()
+
+    # Overnight mode overrides
+    if args.overnight:
+        args.rate_limit = 10.0  # 10 seconds between requests
+        print("Overnight mode enabled: 10s rate limit, extended retries")
 
     # Setup logging
     setup_logging(args.log_level)
@@ -385,6 +414,7 @@ async def main():
             skip_openstates=args.skip_openstates,
             rate_limit=args.rate_limit,
             dry_run=args.dry_run,
+            max_retries=10 if args.overnight else 3,
         )
 
         print(f"\nSummary:")
