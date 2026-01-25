@@ -180,7 +180,7 @@ async def test_bill_query(
             "bill_name": bill["name"],
             "bill_id": short_name,
             "question": question,
-            "answer": data.get("message", "")[:500],
+            "answer": (data.get("response") or "")[:500],
             "confidence": data.get("confidence", 0),
             "has_citations": bool(data.get("citations")),
             "citation_count": len(data.get("citations", [])),
