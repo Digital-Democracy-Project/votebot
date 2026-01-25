@@ -46,8 +46,10 @@ class WebflowSource:
         self.bills_collection_id = self.settings.webflow_bills_collection_id
         self.legislators_collection_id = self.settings.webflow_legislators_collection_id
         self.jurisdiction_collection_id = self.settings.webflow_jurisdiction_collection_id
+        self.organizations_collection_id = self.settings.webflow_organizations_collection_id
         self.pdf_source = PDFSource(self.settings, self.metadata_extractor)
         self._jurisdiction_cache: dict[str, str] = {}
+        self._bill_cache: dict[str, dict] = {}  # bill_id -> {name, identifier}
 
     async def fetch(
         self,
@@ -275,6 +277,356 @@ class WebflowSource:
                         error=str(e),
                     )
                     continue
+
+    async def fetch_organizations(
+        self,
+        limit: int = 0,
+    ) -> AsyncIterator[DocumentSource]:
+        """
+        Fetch member organizations from Webflow CMS.
+
+        Resolves bill references (support/oppose) to bill names for readable content.
+        Organizations do not have strict jurisdiction metadata.
+
+        Args:
+            limit: Maximum number of organizations to fetch (0 = unlimited)
+
+        Yields:
+            DocumentSource objects for each organization
+        """
+        if not self.organizations_collection_id:
+            logger.error("No organizations collection ID configured")
+            return
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "accept": "application/json",
+            }
+
+            # Build bill mapping first (for resolving bill references)
+            await self._build_bill_mapping(client, headers)
+
+            logger.info(
+                "Fetching organizations from Webflow",
+                collection_id=self.organizations_collection_id,
+                limit=limit if limit > 0 else "unlimited",
+            )
+
+            # Pagination variables
+            offset = 0
+            page_size = 100
+            total_fetched = 0
+            all_items = []
+
+            # Fetch all pages
+            while True:
+                try:
+                    params = {"limit": page_size, "offset": offset}
+                    response = await client.get(
+                        f"{self.BASE_URL}/collections/{self.organizations_collection_id}/items",
+                        headers=headers,
+                        params=params,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    items = data.get("items", [])
+                    pagination = data.get("pagination", {})
+
+                    if not items:
+                        break
+
+                    all_items.extend(items)
+                    total_fetched += len(items)
+
+                    logger.info(
+                        f"Fetched organizations page {offset // page_size + 1}: "
+                        f"{len(items)} items (total: {total_fetched})"
+                    )
+
+                    # Check if we've hit the limit
+                    if limit > 0 and total_fetched >= limit:
+                        all_items = all_items[:limit]
+                        break
+
+                    # Check if there are more pages
+                    total_in_collection = pagination.get("total", 0)
+                    if total_fetched >= total_in_collection or len(items) < page_size:
+                        break
+
+                    offset += page_size
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to fetch organizations",
+                        collection_id=self.organizations_collection_id,
+                        offset=offset,
+                        error=str(e),
+                    )
+                    break
+
+            logger.info(f"Total organizations fetched: {len(all_items)}")
+
+            for item in all_items:
+                try:
+                    doc = self._process_organization_item(item)
+                    if doc:
+                        yield doc
+                except Exception as e:
+                    logger.warning(
+                        "Failed to process organization item",
+                        item_id=item.get("id"),
+                        error=str(e),
+                    )
+                    continue
+
+    async def _build_bill_mapping(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict,
+    ) -> None:
+        """
+        Build a mapping from bill IDs to bill names.
+
+        Fetches the bills collection and creates a lookup table for resolving
+        bill references in organizations.
+        """
+        if self._bill_cache:
+            return  # Already cached
+
+        if not self.bills_collection_id:
+            logger.warning("No bills collection ID configured")
+            return
+
+        logger.info("Building bill mapping for organization references...")
+
+        try:
+            offset = 0
+            page_size = 100
+
+            while True:
+                params = {"limit": page_size, "offset": offset}
+                response = await client.get(
+                    f"{self.BASE_URL}/collections/{self.bills_collection_id}/items",
+                    headers=headers,
+                    params=params,
+                )
+                response.raise_for_status()
+                data = response.json()
+                items = data.get("items", [])
+
+                if not items:
+                    break
+
+                for item in items:
+                    item_id = item.get("id", "")
+                    fields = item.get("fieldData", {})
+                    name = fields.get("name", "")
+                    identifier = f"{fields.get('bill-prefix', '')} {fields.get('bill-number', '')}".strip()
+
+                    if item_id:
+                        self._bill_cache[item_id] = {
+                            "name": name,
+                            "identifier": identifier if identifier else name,
+                        }
+
+                pagination = data.get("pagination", {})
+                total = pagination.get("total", 0)
+                if len(self._bill_cache) >= total or len(items) < page_size:
+                    break
+
+                offset += page_size
+
+            logger.info(
+                f"Built bill mapping with {len(self._bill_cache)} entries"
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Failed to build bill mapping",
+                error=str(e),
+            )
+
+    def _process_organization_item(self, item: dict) -> DocumentSource | None:
+        """
+        Process a single organization item from the CMS.
+
+        Args:
+            item: Webflow CMS item data
+
+        Returns:
+            DocumentSource object or None if processing fails
+        """
+        fields = item.get("fieldData", {})
+        item_id = item.get("id", "")
+        name = fields.get("name", "Unknown Organization")
+
+        if not name or name == "Unknown Organization":
+            logger.debug(f"Organization has no name, skipping: {item_id}")
+            return None
+
+        logger.debug(f"Processing organization: {name}")
+
+        # Resolve bill references
+        bills_support = self._resolve_bill_references(fields.get("bills-support", []))
+        bills_oppose = self._resolve_bill_references(fields.get("bills-oppose", []))
+
+        # Extract content
+        content = self._extract_organization_content(fields, bills_support, bills_oppose)
+
+        if not content:
+            logger.debug(f"No content extracted for organization {name}")
+            return None
+
+        # Create metadata
+        metadata = DocumentMetadata(
+            document_id=f"organization-{item_id}",
+            document_type="organization",
+            source="webflow-cms",
+            title=name,
+            jurisdiction=None,  # Organizations can be local, state, or national
+            extra={
+                "webflow_id": item_id,
+                "organization_type": fields.get("type-2", ""),
+                "website": fields.get("website", ""),
+                "bills_support_count": len(bills_support),
+                "bills_oppose_count": len(bills_oppose),
+            },
+        )
+
+        return DocumentSource(
+            content=content,
+            metadata=metadata,
+        )
+
+    def _resolve_bill_references(self, bill_refs: list | None) -> list[dict]:
+        """
+        Resolve bill reference IDs to bill information.
+
+        Args:
+            bill_refs: List of bill reference IDs from Webflow
+
+        Returns:
+            List of dicts with bill name and identifier
+        """
+        if not bill_refs:
+            return []
+
+        resolved = []
+        for ref in bill_refs:
+            if isinstance(ref, str):
+                bill_info = self._bill_cache.get(ref)
+                if bill_info:
+                    resolved.append(bill_info)
+                else:
+                    # Unknown bill, include ID as fallback
+                    resolved.append({"name": f"Bill {ref[:8]}...", "identifier": ref})
+            elif isinstance(ref, dict):
+                # Already resolved
+                resolved.append(ref)
+
+        return resolved
+
+    def _extract_organization_content(
+        self,
+        fields: dict,
+        bills_support: list[dict],
+        bills_oppose: list[dict],
+    ) -> str:
+        """
+        Extract text content from organization CMS fields.
+
+        Args:
+            fields: CMS field data
+            bills_support: Resolved bills the organization supports
+            bills_oppose: Resolved bills the organization opposes
+
+        Returns:
+            Formatted text content for embedding
+        """
+        parts = []
+
+        # Name/Title
+        name = fields.get("name", "")
+        if name:
+            parts.append(f"# {name}")
+
+        # Organization type
+        org_type = fields.get("type-2", "")
+        if org_type:
+            parts.append(f"**Type:** {org_type}")
+
+        # Website
+        website = fields.get("website", "")
+        if website:
+            parts.append(f"**Website:** {website}")
+
+        # About section
+        about = fields.get("about-organization", "")
+        if about:
+            about_text = self._html_to_text(about) if "<" in about else about
+            if about_text:
+                parts.append(f"## About\n{about_text}")
+
+        # Extended description
+        description = fields.get("description-4", "")
+        if description:
+            desc_text = self._html_to_text(description) if "<" in description else description
+            if desc_text and desc_text != about:  # Avoid duplicating content
+                parts.append(f"## Description\n{desc_text}")
+
+        # Policy positions
+        policies = fields.get("policies-2", "")
+        if policies:
+            policy_text = self._html_to_text(policies) if "<" in policies else policies
+            if policy_text:
+                parts.append(f"## Policy Positions\n{policy_text}")
+
+        # Funding
+        funding = fields.get("funding-2", "")
+        if funding:
+            funding_text = self._html_to_text(funding) if "<" in funding else funding
+            if funding_text:
+                parts.append(f"## Funding\n{funding_text}")
+
+        # Affiliates
+        affiliates = fields.get("affiliates-2", "")
+        if affiliates:
+            affiliates_text = self._html_to_text(affiliates) if "<" in affiliates else affiliates
+            if affiliates_text:
+                parts.append(f"## Affiliates\n{affiliates_text}")
+
+        # Bill positions section
+        if bills_support or bills_oppose:
+            parts.append("## Bill Positions")
+
+            if bills_support:
+                support_lines = ["### Bills Supported"]
+                for bill in bills_support:
+                    identifier = bill.get("identifier", "")
+                    bill_name = bill.get("name", "")
+                    if identifier and bill_name:
+                        support_lines.append(f"- {bill_name} ({identifier})")
+                    elif bill_name:
+                        support_lines.append(f"- {bill_name}")
+                    elif identifier:
+                        support_lines.append(f"- {identifier}")
+                parts.append("\n".join(support_lines))
+
+            if bills_oppose:
+                oppose_lines = ["### Bills Opposed"]
+                for bill in bills_oppose:
+                    identifier = bill.get("identifier", "")
+                    bill_name = bill.get("name", "")
+                    if identifier and bill_name:
+                        oppose_lines.append(f"- {bill_name} ({identifier})")
+                    elif bill_name:
+                        oppose_lines.append(f"- {bill_name}")
+                    elif identifier:
+                        oppose_lines.append(f"- {identifier}")
+                parts.append("\n".join(oppose_lines))
+
+        return "\n\n".join(parts) if parts else ""
 
     async def _build_jurisdiction_mapping(
         self,

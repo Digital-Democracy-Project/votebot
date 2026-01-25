@@ -180,6 +180,51 @@ class MetadataExtractor:
             extra=extra,
         )
 
+    def extract_organization_metadata(
+        self,
+        raw_data: dict,
+        source: str = "webflow-cms",
+    ) -> DocumentMetadata:
+        """
+        Extract metadata from organization data.
+
+        Args:
+            raw_data: Raw organization data from source
+            source: Source name
+
+        Returns:
+            DocumentMetadata object with fields:
+            - document_id: "organization-{webflow_id}"
+            - document_type: "organization"
+            - source: Source name (webflow-cms)
+            - title: Organization name
+            - jurisdiction: None (organizations can be local, state, or national)
+            - extra: Additional fields
+        """
+        webflow_id = raw_data.get("webflow_id") or raw_data.get("id", "")
+        name = raw_data.get("name", "Unknown Organization")
+
+        extra = {
+            "webflow_id": webflow_id,
+            "organization_type": raw_data.get("organization_type", ""),
+            "website": raw_data.get("website", ""),
+        }
+
+        # Add bill position counts if available
+        if raw_data.get("bills_support_count") is not None:
+            extra["bills_support_count"] = raw_data["bills_support_count"]
+        if raw_data.get("bills_oppose_count") is not None:
+            extra["bills_oppose_count"] = raw_data["bills_oppose_count"]
+
+        return DocumentMetadata(
+            document_id=f"organization-{webflow_id}",
+            document_type="organization",
+            source=source,
+            title=name,
+            jurisdiction=None,  # Organizations can be local, state, or national
+            extra=extra,
+        )
+
     def extract_web_content_metadata(
         self,
         url: str,
