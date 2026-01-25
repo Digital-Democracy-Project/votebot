@@ -1,0 +1,67 @@
+# OpenStates Bill Sync Schedule Configuration
+# ============================================
+#
+# This config controls when bills are synced from OpenStates.
+# Most scheduling is automatic based on StateLegislativeCalendar,
+# but you can override specific jurisdictions here.
+#
+# The scheduler will:
+# - Sync daily for jurisdictions currently in session
+# - Sync weekly (Mondays) for jurisdictions not in session (pre-filed bills)
+# - Skip biennial states in off-years
+
+# Global settings
+sync_time_utc: "04:00"  # When to run daily sync (4 AM UTC = 11 PM EST)
+
+# Federal Congress settings (not covered by StateLegislativeCalendar)
+US:
+  enabled: true
+  frequency: daily
+  congress_number: 119        # 119th Congress (2025-2027)
+  session_years: "2025-2027"
+
+# DDP Active Jurisdictions
+# These are the states where DDP currently operates.
+# Session dates are calculated automatically from StateLegislativeCalendar.
+active_jurisdictions:
+  - FL   # Florida
+  - VA   # Virginia
+  - WA   # Washington
+  - UT   # Utah
+  - AZ   # Arizona
+  - MI   # Michigan
+  - MA   # Massachusetts
+
+# Jurisdiction Overrides
+# Use this section to customize sync behavior for specific states.
+# If not listed here, the default behavior applies:
+#   - In session: sync daily
+#   - Off session: sync weekly (Mondays only)
+#   - Biennial off-year: no sync
+overrides:
+  # Example: Disable a jurisdiction temporarily
+  # NV:
+  #   enabled: false
+  #   reason: "Not yet supported in DDP"
+
+  # Example: Force weekly sync even during session
+  # CA:
+  #   frequency: weekly
+  #   reason: "High volume, reduce API calls"
+
+# Rate Limiting
+# OpenStates has rate limits, so we stagger syncs if needed
+rate_limit:
+  requests_per_minute: 60
+  delay_between_bills_ms: 100
+
+# Retry Configuration
+retry:
+  max_attempts: 3
+  backoff_seconds: 5
+
+# Notification Settings (future use)
+notifications:
+  on_failure: true
+  on_large_changes: true  # Alert if >100 bills updated
+  email: ""  # Configure if needed

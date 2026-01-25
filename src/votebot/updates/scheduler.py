@@ -1,18 +1,25 @@
-"""Hourly polling scheduler for content updates."""
+"""Scheduler for content updates and OpenStates bill sync."""
 
 import asyncio
-from datetime import datetime
-from typing import Callable
+from datetime import datetime, time
+from pathlib import Path
+from typing import Any, Callable
 
 import structlog
+import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from votebot.config import Settings, get_settings
 from votebot.ingestion.pipeline import IngestionPipeline, IngestionResult
 from votebot.updates.change_detection import ChangeDetector
+from votebot.utils.legislative_calendar import StateLegislativeCalendar
 
 logger = structlog.get_logger()
+
+# Default config path
+DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config" / "sync_schedule.yaml"
 
 
 class UpdateScheduler:
@@ -20,24 +27,55 @@ class UpdateScheduler:
     Scheduler for periodic content updates.
 
     Handles:
+    - Daily OpenStates bill sync (based on legislative calendar)
     - Hourly polling for content changes
     - Manual update triggers
     - Graceful shutdown
     """
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        config_path: Path | None = None,
+    ):
         """
         Initialize the update scheduler.
 
         Args:
             settings: Application settings
+            config_path: Path to sync_schedule.yaml config file
         """
         self.settings = settings or get_settings()
+        self.config_path = config_path or DEFAULT_CONFIG_PATH
         self.scheduler = AsyncIOScheduler()
         self.pipeline = IngestionPipeline(self.settings)
         self.change_detector = ChangeDetector(self.settings)
+        self.calendar = StateLegislativeCalendar()
         self._is_running = False
         self._update_callbacks: list[Callable] = []
+        self._sync_config = self._load_sync_config()
+
+    def _load_sync_config(self) -> dict[str, Any]:
+        """Load sync schedule configuration from YAML file."""
+        if not self.config_path.exists():
+            logger.warning(f"Sync config not found at {self.config_path}, using defaults")
+            return {
+                "sync_time_utc": "04:00",
+                "US": {
+                    "enabled": True,
+                    "frequency": "daily",
+                    "congress_number": 119,
+                },
+            }
+
+        try:
+            with open(self.config_path) as f:
+                config = yaml.safe_load(f)
+                logger.info(f"Loaded sync config from {self.config_path}")
+                return config or {}
+        except Exception as e:
+            logger.error(f"Failed to load sync config: {e}")
+            return {}
 
     def start(self) -> None:
         """Start the scheduler."""
@@ -45,7 +83,20 @@ class UpdateScheduler:
             logger.warning("Scheduler already running")
             return
 
-        # Add hourly update job
+        # Parse sync time from config
+        sync_time_str = self._sync_config.get("sync_time_utc", "04:00")
+        hour, minute = map(int, sync_time_str.split(":"))
+
+        # Add daily OpenStates sync job
+        self.scheduler.add_job(
+            self._run_openstates_sync,
+            trigger=CronTrigger(hour=hour, minute=minute),
+            id="daily_openstates_sync",
+            name="Daily OpenStates Bill Sync",
+            replace_existing=True,
+        )
+
+        # Add hourly content update job
         self.scheduler.add_job(
             self._run_updates,
             trigger=IntervalTrigger(hours=1),
@@ -57,7 +108,10 @@ class UpdateScheduler:
         self.scheduler.start()
         self._is_running = True
 
-        logger.info("Update scheduler started")
+        logger.info(
+            "Update scheduler started",
+            openstates_sync_time=sync_time_str,
+        )
 
     def stop(self) -> None:
         """Stop the scheduler."""
@@ -193,7 +247,7 @@ class UpdateScheduler:
         """
         source_configs = {
             "congress": {
-                "congress": 118,  # Current Congress
+                "congress": 119,  # Current Congress
                 "limit": 50,
             },
             "openstates": {
@@ -203,6 +257,174 @@ class UpdateScheduler:
 
         config = source_configs.get(source, {})
         return await self.pipeline.ingest_from_source(source, config)
+
+    async def _run_openstates_sync(self) -> dict[str, Any]:
+        """
+        Run the daily OpenStates bill sync.
+
+        Only syncs bills from current sessions in jurisdictions
+        that are currently in session or scheduled for sync.
+
+        Returns:
+            Dict with sync results
+        """
+        from votebot.ingestion.sources.webflow import WebflowSource
+        from votebot.updates.bill_sync import BillSyncService
+
+        start_time = datetime.utcnow()
+        logger.info("Starting daily OpenStates sync")
+
+        try:
+            # Initialize services
+            sync_service = BillSyncService(self.settings)
+            webflow = WebflowSource(self.settings)
+
+            # Fetch all bills from Webflow
+            bills = []
+            async for doc in webflow.fetch(include_pdfs=False):
+                # We need the raw bill data, not processed docs
+                pass
+
+            # Actually fetch raw items from Webflow
+            import httpx
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                headers = {
+                    "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
+                    "accept": "application/json",
+                }
+
+                offset = 0
+                while True:
+                    response = await client.get(
+                        f"https://api.webflow.com/v2/collections/{self.settings.webflow_bills_collection_id}/items",
+                        headers=headers,
+                        params={"limit": 100, "offset": offset},
+                    )
+
+                    if response.status_code != 200:
+                        break
+
+                    data = response.json()
+                    items = data.get("items", [])
+
+                    if not items:
+                        break
+
+                    bills.extend(items)
+                    offset += 100
+
+                    if len(items) < 100:
+                        break
+
+            logger.info(f"Fetched {len(bills)} bills from Webflow CMS")
+
+            # Sync current session bills only
+            result = await sync_service.sync_current_session_bills(bills)
+
+            duration = (datetime.utcnow() - start_time).total_seconds()
+
+            logger.info(
+                "Daily OpenStates sync completed",
+                duration_seconds=duration,
+                total_bills=result.total_bills,
+                successful=result.successful,
+                failed=result.failed,
+                chunks_created=result.chunks_created,
+            )
+
+            # Call callbacks
+            for callback in self._update_callbacks:
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback({"openstates_sync": result})
+                    else:
+                        callback({"openstates_sync": result})
+                except Exception as e:
+                    logger.error("Sync callback failed", error=str(e))
+
+            return {
+                "success": True,
+                "duration_seconds": duration,
+                "total_bills": result.total_bills,
+                "successful": result.successful,
+                "failed": result.failed,
+                "chunks_created": result.chunks_created,
+                "errors": result.errors[:10] if result.errors else [],
+            }
+
+        except Exception as e:
+            logger.exception("OpenStates sync failed", error=str(e))
+            return {
+                "success": False,
+                "error": str(e),
+            }
+
+    async def trigger_openstates_sync(self, force_all: bool = False) -> dict[str, Any]:
+        """
+        Manually trigger an OpenStates sync.
+
+        Args:
+            force_all: If True, sync all bills regardless of session
+
+        Returns:
+            Dict with sync results
+        """
+        logger.info("Manual OpenStates sync triggered", force_all=force_all)
+
+        if force_all:
+            # Use backload logic for all bills
+            from votebot.ingestion.sources.webflow import WebflowSource
+            from votebot.updates.bill_sync import BillSyncService
+
+            sync_service = BillSyncService(self.settings)
+
+            # Fetch all bills
+            import httpx
+
+            bills = []
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                headers = {
+                    "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
+                    "accept": "application/json",
+                }
+
+                offset = 0
+                while True:
+                    response = await client.get(
+                        f"https://api.webflow.com/v2/collections/{self.settings.webflow_bills_collection_id}/items",
+                        headers=headers,
+                        params={"limit": 100, "offset": offset},
+                    )
+
+                    if response.status_code != 200:
+                        break
+
+                    data = response.json()
+                    items = data.get("items", [])
+
+                    if not items:
+                        break
+
+                    bills.extend(items)
+                    offset += 100
+
+                    if len(items) < 100:
+                        break
+
+            result = await sync_service.backload_all_bills(bills)
+
+            return {
+                "success": True,
+                "mode": "backload_all",
+                "total_bills": result.total_bills,
+                "successful": result.successful,
+                "failed": result.failed,
+                "chunks_created": result.chunks_created,
+                "errors": result.errors[:10] if result.errors else [],
+            }
+
+        return await self._run_openstates_sync()
 
     @property
     def is_running(self) -> bool:
