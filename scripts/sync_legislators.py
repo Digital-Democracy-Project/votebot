@@ -21,6 +21,7 @@ Options:
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -141,6 +142,162 @@ async def enrich_with_openstates(
     return enriched
 
 
+def enrich_with_cached_openstates(
+    webflow_docs: list[DocumentSource],
+    cache_file: Path,
+) -> list[DocumentSource]:
+    """
+    Enrich Webflow legislators with cached OpenStates data.
+
+    Uses pre-fetched OpenStates data from a JSON file to avoid API rate limits.
+
+    Args:
+        webflow_docs: Legislators from Webflow
+        cache_file: Path to cached OpenStates JSON file
+
+    Returns:
+        List of enriched DocumentSource objects
+    """
+    # Load cached OpenStates data
+    logger.info(f"Loading cached OpenStates data from {cache_file}")
+    with open(cache_file) as f:
+        os_data = json.load(f)
+
+    # Build lookup by ID
+    os_lookup = {item["id"]: item for item in os_data}
+    logger.info(f"Loaded {len(os_lookup)} cached OpenStates legislators")
+
+    enriched = []
+    enriched_count = 0
+    failed_count = 0
+
+    for i, webflow_doc in enumerate(webflow_docs):
+        legislator_id = webflow_doc.metadata.legislator_id
+        name = webflow_doc.metadata.title
+
+        if not legislator_id:
+            logger.warning(f"Skipping {name}: no OpenStates ID")
+            enriched.append(webflow_doc)
+            continue
+
+        os_item = os_lookup.get(legislator_id)
+        if os_item:
+            # Build OpenStates content from cached data
+            os_content = _build_openstates_content(os_item)
+            os_metadata = _build_openstates_metadata(os_item)
+
+            # Create a pseudo DocumentSource for OpenStates
+            os_doc = DocumentSource(content=os_content, metadata=os_metadata)
+
+            # Combine content from both sources
+            combined_content = _combine_content(webflow_doc, os_doc)
+
+            # Merge metadata
+            combined_metadata = _merge_metadata(
+                webflow_doc.metadata,
+                os_doc.metadata,
+            )
+
+            enriched.append(DocumentSource(
+                content=combined_content,
+                metadata=combined_metadata,
+            ))
+            enriched_count += 1
+            logger.debug(f"Enriched {name} with cached OpenStates data")
+        else:
+            # Use Webflow data only
+            enriched.append(webflow_doc)
+            failed_count += 1
+            logger.debug(f"No cached OpenStates data for {name} ({legislator_id})")
+
+    logger.info(
+        f"Cache enrichment complete: {enriched_count} enriched, {failed_count} Webflow-only"
+    )
+    return enriched
+
+
+def _build_openstates_content(item: dict) -> str:
+    """Build content string from cached OpenStates data."""
+    parts = []
+
+    name = item.get("name", "")
+    if name:
+        parts.append(f"# {name}")
+
+    # Current role
+    current_role = item.get("current_role", {})
+    if current_role:
+        title = current_role.get("title", "")
+        district = current_role.get("district", "")
+        org = current_role.get("org_classification", "")
+        if title or district:
+            role_str = f"**{title}**" if title else ""
+            if district:
+                role_str += f", District {district}"
+            if org:
+                role_str += f" ({org})"
+            parts.append(role_str)
+
+    # Party
+    party = item.get("party", "")
+    if party:
+        parts.append(f"**Party:** {party}")
+
+    # Contact info
+    email = item.get("email", "")
+    if email:
+        parts.append(f"\n## Contact Information\n**Email:** {email}")
+
+    # External links
+    links = item.get("links", [])
+    if links:
+        parts.append("\n## External Links")
+        for link in links:
+            url = link.get("url", "")
+            note = link.get("note", "Website")
+            if url:
+                parts.append(f"- [{note}]({url})")
+
+    # Offices
+    offices = item.get("offices", [])
+    if offices:
+        parts.append("\n## Offices")
+        for office in offices:
+            office_name = office.get("name", "Office")
+            address = office.get("address", "")
+            phone = office.get("voice", "")
+            if address or phone:
+                parts.append(f"**{office_name}**")
+                if address:
+                    parts.append(f"  Address: {address}")
+                if phone:
+                    parts.append(f"  Phone: {phone}")
+
+    return "\n".join(parts)
+
+
+def _build_openstates_metadata(item: dict) -> DocumentMetadata:
+    """Build metadata from cached OpenStates data."""
+    current_role = item.get("current_role", {})
+
+    return DocumentMetadata(
+        document_id=f"legislator-{item.get('id', '')}",
+        document_type="legislator",
+        source="openstates-cache",
+        title=item.get("name", ""),
+        jurisdiction=item.get("jurisdiction", {}).get("name", ""),
+        legislator_id=item.get("id", ""),
+        extra={
+            "party": item.get("party", ""),
+            "chamber": current_role.get("org_classification", ""),
+            "district": current_role.get("district", ""),
+            "email": item.get("email", ""),
+            "image_url": item.get("image", ""),
+            "title": current_role.get("title", ""),
+        }
+    )
+
+
 def _combine_content(webflow_doc: DocumentSource, openstates_doc: DocumentSource) -> str:
     """
     Combine content from Webflow and OpenStates sources.
@@ -259,6 +416,7 @@ def _merge_metadata(
 async def sync_legislators(
     limit: int = 0,
     skip_openstates: bool = False,
+    use_cache: bool = False,
     rate_limit: float = 0.5,
     dry_run: bool = False,
     max_retries: int = 3,
@@ -269,6 +427,7 @@ async def sync_legislators(
     Args:
         limit: Maximum legislators to process (0 = unlimited)
         skip_openstates: Skip OpenStates enrichment
+        use_cache: Use cached OpenStates data instead of API
         rate_limit: Seconds between OpenStates API calls
         dry_run: If True, don't actually ingest
         max_retries: Maximum retries for rate-limited OpenStates requests
@@ -299,6 +458,19 @@ async def sync_legislators(
     if skip_openstates:
         print("\n[2/3] Skipping OpenStates enrichment (--skip-openstates)")
         final_docs = webflow_docs
+    elif use_cache:
+        cache_file = Path(__file__).parent / "legislators_openstates.json"
+        if cache_file.exists():
+            print(f"\n[2/3] Enriching with cached OpenStates data...")
+            final_docs = enrich_with_cached_openstates(webflow_docs, cache_file)
+            print(f"      Enriched {len(final_docs)} legislators from cache")
+        else:
+            print(f"\n[2/3] Cache file not found: {cache_file}")
+            print("      Falling back to API enrichment...")
+            final_docs = await enrich_with_openstates(
+                webflow_docs, openstates, rate_limit=rate_limit, max_retries=max_retries
+            )
+            print(f"      Enriched {len(final_docs)} legislators")
     else:
         print(f"\n[2/3] Enriching with OpenStates data (rate limit: {rate_limit}s, max retries: {max_retries})...")
         final_docs = await enrich_with_openstates(
@@ -371,6 +543,11 @@ async def main():
         help="Skip OpenStates enrichment (Webflow only)",
     )
     parser.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="Use cached OpenStates data (from legislators_openstates.json) instead of API",
+    )
+    parser.add_argument(
         "--rate-limit",
         type=float,
         default=0.5,
@@ -412,6 +589,7 @@ async def main():
         result = await sync_legislators(
             limit=args.limit,
             skip_openstates=args.skip_openstates,
+            use_cache=args.use_cache,
             rate_limit=args.rate_limit,
             dry_run=args.dry_run,
             max_retries=10 if args.overnight else 3,
