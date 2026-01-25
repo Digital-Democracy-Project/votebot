@@ -56,3 +56,9 @@ Thumbs.db
 # Project specific
 *.pdf
 data/
+
+# Test results and data caches
+scripts/*_test_results.json
+scripts/*_webflow.json
+scripts/*_openstates.json
+scripts/explore_*.py
