@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     webflow_api_key: SecretStr = Field(default=SecretStr(""))
     webflow_site_id: str = ""
     webflow_bills_collection_id: str = ""
+    webflow_jurisdiction_collection_id: str = ""
+    webflow_legislators_collection_id: str = ""
+    webflow_categories_collection_id: str = ""
+    webflow_organizations_collection_id: str = ""
 
     # AWS (for production deployment)
     aws_region: str = "us-east-1"
