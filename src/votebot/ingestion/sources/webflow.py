@@ -49,7 +49,7 @@ class WebflowSource:
     async def fetch(
         self,
         collection_id: str | None = None,
-        limit: int = 100,
+        limit: int = 0,
         include_pdfs: bool = True,
         **kwargs,
     ) -> AsyncIterator[DocumentSource]:
@@ -58,7 +58,7 @@ class WebflowSource:
 
         Args:
             collection_id: Optional collection ID (defaults to bills collection)
-            limit: Maximum number of items to fetch
+            limit: Maximum number of items to fetch (0 = unlimited)
             include_pdfs: Whether to download and process gov-url PDFs
 
         Yields:
@@ -79,28 +79,64 @@ class WebflowSource:
             logger.info(
                 "Fetching from Webflow collection",
                 collection_id=coll_id,
-                limit=limit,
+                limit=limit if limit > 0 else "unlimited",
             )
 
-            try:
-                response = await client.get(
-                    f"{self.BASE_URL}/collections/{coll_id}/items",
-                    headers=headers,
-                    params={"limit": min(limit, 100)},
-                )
-                response.raise_for_status()
-                items = response.json().get("items", [])
-            except Exception as e:
-                logger.error(
-                    "Failed to fetch Webflow collection items",
-                    collection_id=coll_id,
-                    error=str(e),
-                )
-                return
+            # Pagination variables
+            offset = 0
+            page_size = 100  # Webflow API max per request
+            total_fetched = 0
+            all_items = []
 
-            logger.info(f"Found {len(items)} items in collection")
+            # Fetch all pages
+            while True:
+                try:
+                    params = {"limit": page_size, "offset": offset}
+                    response = await client.get(
+                        f"{self.BASE_URL}/collections/{coll_id}/items",
+                        headers=headers,
+                        params=params,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    items = data.get("items", [])
+                    pagination = data.get("pagination", {})
 
-            for item in items:
+                    if not items:
+                        break
+
+                    all_items.extend(items)
+                    total_fetched += len(items)
+
+                    logger.info(
+                        f"Fetched page {offset // page_size + 1}: {len(items)} items "
+                        f"(total: {total_fetched})"
+                    )
+
+                    # Check if we've hit the limit
+                    if limit > 0 and total_fetched >= limit:
+                        all_items = all_items[:limit]
+                        break
+
+                    # Check if there are more pages
+                    total_in_collection = pagination.get("total", 0)
+                    if total_fetched >= total_in_collection or len(items) < page_size:
+                        break
+
+                    offset += page_size
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to fetch Webflow collection items",
+                        collection_id=coll_id,
+                        offset=offset,
+                        error=str(e),
+                    )
+                    break
+
+            logger.info(f"Total items fetched: {len(all_items)}")
+
+            for item in all_items:
                 try:
                     async for doc in self._process_bill_item(item, include_pdfs):
                         yield doc

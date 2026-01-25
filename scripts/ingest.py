@@ -216,7 +216,7 @@ async def main() -> None:
     # Webflow CMS subcommand
     webflow_parser = subparsers.add_parser("webflow", help="Ingest from Webflow CMS")
     webflow_parser.add_argument(
-        "--limit", type=int, default=100, help="Maximum items to fetch (default: 100)"
+        "--limit", type=int, default=0, help="Maximum items to fetch (default: 0 = unlimited)"
     )
     webflow_parser.add_argument(
         "--no-pdfs", dest="include_pdfs", action="store_false",
@@ -238,7 +238,7 @@ async def main() -> None:
     # All sources subcommand
     all_parser = subparsers.add_parser("all", help="Ingest from all configured sources")
     all_parser.add_argument(
-        "--webflow-limit", type=int, default=100, help="Max Webflow items (default: 100)"
+        "--webflow-limit", type=int, default=0, help="Max Webflow items (default: 0 = unlimited)"
     )
     all_parser.add_argument(
         "--no-pdfs", dest="include_pdfs", action="store_false",
