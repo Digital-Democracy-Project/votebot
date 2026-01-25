@@ -14,6 +14,7 @@ from votebot.api.schemas.chat import (
     Citation,
     ResponseMetadata,
     StreamChunk,
+    WebCitation,
 )
 from votebot.config import Settings, get_settings
 from votebot.core.agent import VoteBotAgent
@@ -83,6 +84,16 @@ async def chat(
         # Calculate latency
         latency_ms = int((time.perf_counter() - start_time) * 1000)
 
+        # Convert web citations if present
+        web_citations = []
+        if result.web_citations:
+            for wc in result.web_citations:
+                web_citations.append(WebCitation(
+                    url=wc.url,
+                    title=wc.title,
+                    snippet=wc.snippet,
+                ))
+
         # Build response
         response = ChatResponse(
             response=result.response,
@@ -90,6 +101,8 @@ async def chat(
             confidence=result.confidence,
             requires_human=result.requires_human,
             suppressed=False,
+            web_search_used=result.web_search_used,
+            web_citations=web_citations,
             metadata=ResponseMetadata(
                 model=settings.openai_model,
                 tokens_used=result.tokens_used,

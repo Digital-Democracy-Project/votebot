@@ -133,6 +133,14 @@ class Citation(BaseModel):
     )
 
 
+class WebCitation(BaseModel):
+    """Citation from web search results."""
+
+    url: str = Field(..., description="URL of the web source")
+    title: str = Field(..., description="Title of the web page")
+    snippet: str | None = Field(None, description="Relevant snippet from the page")
+
+
 class ResponseMetadata(BaseModel):
     """Metadata about the response generation."""
 
@@ -176,6 +184,14 @@ class ChatResponse(BaseModel):
     suppressed: bool = Field(
         default=False,
         description="Whether the response was suppressed (human_active=true)",
+    )
+    web_search_used: bool = Field(
+        default=False,
+        description="Whether web search was used to augment the response",
+    )
+    web_citations: list[WebCitation] = Field(
+        default_factory=list,
+        description="Citations from web search results",
     )
     metadata: ResponseMetadata | None = Field(
         None,

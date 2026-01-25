@@ -238,6 +238,7 @@ class LLMService:
         temperature: float | None = None,
         rag_confidence: float = 1.0,
         previous_response_id: str | None = None,
+        page_context_type: str | None = None,
     ) -> LLMResponse:
         """
         Generate a completion, falling back to web search if RAG confidence is low.
@@ -249,21 +250,29 @@ class LLMService:
             temperature: Override default temperature
             rag_confidence: Confidence score from RAG retrieval (0-1)
             previous_response_id: ID of previous response for stateful conversation
+            page_context_type: Type of page context ('bill', 'legislator', 'general')
 
         Returns:
             LLMResponse with the generated content
         """
+        # Use higher threshold for legislator queries (triggers web search more easily)
+        if page_context_type == "legislator":
+            threshold = self.settings.web_search_legislator_confidence_threshold
+        else:
+            threshold = self.settings.web_search_confidence_threshold
+
         # Determine if we should enable web search
         enable_web_search = (
             self.settings.web_search_on_low_confidence and
-            rag_confidence < self.settings.web_search_confidence_threshold
+            rag_confidence < threshold
         )
 
         if enable_web_search:
             logger.info(
                 "Enabling web search due to low RAG confidence",
                 rag_confidence=rag_confidence,
-                threshold=self.settings.web_search_confidence_threshold,
+                threshold=threshold,
+                page_context_type=page_context_type,
             )
 
         return await self.complete(

@@ -133,10 +133,12 @@ class VoteBotAgent:
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
 
         # Step 7: Generate response (with web search fallback if RAG confidence is low)
+        # Legislator queries use a higher threshold to trigger web search more easily
         llm_response = await self.llm.complete_with_fallback(
             messages=messages,
             system_prompt=system_prompt,
             rag_confidence=rag_confidence,
+            page_context_type=page_context.type,
         )
 
         # Step 8: Extract citations from RAG
