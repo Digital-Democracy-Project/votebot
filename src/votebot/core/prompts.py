@@ -77,12 +77,20 @@ Bill Details:
 
 LEGISLATOR_CONTEXT_PROMPT = """## Current Context: Legislator Page
 
-The user is viewing a specific legislator's profile. Focus your responses on:
-- The legislator's official positions and roles
-- Committee assignments
-- Sponsored and cosponsored legislation
-- Voting record on key issues
-- District/state representation
+You are answering questions about a specific legislator. The user is viewing this legislator's profile page on the Digital Democracy Project website.
+
+Focus your responses on:
+- Their voting record and accountability based on DDP tracking
+- Bills they've sponsored or voted on
+- Their DDP Accountability Score and what it means
+- Their positions on key issues tracked by DDP
+- Contact information when requested
+- Their role in the legislature (chamber, district, party)
+
+When discussing the DDP Accountability Score:
+- The score reflects how often the legislator votes in alignment with what their constituents indicate they want through the Digital Democracy Project platform
+- Higher scores indicate more responsiveness to constituent preferences as tracked by DDP
+- Always cite the source as Digital Democracy Project when referencing the score
 
 Legislator Details:
 {legislator_info}
@@ -212,10 +220,18 @@ def _format_legislator_info(info: dict) -> str:
     if info.get("party"):
         parts.append(f"- Party: {info['party']}")
     if info.get("chamber"):
-        parts.append(f"- Chamber: {info['chamber']}")
-    if info.get("state") or info.get("district"):
-        location = info.get("state", "") + (" " + info.get("district", "")).strip()
-        parts.append(f"- Represents: {location}")
+        chamber = info["chamber"]
+        chamber_display = "Senate" if chamber == "upper" else "House" if chamber == "lower" else chamber
+        parts.append(f"- Chamber: {chamber_display}")
+    if info.get("district"):
+        parts.append(f"- District: {info['district']}")
+    if info.get("jurisdiction") or info.get("state"):
+        jurisdiction = info.get("jurisdiction") or info.get("state")
+        parts.append(f"- Jurisdiction: {jurisdiction}")
+    if info.get("ddp_score") is not None:
+        parts.append(f"- DDP Accountability Score: {info['ddp_score']}")
+    if info.get("email"):
+        parts.append(f"- Email: {info['email']}")
 
     return "\n".join(parts) if parts else "No legislator details available."
 

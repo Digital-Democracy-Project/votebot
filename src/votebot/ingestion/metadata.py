@@ -122,11 +122,53 @@ class MetadataExtractor:
             source: Source name
 
         Returns:
-            DocumentMetadata object
+            DocumentMetadata object with fields:
+            - document_id: "legislator-{openstates_id}"
+            - document_type: "legislator"
+            - source: Source name (openstates, webflow-cms, webflow+openstates)
+            - title: Legislator name
+            - jurisdiction: State code (e.g., "FL", "WA")
+            - legislator_id: OpenStates ID (critical for filtering)
+            - extra: Additional fields for enriched context
         """
         legislator_id = raw_data.get("id") or raw_data.get("bioguide_id", "")
         name = raw_data.get("name") or raw_data.get("full_name", "Unknown")
         state = raw_data.get("state", "")
+
+        # Normalize chamber to standard values
+        chamber = raw_data.get("chamber", "")
+        if chamber:
+            chamber_lower = chamber.lower()
+            if chamber_lower in ("upper", "senate"):
+                chamber = "upper"
+            elif chamber_lower in ("lower", "house", "assembly"):
+                chamber = "lower"
+
+        # Build extra fields dict
+        extra = {
+            "party": raw_data.get("party"),
+            "chamber": chamber,
+            "state": state,
+            "district": raw_data.get("district"),
+        }
+
+        # Add optional enriched fields if present
+        if raw_data.get("ddp_score") is not None:
+            extra["ddp_score"] = raw_data.get("ddp_score")
+
+        if raw_data.get("webflow_id"):
+            extra["webflow_id"] = raw_data.get("webflow_id")
+
+        if raw_data.get("email"):
+            extra["email"] = raw_data.get("email")
+
+        if raw_data.get("image"):
+            extra["image_url"] = raw_data.get("image")
+
+        if raw_data.get("current_role"):
+            role = raw_data["current_role"]
+            if role.get("title"):
+                extra["title"] = role["title"]
 
         return DocumentMetadata(
             document_id=f"legislator-{legislator_id}",
@@ -135,12 +177,7 @@ class MetadataExtractor:
             title=name,
             jurisdiction=state or "US",
             legislator_id=legislator_id,
-            extra={
-                "party": raw_data.get("party"),
-                "chamber": raw_data.get("chamber"),
-                "state": state,
-                "district": raw_data.get("district"),
-            },
+            extra=extra,
         )
 
     def extract_web_content_metadata(

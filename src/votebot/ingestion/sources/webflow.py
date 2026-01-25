@@ -44,7 +44,10 @@ class WebflowSource:
         self.api_key = self.settings.webflow_api_key.get_secret_value()
         self.site_id = self.settings.webflow_site_id
         self.bills_collection_id = self.settings.webflow_bills_collection_id
+        self.legislators_collection_id = self.settings.webflow_legislators_collection_id
+        self.jurisdiction_collection_id = self.settings.webflow_jurisdiction_collection_id
         self.pdf_source = PDFSource(self.settings, self.metadata_extractor)
+        self._jurisdiction_cache: dict[str, str] = {}
 
     async def fetch(
         self,
@@ -169,6 +172,328 @@ class WebflowSource:
             include_pdfs=include_pdfs,
         ):
             yield doc
+
+    async def fetch_legislators(
+        self,
+        limit: int = 0,
+    ) -> AsyncIterator[DocumentSource]:
+        """
+        Fetch legislators from Webflow CMS.
+
+        Uses WEBFLOW_LEGISLATORS_COLLECTION_ID to fetch DDP-curated legislators
+        with their scores and scorecards. Resolves jurisdiction reference IDs
+        to state codes.
+
+        Args:
+            limit: Maximum number of legislators to fetch (0 = unlimited)
+
+        Yields:
+            DocumentSource objects for each legislator
+        """
+        if not self.legislators_collection_id:
+            logger.error("No legislators collection ID configured")
+            return
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "accept": "application/json",
+            }
+
+            # Build jurisdiction mapping first
+            await self._build_jurisdiction_mapping(client, headers)
+
+            logger.info(
+                "Fetching legislators from Webflow",
+                collection_id=self.legislators_collection_id,
+                limit=limit if limit > 0 else "unlimited",
+            )
+
+            # Pagination variables
+            offset = 0
+            page_size = 100
+            total_fetched = 0
+            all_items = []
+
+            # Fetch all pages
+            while True:
+                try:
+                    params = {"limit": page_size, "offset": offset}
+                    response = await client.get(
+                        f"{self.BASE_URL}/collections/{self.legislators_collection_id}/items",
+                        headers=headers,
+                        params=params,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    items = data.get("items", [])
+                    pagination = data.get("pagination", {})
+
+                    if not items:
+                        break
+
+                    all_items.extend(items)
+                    total_fetched += len(items)
+
+                    logger.info(
+                        f"Fetched legislators page {offset // page_size + 1}: "
+                        f"{len(items)} items (total: {total_fetched})"
+                    )
+
+                    # Check if we've hit the limit
+                    if limit > 0 and total_fetched >= limit:
+                        all_items = all_items[:limit]
+                        break
+
+                    # Check if there are more pages
+                    total_in_collection = pagination.get("total", 0)
+                    if total_fetched >= total_in_collection or len(items) < page_size:
+                        break
+
+                    offset += page_size
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to fetch legislators",
+                        collection_id=self.legislators_collection_id,
+                        offset=offset,
+                        error=str(e),
+                    )
+                    break
+
+            logger.info(f"Total legislators fetched: {len(all_items)}")
+
+            for item in all_items:
+                try:
+                    doc = self._process_legislator_item(item)
+                    if doc:
+                        yield doc
+                except Exception as e:
+                    logger.warning(
+                        "Failed to process legislator item",
+                        item_id=item.get("id"),
+                        error=str(e),
+                    )
+                    continue
+
+    async def _build_jurisdiction_mapping(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict,
+    ) -> None:
+        """
+        Build a mapping from jurisdiction reference IDs to state codes.
+
+        Fetches the jurisdictions collection and creates a lookup table.
+        """
+        if self._jurisdiction_cache:
+            return  # Already cached
+
+        if not self.jurisdiction_collection_id:
+            logger.warning("No jurisdiction collection ID configured")
+            return
+
+        try:
+            offset = 0
+            page_size = 100
+
+            while True:
+                params = {"limit": page_size, "offset": offset}
+                response = await client.get(
+                    f"{self.BASE_URL}/collections/{self.jurisdiction_collection_id}/items",
+                    headers=headers,
+                    params=params,
+                )
+                response.raise_for_status()
+                data = response.json()
+                items = data.get("items", [])
+
+                if not items:
+                    break
+
+                for item in items:
+                    item_id = item.get("id", "")
+                    fields = item.get("fieldData", {})
+                    # Try common field names for state code
+                    state_code = (
+                        fields.get("state-code")
+                        or fields.get("code")
+                        or fields.get("abbreviation")
+                        or fields.get("name", "")[:2].upper()
+                    )
+                    if item_id and state_code:
+                        self._jurisdiction_cache[item_id] = state_code
+
+                pagination = data.get("pagination", {})
+                total = pagination.get("total", 0)
+                if len(self._jurisdiction_cache) >= total or len(items) < page_size:
+                    break
+
+                offset += page_size
+
+            logger.info(
+                f"Built jurisdiction mapping with {len(self._jurisdiction_cache)} entries"
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Failed to build jurisdiction mapping",
+                error=str(e),
+            )
+
+    def _process_legislator_item(self, item: dict) -> DocumentSource | None:
+        """
+        Process a single legislator item from the CMS.
+
+        Args:
+            item: Webflow CMS item data
+
+        Returns:
+            DocumentSource object or None if processing fails
+        """
+        fields = item.get("fieldData", {})
+        item_id = item.get("id", "")
+        name = fields.get("name", "Unknown Legislator")
+
+        # Get OpenStates ID (critical for linking)
+        openstates_id = fields.get("openstatesid", "")
+        if not openstates_id:
+            logger.debug(f"Legislator {name} has no openstatesid, skipping")
+            return None
+
+        logger.debug(f"Processing legislator: {name}")
+
+        # Resolve jurisdiction reference to state code
+        jurisdiction_ref = fields.get("jurisdiction")
+        state_code = self._resolve_jurisdiction(jurisdiction_ref)
+
+        # Extract content from post-body (DDP scorecards)
+        content = self._extract_legislator_content(fields)
+
+        if not content:
+            logger.debug(f"No content extracted for legislator {name}")
+            return None
+
+        # Create metadata
+        metadata = DocumentMetadata(
+            document_id=f"legislator-{openstates_id}",
+            document_type="legislator",
+            source="webflow-cms",
+            title=name,
+            jurisdiction=state_code,
+            legislator_id=openstates_id,
+            extra={
+                "webflow_id": item_id,
+                "party": fields.get("party-2", fields.get("party", "")),
+                "chamber": fields.get("chamber", ""),
+                "district": fields.get("district", ""),
+                "ddp_score": fields.get("score", ""),
+                "email": fields.get("email", ""),
+                "image_url": fields.get("image", {}).get("url", "") if isinstance(fields.get("image"), dict) else fields.get("image", ""),
+            },
+        )
+
+        return DocumentSource(
+            content=content,
+            metadata=metadata,
+        )
+
+    def _resolve_jurisdiction(self, jurisdiction_ref: str | list | None) -> str:
+        """
+        Resolve a jurisdiction reference ID to a state code.
+
+        Args:
+            jurisdiction_ref: Reference ID, list of IDs, or state code string
+
+        Returns:
+            State code (e.g., "FL", "WA") or "US" if not found
+        """
+        if not jurisdiction_ref:
+            return "US"
+
+        # Handle list of references
+        if isinstance(jurisdiction_ref, list):
+            if jurisdiction_ref:
+                jurisdiction_ref = jurisdiction_ref[0]
+            else:
+                return "US"
+
+        # Already a 2-letter state code
+        if isinstance(jurisdiction_ref, str) and len(jurisdiction_ref) == 2:
+            return jurisdiction_ref.upper()
+
+        # Look up in cache
+        if isinstance(jurisdiction_ref, str):
+            return self._jurisdiction_cache.get(jurisdiction_ref, "US")
+
+        return "US"
+
+    def _extract_legislator_content(self, fields: dict) -> str:
+        """
+        Extract text content from legislator CMS fields.
+
+        Args:
+            fields: CMS field data
+
+        Returns:
+            Formatted text content for embedding
+        """
+        parts = []
+
+        # Name/Title
+        name = fields.get("name", "")
+        if name:
+            parts.append(f"# {name}")
+
+        # Basic info section
+        info_parts = []
+        party = fields.get("party-2", fields.get("party", ""))
+        if party:
+            info_parts.append(f"**Party:** {party}")
+
+        chamber = fields.get("chamber", "")
+        if chamber:
+            info_parts.append(f"**Chamber:** {chamber}")
+
+        district = fields.get("district", "")
+        if district:
+            info_parts.append(f"**District:** {district}")
+
+        score = fields.get("score")
+        if score is not None and score != "":
+            info_parts.append(f"**DDP Accountability Score:** {score}")
+
+        if info_parts:
+            parts.append("\n".join(info_parts))
+
+        # DDP Scorecard content (from post-body)
+        post_body = fields.get("post-body", "")
+        if post_body:
+            scorecard_text = self._html_to_text(post_body)
+            if scorecard_text:
+                parts.append(f"## DDP Scorecard and Voting Record\n{scorecard_text}")
+
+        # Description/bio
+        description = fields.get("description", "")
+        if description:
+            desc_text = self._html_to_text(description) if "<" in description else description
+            if desc_text:
+                parts.append(f"## About\n{desc_text}")
+
+        # Contact info
+        contact_parts = []
+        email = fields.get("email", "")
+        if email:
+            contact_parts.append(f"- Email: {email}")
+
+        phone = fields.get("phone", "")
+        if phone:
+            contact_parts.append(f"- Phone: {phone}")
+
+        if contact_parts:
+            parts.append("## Contact Information\n" + "\n".join(contact_parts))
+
+        return "\n\n".join(parts) if parts else ""
 
     async def _process_bill_item(
         self,
