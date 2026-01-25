@@ -31,10 +31,16 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: SecretStr = Field(default=SecretStr(""))
-    openai_model: str = "gpt-4-turbo-preview"
+    openai_model: str = "gpt-4.1"
     openai_embedding_model: str = "text-embedding-3-large"
     openai_max_tokens: int = 4096
     openai_temperature: float = 0.7
+
+    # Web Search (Responses API)
+    web_search_enabled: bool = True
+    web_search_context_size: Literal["low", "medium", "high"] = "medium"
+    web_search_on_low_confidence: bool = True
+    web_search_confidence_threshold: float = 0.5
 
     # Pinecone
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))

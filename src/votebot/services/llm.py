@@ -1,7 +1,7 @@
-"""OpenAI LLM integration service."""
+"""OpenAI LLM integration service using the Responses API."""
 
-from dataclasses import dataclass
-from typing import AsyncIterator
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator
 
 import structlog
 from openai import AsyncOpenAI
@@ -13,6 +13,15 @@ logger = structlog.get_logger()
 
 
 @dataclass
+class WebSearchCitation:
+    """A citation from web search results."""
+
+    url: str
+    title: str
+    snippet: str | None = None
+
+
+@dataclass
 class LLMResponse:
     """Response from the LLM."""
 
@@ -20,6 +29,9 @@ class LLMResponse:
     tokens_used: int
     model: str
     finish_reason: str | None = None
+    web_search_used: bool = False
+    web_citations: list[WebSearchCitation] = field(default_factory=list)
+    response_id: str | None = None  # For stateful conversations
 
 
 @dataclass
@@ -31,7 +43,14 @@ class StreamChunk:
 
 
 class LLMService:
-    """Service for interacting with OpenAI's LLM API."""
+    """
+    Service for interacting with OpenAI's Responses API.
+
+    Uses the Responses API for:
+    - Stateful conversations
+    - Built-in web search tool
+    - Better tool calling with GPT-4.1
+    """
 
     def __init__(self, settings: Settings | None = None):
         """
@@ -48,6 +67,57 @@ class LLMService:
         self.max_tokens = self.settings.openai_max_tokens
         self.temperature = self.settings.openai_temperature
 
+    def _build_tools(self, enable_web_search: bool = False) -> list[dict] | None:
+        """Build the tools array for the Responses API."""
+        if not enable_web_search:
+            return None
+
+        tools = []
+
+        if self.settings.web_search_enabled and enable_web_search:
+            web_search_tool = {
+                "type": "web_search_preview",
+                "search_context_size": self.settings.web_search_context_size,
+            }
+            tools.append(web_search_tool)
+
+        return tools if tools else None
+
+    def _extract_web_citations(self, response: Any) -> list[WebSearchCitation]:
+        """Extract web citations from the response output."""
+        citations = []
+
+        try:
+            # The Responses API includes annotations with URL citations
+            if hasattr(response, 'output') and response.output:
+                for item in response.output:
+                    # Check for message content with annotations
+                    if hasattr(item, 'content') and item.content:
+                        for content_block in item.content:
+                            if hasattr(content_block, 'annotations'):
+                                for annotation in content_block.annotations:
+                                    if hasattr(annotation, 'url'):
+                                        citations.append(WebSearchCitation(
+                                            url=annotation.url,
+                                            title=getattr(annotation, 'title', ''),
+                                            snippet=getattr(annotation, 'text', None),
+                                        ))
+        except Exception as e:
+            logger.debug(f"Error extracting web citations: {e}")
+
+        return citations
+
+    def _check_web_search_used(self, response: Any) -> bool:
+        """Check if web search was used in the response."""
+        try:
+            if hasattr(response, 'output') and response.output:
+                for item in response.output:
+                    if hasattr(item, 'type') and item.type == 'web_search_call':
+                        return True
+        except Exception as e:
+            logger.debug(f"Error checking web search usage: {e}")
+        return False
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -58,79 +128,151 @@ class LLMService:
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
-        functions: list[dict] | None = None,
+        enable_web_search: bool = False,
+        previous_response_id: str | None = None,
     ) -> LLMResponse:
         """
-        Generate a completion using the LLM.
+        Generate a completion using the Responses API.
 
         Args:
             messages: List of message dicts with 'role' and 'content'
-            system_prompt: Optional system prompt to prepend
+            system_prompt: Optional system prompt (instructions)
             max_tokens: Override default max tokens
             temperature: Override default temperature
-            functions: Optional function definitions for function calling
+            enable_web_search: Whether to enable web search tool
+            previous_response_id: ID of previous response for stateful conversation
 
         Returns:
             LLMResponse with the generated content
         """
-        # Prepare messages
-        full_messages = []
-        if system_prompt:
-            full_messages.append({"role": "system", "content": system_prompt})
-        full_messages.extend(messages)
+        # Build the input from messages
+        # For Responses API, we combine messages into the input
+        if len(messages) == 1:
+            input_text = messages[0].get("content", "")
+        else:
+            # Format multi-turn as conversation
+            input_parts = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "user":
+                    input_parts.append(f"User: {content}")
+                elif role == "assistant":
+                    input_parts.append(f"Assistant: {content}")
+            input_text = "\n\n".join(input_parts)
+
+        # Build tools
+        tools = self._build_tools(enable_web_search)
 
         # Build request parameters
-        params = {
+        params: dict[str, Any] = {
             "model": self.model,
-            "messages": full_messages,
-            "max_tokens": max_tokens or self.max_tokens,
-            "temperature": temperature or self.temperature,
+            "input": input_text,
         }
 
-        if functions:
-            params["tools"] = [{"type": "function", "function": f} for f in functions]
-            params["tool_choice"] = "auto"
+        if system_prompt:
+            params["instructions"] = system_prompt
+
+        if tools:
+            params["tools"] = tools
+
+        if previous_response_id:
+            params["previous_response_id"] = previous_response_id
+
+        if temperature is not None:
+            params["temperature"] = temperature
+        elif self.temperature:
+            params["temperature"] = self.temperature
+
+        if max_tokens:
+            params["max_output_tokens"] = max_tokens
 
         logger.debug(
-            "Calling OpenAI API",
+            "Calling OpenAI Responses API",
             model=self.model,
-            message_count=len(full_messages),
+            web_search_enabled=enable_web_search,
+            has_previous_response=previous_response_id is not None,
         )
 
         # Make the API call
-        response = await self.client.chat.completions.create(**params)
+        response = await self.client.responses.create(**params)
 
-        # Extract response data
-        choice = response.choices[0]
-        content = choice.message.content or ""
+        # Extract response content
+        content = response.output_text if hasattr(response, 'output_text') else ""
 
-        # Handle function calls
-        if choice.message.tool_calls:
-            # Return function call info as JSON string for now
-            import json
+        # Check if web search was used and extract citations
+        web_search_used = self._check_web_search_used(response)
+        web_citations = self._extract_web_citations(response) if web_search_used else []
 
-            tool_calls = [
-                {
-                    "name": tc.function.name,
-                    "arguments": json.loads(tc.function.arguments),
-                }
-                for tc in choice.message.tool_calls
-            ]
-            content = json.dumps(tool_calls)
+        # Get token usage
+        tokens_used = 0
+        if hasattr(response, 'usage') and response.usage:
+            tokens_used = getattr(response.usage, 'total_tokens', 0)
 
-        tokens_used = response.usage.total_tokens if response.usage else 0
+        # Get response ID for stateful conversations
+        response_id = getattr(response, 'id', None)
 
         logger.debug(
-            "OpenAI API response received",
+            "OpenAI Responses API response received",
             tokens_used=tokens_used,
-            finish_reason=choice.finish_reason,
+            web_search_used=web_search_used,
+            citations_count=len(web_citations),
+            response_id=response_id,
         )
 
         return LLMResponse(
             content=content,
             tokens_used=tokens_used,
-            model=response.model,
-            finish_reason=choice.finish_reason,
+            model=self.model,
+            finish_reason="completed",
+            web_search_used=web_search_used,
+            web_citations=web_citations,
+            response_id=response_id,
+        )
+
+    async def complete_with_fallback(
+        self,
+        messages: list[dict],
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        rag_confidence: float = 1.0,
+        previous_response_id: str | None = None,
+    ) -> LLMResponse:
+        """
+        Generate a completion, falling back to web search if RAG confidence is low.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            system_prompt: Optional system prompt
+            max_tokens: Override default max tokens
+            temperature: Override default temperature
+            rag_confidence: Confidence score from RAG retrieval (0-1)
+            previous_response_id: ID of previous response for stateful conversation
+
+        Returns:
+            LLMResponse with the generated content
+        """
+        # Determine if we should enable web search
+        enable_web_search = (
+            self.settings.web_search_on_low_confidence and
+            rag_confidence < self.settings.web_search_confidence_threshold
+        )
+
+        if enable_web_search:
+            logger.info(
+                "Enabling web search due to low RAG confidence",
+                rag_confidence=rag_confidence,
+                threshold=self.settings.web_search_confidence_threshold,
+            )
+
+        return await self.complete(
+            messages=messages,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            enable_web_search=enable_web_search,
+            previous_response_id=previous_response_id,
         )
 
     async def stream(
@@ -143,6 +285,9 @@ class LLMService:
         """
         Stream a completion from the LLM.
 
+        Note: The Responses API supports streaming via the 'stream' parameter.
+        Falls back to Chat Completions API for streaming if needed.
+
         Args:
             messages: List of message dicts with 'role' and 'content'
             system_prompt: Optional system prompt to prepend
@@ -152,19 +297,20 @@ class LLMService:
         Yields:
             StreamChunk objects with text fragments
         """
-        # Prepare messages
+        # For streaming, we use Chat Completions API as it has better streaming support
+        # The Responses API streaming is still evolving
         full_messages = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
         full_messages.extend(messages)
 
         logger.debug(
-            "Starting OpenAI stream",
+            "Starting OpenAI stream (Chat Completions)",
             model=self.model,
             message_count=len(full_messages),
         )
 
-        # Make the streaming API call
+        # Make the streaming API call using Chat Completions
         stream = await self.client.chat.completions.create(
             model=self.model,
             messages=full_messages,
@@ -193,10 +339,10 @@ class LLMService:
         """
         try:
             # Make a minimal API call to verify connectivity
-            response = await self.client.chat.completions.create(
+            response = await self.client.responses.create(
                 model=self.model,
-                messages=[{"role": "user", "content": "ping"}],
-                max_tokens=5,
+                input="ping",
+                max_output_tokens=16,  # Minimum allowed by the API
             )
             return True
         except Exception as e:

@@ -15,7 +15,7 @@ from votebot.api.schemas.chat import (
 from votebot.config import Settings, get_settings
 from votebot.core.prompts import build_system_prompt, format_retrieved_chunks
 from votebot.core.retrieval import RetrievalService
-from votebot.services.llm import LLMService
+from votebot.services.llm import LLMService, WebSearchCitation
 
 logger = structlog.get_logger()
 
@@ -31,6 +31,9 @@ class AgentResult:
     tokens_used: int
     retrieval_count: int
     cached: bool = False
+    web_search_used: bool = False
+    web_citations: list[WebSearchCitation] | None = None
+    response_id: str | None = None  # For stateful conversations
 
 
 @dataclass
@@ -126,26 +129,31 @@ class VoteBotAgent:
         # Step 5: Build messages
         messages = self._build_messages(message, conversation_history)
 
-        # Step 6: Generate response
-        llm_response = await self.llm.complete(
+        # Step 6: Calculate pre-LLM confidence based on retrieval quality
+        rag_confidence = self._calculate_rag_confidence(retrieval_result)
+
+        # Step 7: Generate response (with web search fallback if RAG confidence is low)
+        llm_response = await self.llm.complete_with_fallback(
             messages=messages,
             system_prompt=system_prompt,
+            rag_confidence=rag_confidence,
         )
 
-        # Step 7: Extract citations
+        # Step 8: Extract citations from RAG
         citations = self._extract_citations(
             response=llm_response.content,
             retrieved_chunks=retrieval_result.chunks,
         )
 
-        # Step 8: Calculate confidence
+        # Step 9: Calculate final confidence
         confidence = self._calculate_confidence(
             response=llm_response.content,
             retrieval_count=retrieval_result.total_retrieved,
             citations=citations,
+            web_search_used=llm_response.web_search_used,
         )
 
-        # Step 9: Check for human handoff
+        # Step 10: Check for human handoff
         requires_human = self._check_human_handoff(
             message=message,
             response=llm_response.content,
@@ -158,6 +166,7 @@ class VoteBotAgent:
             tokens_used=llm_response.tokens_used,
             confidence=confidence,
             requires_human=requires_human,
+            web_search_used=llm_response.web_search_used,
         )
 
         return AgentResult(
@@ -168,6 +177,9 @@ class VoteBotAgent:
             tokens_used=llm_response.tokens_used,
             retrieval_count=retrieval_result.total_retrieved,
             cached=False,
+            web_search_used=llm_response.web_search_used,
+            web_citations=llm_response.web_citations if llm_response.web_search_used else None,
+            response_id=llm_response.response_id,
         )
 
     async def process_message_stream(
@@ -356,11 +368,54 @@ class VoteBotAgent:
 
         return unique_citations
 
+    def _calculate_rag_confidence(self, retrieval_result) -> float:
+        """
+        Calculate confidence score based on RAG retrieval quality.
+
+        This is used to determine whether to enable web search fallback.
+
+        Args:
+            retrieval_result: The retrieval result from the vector store
+
+        Returns:
+            Confidence score from 0.0 to 1.0
+        """
+        # Use actual chunk count (after threshold filtering) not raw retrieval count
+        usable_chunks = len(retrieval_result.chunks) if retrieval_result.chunks else 0
+
+        if usable_chunks == 0:
+            return 0.0
+
+        # Base confidence from having results
+        confidence = 0.3
+
+        # Boost based on number of relevant chunks (using actual usable count)
+        if usable_chunks >= 3:
+            confidence += 0.2
+        elif usable_chunks >= 1:
+            confidence += 0.1
+
+        # Boost based on relevance scores of top chunks
+        if retrieval_result.chunks:
+            top_scores = [c.score for c in retrieval_result.chunks[:3] if c.score]
+            if top_scores:
+                avg_score = sum(top_scores) / len(top_scores)
+                # Scores above 0.7 are highly relevant
+                if avg_score > 0.7:
+                    confidence += 0.4
+                elif avg_score > 0.5:
+                    confidence += 0.2
+                elif avg_score > 0.3:
+                    confidence += 0.1
+
+        return min(1.0, confidence)
+
     def _calculate_confidence(
         self,
         response: str,
         retrieval_count: int,
         citations: list[Citation],
+        web_search_used: bool = False,
     ) -> float:
         """
         Calculate confidence score for the response.
@@ -369,6 +424,7 @@ class VoteBotAgent:
             response: The LLM response
             retrieval_count: Number of documents retrieved
             citations: Extracted citations
+            web_search_used: Whether web search was used
 
         Returns:
             Confidence score from 0.0 to 1.0
@@ -387,6 +443,10 @@ class VoteBotAgent:
         if citations:
             avg_relevance = sum(c.relevance_score or 0 for c in citations) / len(citations)
             confidence += avg_relevance * 0.1
+
+        # Boost for web search being used (indicates comprehensive answer)
+        if web_search_used:
+            confidence += 0.1
 
         # Penalty for uncertainty phrases
         uncertainty_phrases = [
