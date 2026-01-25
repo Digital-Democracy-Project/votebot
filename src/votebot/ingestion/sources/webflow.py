@@ -50,6 +50,7 @@ class WebflowSource:
         self.pdf_source = PDFSource(self.settings, self.metadata_extractor)
         self._jurisdiction_cache: dict[str, str] = {}
         self._bill_cache: dict[str, dict] = {}  # bill_id -> {name, identifier}
+        self._organization_cache: dict[str, dict] = {}  # org_id -> {name, type}
 
     async def fetch(
         self,
@@ -80,6 +81,10 @@ class WebflowSource:
                 "Authorization": f"Bearer {self.api_key}",
                 "accept": "application/json",
             }
+
+            # Build organization mapping for bill enrichment (if fetching bills)
+            if coll_id == self.bills_collection_id:
+                await self._build_organization_mapping(client, headers)
 
             logger.info(
                 "Fetching from Webflow collection",
@@ -446,6 +451,101 @@ class WebflowSource:
                 "Failed to build bill mapping",
                 error=str(e),
             )
+
+    async def _build_organization_mapping(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict,
+    ) -> None:
+        """
+        Build a mapping from organization IDs to organization names.
+
+        Fetches the organizations collection and creates a lookup table for resolving
+        organization references in bills.
+        """
+        if self._organization_cache:
+            return  # Already cached
+
+        if not self.organizations_collection_id:
+            logger.warning("No organizations collection ID configured")
+            return
+
+        logger.info("Building organization mapping for bill references...")
+
+        try:
+            offset = 0
+            page_size = 100
+
+            while True:
+                params = {"limit": page_size, "offset": offset}
+                response = await client.get(
+                    f"{self.BASE_URL}/collections/{self.organizations_collection_id}/items",
+                    headers=headers,
+                    params=params,
+                )
+                response.raise_for_status()
+                data = response.json()
+                items = data.get("items", [])
+
+                if not items:
+                    break
+
+                for item in items:
+                    item_id = item.get("id", "")
+                    fields = item.get("fieldData", {})
+                    name = fields.get("name", "")
+                    org_type = fields.get("type-2", "")
+
+                    if item_id and name:
+                        self._organization_cache[item_id] = {
+                            "name": name,
+                            "type": org_type,
+                        }
+
+                pagination = data.get("pagination", {})
+                total = pagination.get("total", 0)
+                if len(self._organization_cache) >= total or len(items) < page_size:
+                    break
+
+                offset += page_size
+
+            logger.info(
+                f"Built organization mapping with {len(self._organization_cache)} entries"
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Failed to build organization mapping",
+                error=str(e),
+            )
+
+    def _resolve_organization_references(self, org_refs: list | None) -> list[dict]:
+        """
+        Resolve organization reference IDs to organization information.
+
+        Args:
+            org_refs: List of organization reference IDs from Webflow
+
+        Returns:
+            List of dicts with organization name and type
+        """
+        if not org_refs:
+            return []
+
+        resolved = []
+        for ref in org_refs:
+            if isinstance(ref, str):
+                org_info = self._organization_cache.get(ref)
+                if org_info:
+                    resolved.append(org_info)
+                else:
+                    # Unknown org, include ID as fallback
+                    resolved.append({"name": f"Organization {ref[:8]}...", "type": ""})
+            elif isinstance(ref, dict):
+                # Already resolved
+                resolved.append(ref)
+
+        return resolved
 
     def _process_organization_item(self, item: dict) -> DocumentSource | None:
         """
@@ -868,10 +968,22 @@ class WebflowSource:
 
         logger.info(f"Processing bill: {name}")
 
-        # Extract CMS content
-        cms_content = self._extract_bill_content(fields)
+        # Resolve organization references for bill positions
+        supporting_orgs = self._resolve_organization_references(
+            fields.get("member-organizations", [])
+        )
+        opposing_orgs = self._resolve_organization_references(
+            fields.get("organizations-oppose", [])
+        )
 
-        # Create base metadata
+        # Extract CMS content with organization positions
+        cms_content = self._extract_bill_content(
+            fields,
+            supporting_orgs=supporting_orgs,
+            opposing_orgs=opposing_orgs,
+        )
+
+        # Create enhanced metadata with all fields
         metadata = DocumentMetadata(
             document_id=f"bill-webflow-{item_id}",
             document_type="bill",
@@ -882,11 +994,20 @@ class WebflowSource:
             url=fields.get("gov-url"),
             extra={
                 "webflow_id": item_id,
-                "description": fields.get("description", "")[:500],
-                "status": fields.get("status"),
-                "session": fields.get("bill-session"),
-                "bill_prefix": fields.get("bill-prefix"),
-                "bill_number": fields.get("bill-number"),
+                # Bill identification
+                "slug": fields.get("slug", ""),  # DDP citation URL
+                "session_code": fields.get("session-code", ""),
+                "bill_prefix": fields.get("bill-prefix", ""),
+                "bill_number": fields.get("bill-number", ""),
+                "status": fields.get("status", ""),
+                "session": fields.get("bill-session", ""),
+                # External links
+                "gov_url": fields.get("gov-url", ""),
+                "open_plural_url": fields.get("open-plural-url", ""),
+                "kialo_url": fields.get("kialo-url", ""),
+                # Organization positions
+                "supporting_orgs_count": len(supporting_orgs),
+                "opposing_orgs_count": len(opposing_orgs),
             },
         )
 
@@ -960,28 +1081,49 @@ class WebflowSource:
             )
             return None
 
-    def _extract_bill_content(self, fields: dict) -> str:
-        """Extract text content from bill CMS fields."""
+    def _extract_bill_content(
+        self,
+        fields: dict,
+        supporting_orgs: list[dict] | None = None,
+        opposing_orgs: list[dict] | None = None,
+    ) -> str:
+        """
+        Extract text content from bill CMS fields with organization positions.
+
+        Args:
+            fields: CMS field data
+            supporting_orgs: Resolved organizations that support this bill
+            opposing_orgs: Resolved organizations that oppose this bill
+
+        Returns:
+            Formatted text content for embedding
+        """
         parts = []
 
         # Name/Title
         if fields.get("name"):
             parts.append(f"# {fields['name']}")
 
-        # Description
-        if fields.get("description"):
-            parts.append(f"## Description\n{fields['description']}")
-
-        # Status and session info
+        # Bill identification info
         info_parts = []
-        if fields.get("status"):
-            info_parts.append(f"**Status:** {fields['status']}")
-        if fields.get("bill-session"):
-            info_parts.append(f"**Session:** {fields['bill-session']}")
         if fields.get("bill-prefix") and fields.get("bill-number"):
             info_parts.append(f"**Bill Number:** {fields['bill-prefix']} {fields['bill-number']}")
+        if fields.get("session-code"):
+            info_parts.append(f"**Session:** {fields['session-code']}")
+        elif fields.get("bill-session"):
+            info_parts.append(f"**Session:** {fields['bill-session']}")
+        if fields.get("status"):
+            info_parts.append(f"**Status:** {fields['status']}")
         if info_parts:
             parts.append("\n".join(info_parts))
+
+        # Description (full text, not truncated)
+        if fields.get("description"):
+            desc_text = fields["description"]
+            if "<" in desc_text:
+                desc_text = self._html_to_text(desc_text)
+            if desc_text:
+                parts.append(f"## Description\n{desc_text}")
 
         # Support arguments
         if fields.get("support"):
@@ -995,11 +1137,50 @@ class WebflowSource:
             if oppose_text:
                 parts.append(f"## Arguments in Opposition\n{oppose_text}")
 
-        # Post body (main content)
+        # Post body (main content/details)
         if fields.get("post-body"):
             body_text = self._html_to_text(fields["post-body"])
             if body_text:
                 parts.append(f"## Details\n{body_text}")
+
+        # Organization positions section
+        if supporting_orgs or opposing_orgs:
+            parts.append("## Organization Positions")
+
+            if supporting_orgs:
+                support_lines = ["### Organizations Supporting This Bill"]
+                for org in supporting_orgs:
+                    org_name = org.get("name", "")
+                    org_type = org.get("type", "")
+                    if org_name:
+                        line = f"- {org_name}"
+                        if org_type:
+                            line += f" ({org_type})"
+                        support_lines.append(line)
+                parts.append("\n".join(support_lines))
+
+            if opposing_orgs:
+                oppose_lines = ["### Organizations Opposing This Bill"]
+                for org in opposing_orgs:
+                    org_name = org.get("name", "")
+                    org_type = org.get("type", "")
+                    if org_name:
+                        line = f"- {org_name}"
+                        if org_type:
+                            line += f" ({org_type})"
+                        oppose_lines.append(line)
+                parts.append("\n".join(oppose_lines))
+
+        # External resources section
+        external_links = []
+        if fields.get("gov-url"):
+            external_links.append(f"- [Government Bill Text]({fields['gov-url']})")
+        if fields.get("open-plural-url"):
+            external_links.append(f"- [Open Plural Discussion]({fields['open-plural-url']})")
+        if fields.get("kialo-url"):
+            external_links.append(f"- [Kialo Debate]({fields['kialo-url']})")
+        if external_links:
+            parts.append("## External Resources\n" + "\n".join(external_links))
 
         return "\n\n".join(parts) if parts else ""
 
