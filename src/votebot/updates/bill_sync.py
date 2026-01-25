@@ -1,12 +1,15 @@
 """OpenStates bill sync service for fetching status, votes, and actions."""
 
+import asyncio
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
 import structlog
+import yaml
 
 from votebot.config import Settings, get_settings
 from votebot.ingestion.metadata import DocumentMetadata
@@ -14,6 +17,19 @@ from votebot.ingestion.pipeline import DocumentSource, IngestionPipeline
 from votebot.utils.legislative_calendar import StateLegislativeCalendar
 
 logger = structlog.get_logger()
+
+# Default config path
+DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config" / "sync_schedule.yaml"
+
+
+@dataclass
+class RateLimitConfig:
+    """Rate limiting configuration."""
+
+    requests_per_minute: int = 60
+    delay_between_bills_ms: int = 100
+    max_retry_attempts: int = 3
+    retry_backoff_seconds: int = 5
 
 
 @dataclass
@@ -75,17 +91,44 @@ class BillSyncService:
         # Add more as needed
     }
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, config_path: Path | None = None):
         """
         Initialize the bill sync service.
 
         Args:
             settings: Application settings
+            config_path: Path to sync_schedule.yaml config file
         """
         self.settings = settings or get_settings()
         self.api_key = self.settings.openstates_api_key.get_secret_value()
         self.calendar = StateLegislativeCalendar()
         self.pipeline = IngestionPipeline(self.settings)
+        self.config_path = config_path or DEFAULT_CONFIG_PATH
+        self.rate_limit = self._load_rate_limit_config()
+        self._last_request_time: float = 0
+
+    def _load_rate_limit_config(self) -> RateLimitConfig:
+        """Load rate limit configuration from YAML file."""
+        if not self.config_path.exists():
+            logger.warning(f"Sync config not found at {self.config_path}, using defaults")
+            return RateLimitConfig()
+
+        try:
+            with open(self.config_path) as f:
+                config = yaml.safe_load(f) or {}
+
+            rate_limit = config.get("rate_limit", {})
+            retry = config.get("retry", {})
+
+            return RateLimitConfig(
+                requests_per_minute=rate_limit.get("requests_per_minute", 60),
+                delay_between_bills_ms=rate_limit.get("delay_between_bills_ms", 100),
+                max_retry_attempts=retry.get("max_attempts", 3),
+                retry_backoff_seconds=retry.get("backoff_seconds", 5),
+            )
+        except Exception as e:
+            logger.error(f"Failed to load rate limit config: {e}")
+            return RateLimitConfig()
 
     def parse_openstates_url(self, url: str) -> OpenStatesUrl | None:
         """
@@ -114,6 +157,29 @@ class BillSyncService:
             original_url=url,
         )
 
+    async def _apply_rate_limit(self) -> None:
+        """Apply rate limiting by sleeping if needed."""
+        import time
+
+        # Calculate minimum delay between requests
+        min_delay_seconds = self.rate_limit.delay_between_bills_ms / 1000.0
+
+        # Also respect requests_per_minute limit
+        per_request_delay = 60.0 / self.rate_limit.requests_per_minute
+        min_delay_seconds = max(min_delay_seconds, per_request_delay)
+
+        # Calculate time since last request
+        current_time = time.time()
+        elapsed = current_time - self._last_request_time
+
+        # Sleep if we need to wait
+        if elapsed < min_delay_seconds and self._last_request_time > 0:
+            sleep_time = min_delay_seconds - elapsed
+            logger.debug(f"Rate limiting: sleeping for {sleep_time:.2f}s")
+            await asyncio.sleep(sleep_time)
+
+        self._last_request_time = time.time()
+
     async def fetch_bill_from_openstates(
         self,
         jurisdiction: str,
@@ -121,7 +187,7 @@ class BillSyncService:
         bill_id: str,
     ) -> dict[str, Any] | None:
         """
-        Fetch bill details from OpenStates API.
+        Fetch bill details from OpenStates API with retry logic.
 
         Args:
             jurisdiction: State code (e.g., 'fl', 'wa')
@@ -131,32 +197,81 @@ class BillSyncService:
         Returns:
             Bill data dict or None if not found
         """
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            headers = {"x-api-key": self.api_key}
+        # URL encode the bill_id (spaces become %20)
+        encoded_bill_id = bill_id.replace(" ", "%20")
+        url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction}/{session}/{encoded_bill_id}"
+        headers = {"x-api-key": self.api_key}
 
-            # URL encode the bill_id (spaces become %20)
-            encoded_bill_id = bill_id.replace(" ", "%20")
+        last_error: Exception | None = None
 
-            url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction}/{session}/{encoded_bill_id}"
+        for attempt in range(self.rate_limit.max_retry_attempts):
+            # Apply rate limiting before each request
+            await self._apply_rate_limit()
 
             try:
-                response = await client.get(
-                    url,
-                    headers=headers,
-                    params={"include": "votes,sponsorships,actions"},
-                )
-
-                if response.status_code == 404:
-                    logger.warning(
-                        "Bill not found in OpenStates",
-                        jurisdiction=jurisdiction,
-                        session=session,
-                        bill_id=bill_id,
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    # Pass include as a list to generate multiple query params
+                    # e.g., ?include=votes&include=sponsorships&include=actions
+                    response = await client.get(
+                        url,
+                        headers=headers,
+                        params={"include": ["votes", "sponsorships", "actions"]},
                     )
-                    return None
 
-                response.raise_for_status()
-                return response.json()
+                    # Handle 404 - bill not found (don't retry)
+                    if response.status_code == 404:
+                        logger.warning(
+                            "Bill not found in OpenStates",
+                            jurisdiction=jurisdiction,
+                            session=session,
+                            bill_id=bill_id,
+                        )
+                        return None
+
+                    # Handle rate limiting (429) - retry with backoff
+                    if response.status_code == 429:
+                        retry_after = int(response.headers.get("Retry-After", self.rate_limit.retry_backoff_seconds))
+                        backoff = retry_after * (2 ** attempt)  # Exponential backoff
+                        logger.warning(
+                            "Rate limited by OpenStates, backing off",
+                            attempt=attempt + 1,
+                            backoff_seconds=backoff,
+                            jurisdiction=jurisdiction,
+                            bill_id=bill_id,
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    # Handle server errors (5xx) - retry with backoff
+                    if response.status_code >= 500:
+                        backoff = self.rate_limit.retry_backoff_seconds * (2 ** attempt)
+                        logger.warning(
+                            "OpenStates server error, retrying",
+                            status_code=response.status_code,
+                            attempt=attempt + 1,
+                            backoff_seconds=backoff,
+                            jurisdiction=jurisdiction,
+                            bill_id=bill_id,
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    # Raise for other error status codes
+                    response.raise_for_status()
+                    return response.json()
+
+            except httpx.TimeoutException as e:
+                last_error = e
+                backoff = self.rate_limit.retry_backoff_seconds * (2 ** attempt)
+                logger.warning(
+                    "OpenStates request timeout, retrying",
+                    attempt=attempt + 1,
+                    backoff_seconds=backoff,
+                    jurisdiction=jurisdiction,
+                    bill_id=bill_id,
+                )
+                await asyncio.sleep(backoff)
+                continue
 
             except httpx.HTTPStatusError as e:
                 logger.error(
@@ -167,7 +282,9 @@ class BillSyncService:
                     bill_id=bill_id,
                 )
                 return None
+
             except Exception as e:
+                last_error = e
                 logger.error(
                     "Failed to fetch from OpenStates",
                     error=str(e),
@@ -176,6 +293,17 @@ class BillSyncService:
                     bill_id=bill_id,
                 )
                 return None
+
+        # All retries exhausted
+        logger.error(
+            "OpenStates fetch failed after all retries",
+            attempts=self.rate_limit.max_retry_attempts,
+            last_error=str(last_error) if last_error else "Unknown",
+            jurisdiction=jurisdiction,
+            session=session,
+            bill_id=bill_id,
+        )
+        return None
 
     def format_bill_history_chunk(self, bill_data: dict[str, Any]) -> str:
         """
@@ -567,11 +695,26 @@ class BillSyncService:
         Returns:
             SyncBatchResult with aggregated results
         """
+        import time
+
         total = len(bills)
         successful = 0
         failed = 0
+        skipped = 0
         chunks_created = 0
         errors = []
+        start_time = time.time()
+
+        # Count bills with OpenStates URLs for better progress tracking
+        bills_with_urls = [b for b in bills if b.get("fieldData", {}).get("open-states-url-2")]
+        processable_count = len(bills_with_urls)
+
+        logger.info(
+            "Starting backload",
+            total_bills=total,
+            bills_with_openstates_urls=processable_count,
+            rate_limit_rpm=self.rate_limit.requests_per_minute,
+        )
 
         for i, bill in enumerate(bills):
             fields = bill.get("fieldData", {})
@@ -585,6 +728,7 @@ class BillSyncService:
 
             # Skip bills without OpenStates URL
             if not openstates_url:
+                skipped += 1
                 logger.debug(f"Skipping bill without OpenStates URL: {title}")
                 continue
 
@@ -604,15 +748,40 @@ class BillSyncService:
                 if result.error:
                     errors.append(f"{title}: {result.error}")
 
-            # Progress logging
-            if (i + 1) % 50 == 0:
+            # Progress logging every 25 bills
+            processed = successful + failed
+            if processed > 0 and processed % 25 == 0:
+                elapsed = time.time() - start_time
+                rate = processed / elapsed if elapsed > 0 else 0
+                remaining = processable_count - processed
+                eta_seconds = remaining / rate if rate > 0 else 0
+                eta_minutes = int(eta_seconds / 60)
+                eta_seconds_rem = int(eta_seconds % 60)
+
                 logger.info(
                     "Backload progress",
-                    processed=i + 1,
-                    total=total,
+                    processed=processed,
+                    total_processable=processable_count,
                     successful=successful,
                     failed=failed,
+                    skipped=skipped,
+                    rate_per_second=round(rate, 2),
+                    eta=f"{eta_minutes}m {eta_seconds_rem}s",
                 )
+
+        # Final stats
+        elapsed = time.time() - start_time
+        elapsed_minutes = int(elapsed / 60)
+        elapsed_seconds = int(elapsed % 60)
+
+        logger.info(
+            "Backload complete",
+            total_time=f"{elapsed_minutes}m {elapsed_seconds}s",
+            successful=successful,
+            failed=failed,
+            skipped=skipped,
+            chunks_created=chunks_created,
+        )
 
         return SyncBatchResult(
             total_bills=total,
