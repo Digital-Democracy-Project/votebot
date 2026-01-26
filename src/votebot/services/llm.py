@@ -250,14 +250,16 @@ class LLMService:
             temperature: Override default temperature
             rag_confidence: Confidence score from RAG retrieval (0-1)
             previous_response_id: ID of previous response for stateful conversation
-            page_context_type: Type of page context ('bill', 'legislator', 'general')
+            page_context_type: Type of page context ('bill', 'legislator', 'organization', 'general')
 
         Returns:
             LLMResponse with the generated content
         """
-        # Use higher threshold for legislator queries (triggers web search more easily)
+        # Use higher threshold for legislator/organization queries (triggers web search more easily)
         if page_context_type == "legislator":
             threshold = self.settings.web_search_legislator_confidence_threshold
+        elif page_context_type == "organization":
+            threshold = self.settings.web_search_organization_confidence_threshold
         else:
             threshold = self.settings.web_search_confidence_threshold
 

@@ -9,13 +9,13 @@ from pydantic import BaseModel, Field
 class PageContext(BaseModel):
     """Context about the page where the chat is initiated."""
 
-    type: Literal["bill", "legislator", "general"] = Field(
+    type: Literal["bill", "legislator", "organization", "general"] = Field(
         ...,
         description="Type of page context",
     )
     id: str | None = Field(
         None,
-        description="Identifier for the bill or legislator (e.g., 'HR-1234', 'CA-ASM-001')",
+        description="Identifier for the bill, legislator, or organization",
     )
     jurisdiction: str | None = Field(
         None,

@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     web_search_confidence_threshold: float = 0.5
     # Higher threshold for legislators (triggers web search more easily)
     web_search_legislator_confidence_threshold: float = 0.7
+    # Higher threshold for organizations (triggers web search more easily)
+    web_search_organization_confidence_threshold: float = 0.7
 
     # Pinecone
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))
