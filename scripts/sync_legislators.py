@@ -293,7 +293,7 @@ def _build_openstates_metadata(item: dict) -> DocumentMetadata:
             "district": current_role.get("district", ""),
             "email": item.get("email", ""),
             "image_url": item.get("image", ""),
-            "title": current_role.get("title", ""),
+            "role_title": current_role.get("title", ""),  # Use role_title to avoid overwriting name
         }
     )
 
@@ -393,7 +393,7 @@ def _merge_metadata(
 
     # Add OpenStates fields that might be missing
     os_extra = openstates_meta.extra
-    for key in ["email", "image_url", "title"]:
+    for key in ["email", "image_url", "role_title"]:
         if key not in merged_extra or not merged_extra.get(key):
             if os_extra.get(key):
                 merged_extra[key] = os_extra[key]

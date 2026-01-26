@@ -39,6 +39,47 @@ from votebot.config import get_settings
 get_settings.cache_clear()
 settings = get_settings()
 
+# Global jurisdiction mapping (populated by fetch_jurisdiction_mapping)
+JURISDICTION_MAP: dict[str, str] = {}
+
+
+async def fetch_jurisdiction_mapping() -> dict[str, str]:
+    """Fetch jurisdiction reference ID to state code mapping from Webflow."""
+    global JURISDICTION_MAP
+
+    if JURISDICTION_MAP:
+        return JURISDICTION_MAP
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        headers = {
+            "Authorization": f"Bearer {settings.webflow_api_key.get_secret_value()}",
+            "accept": "application/json",
+        }
+
+        collection_id = settings.webflow_jurisdiction_collection_id
+        if not collection_id:
+            return {}
+
+        response = await client.get(
+            f"https://api.webflow.com/v2/collections/{collection_id}/items",
+            headers=headers,
+            params={"limit": 100},
+        )
+
+        if response.status_code != 200:
+            return {}
+
+        data = response.json()
+        for item in data.get("items", []):
+            item_id = item.get("id", "")
+            fields = item.get("fieldData", {})
+            # Try to get state code from name or slug
+            state_code = fields.get("slug", "").upper()[:2]
+            if len(state_code) == 2:
+                JURISDICTION_MAP[item_id] = state_code
+
+    return JURISDICTION_MAP
+
 
 @dataclass
 class TestResult:
@@ -251,11 +292,15 @@ async def run_legislator_test(
     fields = legislator.get("fieldData", {})
     name = fields.get("name", "Unknown")
     legislator_id = fields.get("openstatesid", "")
-    jurisdiction = fields.get("jurisdiction", "US")
+    jurisdiction_ref = fields.get("jurisdiction", "")
 
-    # If jurisdiction is a reference ID, try to extract state code
-    if len(jurisdiction) > 2:
-        jurisdiction = "US"  # Default if we can't resolve
+    # Resolve jurisdiction reference ID to state code
+    if isinstance(jurisdiction_ref, str) and len(jurisdiction_ref) > 2:
+        jurisdiction = JURISDICTION_MAP.get(jurisdiction_ref, "US")
+    elif isinstance(jurisdiction_ref, str) and len(jurisdiction_ref) == 2:
+        jurisdiction = jurisdiction_ref.upper()
+    else:
+        jurisdiction = "US"
 
     results = []
 
@@ -355,6 +400,11 @@ async def main():
     print("=" * 70)
     print("VOTEBOT LEGISLATOR RAG TEST")
     print("=" * 70)
+
+    # Fetch jurisdiction mapping first
+    print("\nFetching jurisdiction mapping...")
+    await fetch_jurisdiction_mapping()
+    print(f"Loaded {len(JURISDICTION_MAP)} jurisdiction mappings")
 
     # Fetch sample legislators
     print(f"\nFetching {args.sample_size} sample legislators from Webflow...")
