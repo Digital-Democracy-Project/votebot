@@ -428,11 +428,13 @@ class WebflowSource:
                     fields = item.get("fieldData", {})
                     name = fields.get("name", "")
                     identifier = f"{fields.get('bill-prefix', '')} {fields.get('bill-number', '')}".strip()
+                    slug = fields.get("slug", "")
 
                     if item_id:
                         self._bill_cache[item_id] = {
                             "name": name,
                             "identifier": identifier if identifier else name,
+                            "slug": slug,  # Include slug for DDP URL generation
                         }
 
                 pagination = data.get("pagination", {})
@@ -587,6 +589,7 @@ class WebflowSource:
             jurisdiction=None,  # Organizations can be local, state, or national
             extra={
                 "webflow_id": item_id,
+                "slug": fields.get("slug", ""),  # DDP URL slug for linking
                 "organization_type": fields.get("type-2", ""),
                 "website": fields.get("website", ""),
                 "bills_support_count": len(bills_support),
@@ -696,7 +699,7 @@ class WebflowSource:
             if affiliates_text:
                 parts.append(f"## Affiliates\n{affiliates_text}")
 
-        # Bill positions section
+        # Bill positions section with DDP URLs
         if bills_support or bills_oppose:
             parts.append("## Bill Positions")
 
@@ -705,7 +708,15 @@ class WebflowSource:
                 for bill in bills_support:
                     identifier = bill.get("identifier", "")
                     bill_name = bill.get("name", "")
-                    if identifier and bill_name:
+                    slug = bill.get("slug", "")
+                    # Include DDP URL if slug is available
+                    if slug:
+                        ddp_url = f"https://digitaldemocracyproject.org/bills/{slug}"
+                        if bill_name:
+                            support_lines.append(f"- [{bill_name}]({ddp_url})")
+                        elif identifier:
+                            support_lines.append(f"- [{identifier}]({ddp_url})")
+                    elif identifier and bill_name:
                         support_lines.append(f"- {bill_name} ({identifier})")
                     elif bill_name:
                         support_lines.append(f"- {bill_name}")
@@ -718,7 +729,15 @@ class WebflowSource:
                 for bill in bills_oppose:
                     identifier = bill.get("identifier", "")
                     bill_name = bill.get("name", "")
-                    if identifier and bill_name:
+                    slug = bill.get("slug", "")
+                    # Include DDP URL if slug is available
+                    if slug:
+                        ddp_url = f"https://digitaldemocracyproject.org/bills/{slug}"
+                        if bill_name:
+                            oppose_lines.append(f"- [{bill_name}]({ddp_url})")
+                        elif identifier:
+                            oppose_lines.append(f"- [{identifier}]({ddp_url})")
+                    elif identifier and bill_name:
                         oppose_lines.append(f"- {bill_name} ({identifier})")
                     elif bill_name:
                         oppose_lines.append(f"- {bill_name}")
@@ -836,6 +855,7 @@ class WebflowSource:
             legislator_id=openstates_id,
             extra={
                 "webflow_id": item_id,
+                "slug": fields.get("slug", ""),  # DDP URL slug for linking
                 "party": fields.get("party-2", fields.get("party", "")),
                 "chamber": fields.get("chamber", ""),
                 "district": fields.get("district", ""),

@@ -30,6 +30,19 @@ Always use structured formatting including:
 
 Be friendly and engaging. When appropriate, offer the link to get started: https://digitaldemocracyproject.org/vote
 
+## Linking to Bills and Legislators
+
+When referencing a bill or legislator that has a DDP URL provided in your sources, ALWAYS include a clickable markdown link so users can easily navigate to learn more.
+
+Format bill links as: [Bill Title (Bill Number)](DDP_URL)
+Format legislator links as: [Legislator Name](DDP_URL)
+
+Examples:
+- "The [Education Funding Act (HB 1234)](https://digitaldemocracyproject.org/bills/education-funding-act) would increase school budgets..."
+- "According to [Senator Jane Smith](https://digitaldemocracyproject.org/legislators/jane-smith), the bill has bipartisan support..."
+
+Only include links when a DDP URL is provided in your sources. Do not guess or construct URLs.
+
 ## Voter Verification
 
 When users ask about signing up or verification, explain:
@@ -251,12 +264,53 @@ def format_retrieved_chunks(chunks: list[dict]) -> str:
 
     formatted_chunks = []
     for i, chunk in enumerate(chunks, 1):
-        source = chunk.get("metadata", {}).get("source", "Unknown")
+        metadata = chunk.get("metadata", {})
+        source = metadata.get("source", "Unknown")
         doc_id = chunk.get("id", f"doc-{i}")
         content = chunk.get("content", "")
+        doc_type = metadata.get("document_type", "")
 
-        formatted_chunks.append(
-            f"### Source {i}: {source} [{doc_id}]\n{content}"
-        )
+        # Build DDP URL if slug is available
+        ddp_url = _build_ddp_url(metadata, doc_type)
+
+        # Format the chunk header with URL if available
+        if ddp_url:
+            formatted_chunks.append(
+                f"### Source {i}: {source} [{doc_id}]\n"
+                f"**DDP URL:** {ddp_url}\n\n{content}"
+            )
+        else:
+            formatted_chunks.append(
+                f"### Source {i}: {source} [{doc_id}]\n{content}"
+            )
 
     return "\n\n".join(formatted_chunks)
+
+
+def _build_ddp_url(metadata: dict, doc_type: str) -> str | None:
+    """
+    Build DDP URL from metadata if possible.
+
+    Args:
+        metadata: Document metadata
+        doc_type: Type of document (bill, legislator, organization)
+
+    Returns:
+        DDP URL string or None if not available
+    """
+    base_url = "https://digitaldemocracyproject.org"
+
+    # Check for slug in metadata or extra
+    slug = metadata.get("slug") or metadata.get("extra", {}).get("slug")
+
+    if not slug:
+        return None
+
+    if doc_type == "bill":
+        return f"{base_url}/bills/{slug}"
+    elif doc_type == "legislator":
+        return f"{base_url}/legislators/{slug}"
+    elif doc_type == "organization":
+        return f"{base_url}/organizations/{slug}"
+
+    return None

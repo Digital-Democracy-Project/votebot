@@ -1,0 +1,1077 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoteBot Chat Widget - POC</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .demo-container {
+            max-width: 1200px;
+            width: 100%;
+            display: flex;
+            gap: 40px;
+            align-items: flex-start;
+        }
+
+        .demo-info {
+            flex: 1;
+            color: white;
+            padding: 20px;
+        }
+
+        .demo-info h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .demo-info p {
+            font-size: 1.1rem;
+            line-height: 1.6;
+            opacity: 0.9;
+            margin-bottom: 1rem;
+        }
+
+        .demo-info .feature-list {
+            list-style: none;
+            margin-top: 2rem;
+        }
+
+        .demo-info .feature-list li {
+            padding: 0.5rem 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .demo-info .feature-list li::before {
+            content: "✓";
+            background: rgba(255,255,255,0.2);
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+        }
+
+        /* Chat Widget Styles */
+        .chat-widget {
+            width: 400px;
+            height: 600px;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #1a5f7a 0%, #159895 100%);
+            color: white;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .chat-header-avatar {
+            width: 48px;
+            height: 48px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+
+        .chat-header-info h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .chat-header-info .status {
+            font-size: 0.8rem;
+            opacity: 0.8;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4ade80;
+        }
+
+        .status-dot.disconnected {
+            background: #ef4444;
+        }
+
+        .status-dot.connecting {
+            background: #fbbf24;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            background: #f8fafc;
+        }
+
+        .message {
+            max-width: 85%;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            align-self: flex-end;
+        }
+
+        .message.bot, .message.agent, .message.system {
+            align-self: flex-start;
+        }
+
+        .message-content {
+            padding: 12px 16px;
+            border-radius: 16px;
+            line-height: 1.5;
+            font-size: 0.95rem;
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(135deg, #1a5f7a 0%, #159895 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.bot .message-content {
+            background: white;
+            color: #1e293b;
+            border: 1px solid #e2e8f0;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.agent .message-content {
+            background: #dbeafe;
+            color: #1e40af;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.system .message-content {
+            background: #fef3c7;
+            color: #92400e;
+            font-size: 0.85rem;
+            text-align: center;
+            max-width: 100%;
+            border-radius: 8px;
+        }
+
+        .message-meta {
+            font-size: 0.75rem;
+            color: #64748b;
+            margin-top: 4px;
+            padding: 0 4px;
+        }
+
+        .message.user .message-meta {
+            text-align: right;
+        }
+
+        .typing-indicator {
+            display: flex;
+            gap: 4px;
+            padding: 12px 16px;
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 16px;
+            border-bottom-left-radius: 4px;
+            width: fit-content;
+        }
+
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            background: #94a3b8;
+            border-radius: 50%;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+
+        .typing-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typing {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-4px); }
+        }
+
+        .chat-input-area {
+            padding: 16px;
+            background: white;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .chat-input-container {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+        }
+
+        .chat-input {
+            flex: 1;
+            border: 1px solid #e2e8f0;
+            border-radius: 24px;
+            padding: 12px 20px;
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            resize: none;
+            max-height: 120px;
+            font-family: inherit;
+        }
+
+        .chat-input:focus {
+            border-color: #1a5f7a;
+            box-shadow: 0 0 0 3px rgba(26, 95, 122, 0.1);
+        }
+
+        .chat-input:disabled {
+            background: #f1f5f9;
+            cursor: not-allowed;
+        }
+
+        .send-button {
+            width: 48px;
+            height: 48px;
+            border: none;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #1a5f7a 0%, #159895 100%);
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.2s, opacity 0.2s;
+        }
+
+        .send-button:hover:not(:disabled) {
+            transform: scale(1.05);
+        }
+
+        .send-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .send-button svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        /* Citations */
+        .citations {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .citations-header {
+            font-size: 0.75rem;
+            color: #64748b;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .citation {
+            font-size: 0.8rem;
+            color: #1a5f7a;
+            padding: 6px 10px;
+            background: #f0f9ff;
+            border-radius: 6px;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .citation::before {
+            content: "📄";
+            font-size: 12px;
+        }
+
+        /* Confidence indicator */
+        .confidence-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-left: 8px;
+        }
+
+        .confidence-badge.high {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .confidence-badge.medium {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .confidence-badge.low {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        /* Handoff banner */
+        .handoff-banner {
+            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            color: white;
+            padding: 12px 20px;
+            text-align: center;
+            font-size: 0.9rem;
+            display: none;
+        }
+
+        .handoff-banner.visible {
+            display: block;
+        }
+
+        /* Page context selector */
+        .context-selector {
+            padding: 12px 16px;
+            background: #f8fafc;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .context-btn {
+            padding: 6px 12px;
+            border: 1px solid #e2e8f0;
+            border-radius: 20px;
+            background: white;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .context-btn:hover {
+            border-color: #1a5f7a;
+        }
+
+        .context-btn.active {
+            background: #1a5f7a;
+            color: white;
+            border-color: #1a5f7a;
+        }
+
+        /* Responsive */
+        @media (max-width: 900px) {
+            .demo-container {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .demo-info {
+                text-align: center;
+            }
+
+            .chat-widget {
+                width: 100%;
+                max-width: 400px;
+            }
+        }
+
+        /* Markdown Styles */
+        .message-content h1,
+        .message-content h2,
+        .message-content h3,
+        .message-content h4 {
+            margin: 0.75em 0 0.5em 0;
+            font-weight: 600;
+            line-height: 1.3;
+        }
+
+        .message-content h1:first-child,
+        .message-content h2:first-child,
+        .message-content h3:first-child {
+            margin-top: 0;
+        }
+
+        .message-content h1 { font-size: 1.25em; }
+        .message-content h2 { font-size: 1.15em; }
+        .message-content h3 { font-size: 1.05em; }
+        .message-content h4 { font-size: 1em; }
+
+        .message-content p {
+            margin: 0.5em 0;
+        }
+
+        .message-content p:first-child {
+            margin-top: 0;
+        }
+
+        .message-content p:last-child {
+            margin-bottom: 0;
+        }
+
+        .message-content ul,
+        .message-content ol {
+            margin: 0.5em 0;
+            padding-left: 1.5em;
+        }
+
+        .message-content li {
+            margin: 0.25em 0;
+        }
+
+        .message-content li::marker {
+            color: #64748b;
+        }
+
+        .message-content strong {
+            font-weight: 600;
+        }
+
+        .message-content em {
+            font-style: italic;
+        }
+
+        .message-content code {
+            background: rgba(0, 0, 0, 0.06);
+            padding: 0.15em 0.4em;
+            border-radius: 4px;
+            font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .message-content pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 12px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 0.75em 0;
+        }
+
+        .message-content pre code {
+            background: none;
+            padding: 0;
+            color: inherit;
+        }
+
+        .message-content blockquote {
+            border-left: 3px solid #1a5f7a;
+            margin: 0.75em 0;
+            padding: 0.5em 0 0.5em 1em;
+            color: #475569;
+            background: #f8fafc;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .message-content a {
+            color: #1a5f7a;
+            text-decoration: underline;
+        }
+
+        .message-content a:hover {
+            color: #159895;
+        }
+
+        .message-content hr {
+            border: none;
+            border-top: 1px solid #e2e8f0;
+            margin: 1em 0;
+        }
+
+        .message-content table {
+            border-collapse: collapse;
+            margin: 0.75em 0;
+            width: 100%;
+            font-size: 0.9em;
+        }
+
+        .message-content th,
+        .message-content td {
+            border: 1px solid #e2e8f0;
+            padding: 6px 10px;
+            text-align: left;
+        }
+
+        .message-content th {
+            background: #f8fafc;
+            font-weight: 600;
+        }
+
+        /* User message markdown overrides */
+        .message.user .message-content code {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .message.user .message-content a {
+            color: #bfdbfe;
+        }
+
+        .message.user .message-content blockquote {
+            border-left-color: rgba(255, 255, 255, 0.5);
+            background: rgba(255, 255, 255, 0.1);
+            color: rgba(255, 255, 255, 0.9);
+        }
+    </style>
+    <!-- Marked.js for Markdown rendering (v4 for stability) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
+</head>
+<body>
+    <div class="demo-container">
+        <div class="demo-info">
+            <h1>VoteBot Chat Widget</h1>
+            <p>A proof-of-concept streaming chat interface for the Digital Democracy Project.</p>
+            <p>This widget connects to the VoteBot backend via WebSocket for real-time streaming responses.</p>
+
+            <ul class="feature-list">
+                <li>Real-time streaming responses</li>
+                <li>Conversation history</li>
+                <li>Citation display</li>
+                <li>Confidence scoring</li>
+                <li>Human handoff detection</li>
+                <li>Page context awareness</li>
+            </ul>
+
+            <p style="margin-top: 2rem; font-size: 0.9rem; opacity: 0.8;">
+                <strong>Note:</strong> Make sure VoteBot is running on localhost:8000
+            </p>
+        </div>
+
+        <div class="chat-widget">
+            <div class="chat-header">
+                <div class="chat-header-avatar">🗳️</div>
+                <div class="chat-header-info">
+                    <h2>VoteBot</h2>
+                    <div class="status">
+                        <span class="status-dot connecting" id="statusDot"></span>
+                        <span id="statusText">Connecting...</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="context-selector">
+                <button class="context-btn active" data-type="general">General</button>
+                <button class="context-btn" data-type="bill" data-id="HB-1234" data-title="Education Funding Act">Bill: HB-1234</button>
+                <button class="context-btn" data-type="legislator" data-id="LEG-001" data-title="Sen. Smith">Legislator</button>
+            </div>
+
+            <div class="handoff-banner" id="handoffBanner">
+                🤝 Connecting you with a human agent...
+            </div>
+
+            <div class="chat-messages" id="chatMessages">
+                <!-- Messages will be inserted here -->
+            </div>
+
+            <div class="chat-input-area">
+                <div class="chat-input-container">
+                    <textarea
+                        class="chat-input"
+                        id="chatInput"
+                        placeholder="Type your message..."
+                        rows="1"
+                        disabled
+                    ></textarea>
+                    <button class="send-button" id="sendButton" disabled>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const CONFIG = {
+            wsUrl: 'ws://localhost:8000/ws/chat',
+            reconnectDelay: [1000, 2000, 4000, 8000],
+            maxReconnectAttempts: 4,
+        };
+
+        // State
+        let ws = null;
+        let sessionId = null;
+        let reconnectAttempts = 0;
+        let isStreaming = false;
+        let currentStreamingMessage = null;
+        let currentStreamingText = '';  // Accumulate raw text for markdown
+        let pageContext = { type: 'general' };
+
+        // Configure marked for safe rendering
+        marked.setOptions({
+            breaks: true,
+            gfm: true,
+            headerIds: false,
+            mangle: false,
+        });
+
+        // DOM Elements
+        const chatMessages = document.getElementById('chatMessages');
+        const chatInput = document.getElementById('chatInput');
+        const sendButton = document.getElementById('sendButton');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const handoffBanner = document.getElementById('handoffBanner');
+        const contextButtons = document.querySelectorAll('.context-btn');
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            connect();
+            setupEventListeners();
+            addSystemMessage('Welcome! Ask me anything about legislation, legislators, or civic engagement.');
+        });
+
+        // WebSocket Connection
+        function connect() {
+            updateStatus('connecting');
+
+            const url = sessionId
+                ? `${CONFIG.wsUrl}?session_id=${sessionId}`
+                : CONFIG.wsUrl;
+
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                updateStatus('connected');
+                reconnectAttempts = 0;
+                enableInput();
+            };
+
+            ws.onclose = (event) => {
+                console.log('WebSocket closed', event.code, event.reason);
+                updateStatus('disconnected');
+                disableInput();
+
+                // Attempt reconnection
+                if (reconnectAttempts < CONFIG.maxReconnectAttempts) {
+                    const delay = CONFIG.reconnectDelay[reconnectAttempts];
+                    console.log(`Reconnecting in ${delay}ms...`);
+                    setTimeout(() => {
+                        reconnectAttempts++;
+                        connect();
+                    }, delay);
+                } else {
+                    addSystemMessage('Connection lost. Please refresh the page to reconnect.');
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleServerMessage(data);
+            };
+        }
+
+        function handleServerMessage(data) {
+            console.log('Received:', data.type, data.payload);
+
+            switch (data.type) {
+                case 'session_info':
+                    sessionId = data.payload.session_id;
+                    console.log('Session ID:', sessionId);
+                    break;
+
+                case 'session_restored':
+                    // Restore previous messages
+                    if (data.payload.messages) {
+                        data.payload.messages.forEach(msg => {
+                            addMessage(msg.role === 'user' ? 'user' : 'bot', msg.content);
+                        });
+                    }
+                    break;
+
+                case 'stream_start':
+                    isStreaming = true;
+                    showTypingIndicator();
+                    break;
+
+                case 'stream_chunk':
+                    if (data.payload.text) {
+                        appendToStreamingMessage(data.payload.text);
+                    }
+                    break;
+
+                case 'stream_end':
+                    isStreaming = false;
+                    finalizeStreamingMessage(data.payload);
+                    break;
+
+                case 'agent_joined':
+                    handoffBanner.textContent = `🤝 Connected to ${data.payload.agent_name}`;
+                    handoffBanner.classList.add('visible');
+                    addSystemMessage(`${data.payload.agent_name} has joined the conversation.`);
+                    break;
+
+                case 'agent_message':
+                    addMessage('agent', data.payload.text, {
+                        agentName: data.payload.agent_name
+                    });
+                    break;
+
+                case 'agent_left':
+                    handoffBanner.classList.remove('visible');
+                    addSystemMessage('The agent has ended the conversation. You\'re now chatting with VoteBot again.');
+                    break;
+
+                case 'error':
+                    hideTypingIndicator();
+                    addSystemMessage(`Error: ${data.payload.message}`);
+                    isStreaming = false;
+                    enableInput();
+                    break;
+
+                case 'pong':
+                    // Heartbeat response
+                    break;
+
+                default:
+                    console.warn('Unknown message type:', data.type);
+            }
+        }
+
+        // Message Handling
+        function sendMessage() {
+            const message = chatInput.value.trim();
+            if (!message || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) {
+                return;
+            }
+
+            // Add user message to UI
+            addMessage('user', message);
+
+            // Send to server
+            ws.send(JSON.stringify({
+                type: 'user_message',
+                payload: {
+                    message: message,
+                    page_context: pageContext
+                }
+            }));
+
+            // Clear input
+            chatInput.value = '';
+            chatInput.style.height = 'auto';
+            disableInput();
+        }
+
+        function addMessage(type, content, meta = {}) {
+            hideTypingIndicator();
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+
+            // Render markdown for bot/agent messages, plain text for user
+            if (type === 'bot' || type === 'agent') {
+                contentDiv.innerHTML = renderMarkdown(content);
+            } else {
+                contentDiv.textContent = content;
+            }
+
+            messageDiv.appendChild(contentDiv);
+
+            // Add meta info
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'message-meta';
+
+            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            metaDiv.textContent = type === 'agent' && meta.agentName
+                ? `${meta.agentName} • ${time}`
+                : time;
+
+            messageDiv.appendChild(metaDiv);
+
+            chatMessages.appendChild(messageDiv);
+            scrollToBottom();
+
+            return messageDiv;
+        }
+
+        function renderMarkdown(text) {
+            // Use marked to render markdown
+            try {
+                const html = marked.parse(text);
+                // Debug: always log first render to check links
+                if (text.includes('](')) {
+                    console.log('=== MARKDOWN DEBUG ===');
+                    console.log('Has link syntax in input:', text.includes('](http'));
+                    console.log('Has anchor in output:', html.includes('<a '));
+                    if (!html.includes('<a ') && text.includes('](http')) {
+                        console.error('LINK RENDERING FAILED!');
+                        console.log('Input:', text.substring(0, 300));
+                        console.log('Output:', html.substring(0, 300));
+                    }
+                }
+                return html;
+            } catch (e) {
+                console.error('Markdown parsing error:', e);
+                return escapeHtml(text);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function addSystemMessage(content) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message system';
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            contentDiv.textContent = content;
+
+            messageDiv.appendChild(contentDiv);
+            chatMessages.appendChild(messageDiv);
+            scrollToBottom();
+        }
+
+        function showTypingIndicator() {
+            hideTypingIndicator();
+
+            const indicator = document.createElement('div');
+            indicator.className = 'message bot';
+            indicator.id = 'typingIndicator';
+
+            const typing = document.createElement('div');
+            typing.className = 'typing-indicator';
+            typing.innerHTML = '<span></span><span></span><span></span>';
+
+            indicator.appendChild(typing);
+            chatMessages.appendChild(indicator);
+            scrollToBottom();
+        }
+
+        function hideTypingIndicator() {
+            const indicator = document.getElementById('typingIndicator');
+            if (indicator) {
+                indicator.remove();
+            }
+        }
+
+        function appendToStreamingMessage(text) {
+            hideTypingIndicator();
+
+            if (!currentStreamingMessage) {
+                // Create new streaming message
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'message bot';
+                messageDiv.id = 'streamingMessage';
+
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'message-content';
+                contentDiv.innerHTML = '';
+
+                messageDiv.appendChild(contentDiv);
+                chatMessages.appendChild(messageDiv);
+
+                currentStreamingMessage = contentDiv;
+                currentStreamingText = '';
+            }
+
+            // Accumulate text
+            currentStreamingText += text;
+
+            // Render markdown progressively for live preview
+            currentStreamingMessage.innerHTML = renderMarkdown(currentStreamingText);
+            scrollToBottom();
+        }
+
+        function finalizeStreamingMessage(payload) {
+            if (!currentStreamingMessage) return;
+
+            const messageDiv = currentStreamingMessage.parentElement;
+
+            // Render final markdown
+            currentStreamingMessage.innerHTML = renderMarkdown(currentStreamingText);
+
+            // Add confidence badge (after markdown content)
+            if (payload.confidence !== undefined) {
+                const badge = document.createElement('span');
+                badge.className = `confidence-badge ${getConfidenceLevel(payload.confidence)}`;
+                badge.textContent = `${Math.round(payload.confidence * 100)}% confident`;
+                currentStreamingMessage.appendChild(badge);
+            }
+
+            // Add citations
+            if (payload.citations && payload.citations.length > 0) {
+                const citationsDiv = document.createElement('div');
+                citationsDiv.className = 'citations';
+
+                const header = document.createElement('div');
+                header.className = 'citations-header';
+                header.textContent = 'Sources';
+                citationsDiv.appendChild(header);
+
+                payload.citations.slice(0, 3).forEach(citation => {
+                    const citationDiv = document.createElement('div');
+                    citationDiv.className = 'citation';
+                    citationDiv.textContent = citation.source || citation.document_id;
+                    citationsDiv.appendChild(citationDiv);
+                });
+
+                messageDiv.appendChild(citationsDiv);
+            }
+
+            // Add meta
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'message-meta';
+            metaDiv.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            messageDiv.appendChild(metaDiv);
+
+            // Check for human handoff
+            if (payload.requires_human) {
+                addSystemMessage('It looks like you might need human assistance. Connecting you with an agent...');
+                handoffBanner.classList.add('visible');
+            }
+
+            currentStreamingMessage = null;
+            currentStreamingText = '';
+            enableInput();
+            scrollToBottom();
+        }
+
+        function getConfidenceLevel(confidence) {
+            if (confidence >= 0.7) return 'high';
+            if (confidence >= 0.4) return 'medium';
+            return 'low';
+        }
+
+        // UI Helpers
+        function updateStatus(status) {
+            statusDot.className = `status-dot ${status}`;
+            const statusMessages = {
+                connecting: 'Connecting...',
+                connected: 'Online',
+                disconnected: 'Disconnected'
+            };
+            statusText.textContent = statusMessages[status] || status;
+        }
+
+        function enableInput() {
+            chatInput.disabled = false;
+            sendButton.disabled = false;
+            chatInput.focus();
+        }
+
+        function disableInput() {
+            chatInput.disabled = true;
+            sendButton.disabled = true;
+        }
+
+        function scrollToBottom() {
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // Event Listeners
+        function setupEventListeners() {
+            // Send button
+            sendButton.addEventListener('click', sendMessage);
+
+            // Enter to send (Shift+Enter for newline)
+            chatInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+
+            // Auto-resize textarea
+            chatInput.addEventListener('input', () => {
+                chatInput.style.height = 'auto';
+                chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+            });
+
+            // Context buttons
+            contextButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    contextButtons.forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+
+                    pageContext = {
+                        type: btn.dataset.type,
+                        id: btn.dataset.id || null,
+                        title: btn.dataset.title || null,
+                        jurisdiction: btn.dataset.jurisdiction || null,
+                        url: window.location.href
+                    };
+
+                    console.log('Page context updated:', pageContext);
+                });
+            });
+
+            // Heartbeat
+            setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ping' }));
+                }
+            }, 30000);
+
+            // Open all links in chat messages in new tab
+            chatMessages.addEventListener('click', (e) => {
+                if (e.target.tagName === 'A' && e.target.href) {
+                    e.preventDefault();
+                    window.open(e.target.href, '_blank', 'noopener,noreferrer');
+                }
+            });
+        }
+    </script>
+</body>
+</html>
