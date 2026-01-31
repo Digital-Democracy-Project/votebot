@@ -240,12 +240,19 @@
     /**
      * Parse URL parameters for page context.
      * Supports: ?ddp_type=bill&ddp_id=HR%201&ddp_title=My%20Bill&ddp_jurisdiction=US
+     * Or: ?ddp_url=https://digitaldemocracyproject.org/bills/my-bill
      * @returns {Object|null} Context from URL params, or null if not present
      */
     function getContextFromUrlParams() {
         var params = new URLSearchParams(window.location.search);
-        var type = params.get('ddp_type');
 
+        // Check for ddp_url first (will be resolved async)
+        var ddpUrl = params.get('ddp_url');
+        if (ddpUrl) {
+            return { _ddp_url: ddpUrl };  // Special marker for async resolution
+        }
+
+        var type = params.get('ddp_type');
         if (!type) return null;
 
         var context = {
@@ -253,7 +260,7 @@
             id: params.get('ddp_id'),
             title: params.get('ddp_title'),
             jurisdiction: params.get('ddp_jurisdiction'),
-            url: params.get('ddp_url') || window.location.href
+            url: window.location.href
         };
 
         // Clean up null values
@@ -266,14 +273,51 @@
     }
 
     /**
+     * Resolve a DDP URL to page context via the API.
+     * @param {string} ddpUrl - DDP URL to resolve
+     * @returns {Promise<Object>} Resolved context
+     */
+    function resolveContextFromUrl(ddpUrl) {
+        // Build the API URL - use same origin as wsUrl or fall back to production
+        var apiBase = config.wsUrl
+            .replace('wss://', 'https://')
+            .replace('ws://', 'http://')
+            .replace(/\/ws.*$/, '');
+
+        var resolveUrl = apiBase + '/votebot/v1/content/resolve?url=' + encodeURIComponent(ddpUrl);
+
+        console.log('[DDPChat] Resolving DDP URL:', ddpUrl);
+
+        return fetch(resolveUrl)
+            .then(function(response) {
+                if (!response.ok) {
+                    throw new Error('Failed to resolve URL: ' + response.status);
+                }
+                return response.json();
+            })
+            .then(function(data) {
+                console.log('[DDPChat] Resolved context:', data);
+                return data;
+            })
+            .catch(function(error) {
+                console.error('[DDPChat] Failed to resolve DDP URL:', error);
+                return { type: 'general' };
+            });
+    }
+
+    /**
      * Resolve the final page context from URL params, config, or auto-detection.
      * Priority: URL params > explicit config > autoDetect > general
-     * @returns {Object} Final page context
+     * @returns {Object|Promise<Object>} Final page context (may be a promise if ddp_url needs resolution)
      */
     function resolvePageContext() {
         // 1. Check URL parameters first (highest priority)
         var urlContext = getContextFromUrlParams();
         if (urlContext) {
+            // Check if this needs async resolution
+            if (urlContext._ddp_url) {
+                return resolveContextFromUrl(urlContext._ddp_url);
+            }
             return urlContext;
         }
 
@@ -293,12 +337,29 @@
     }
 
     /**
-     * Initialize the widget.
+     * Initialize the widget (async to support URL resolution).
      */
     function initWidget() {
-        // Resolve page context
-        var pageContext = resolvePageContext();
+        // Resolve page context (may be async)
+        var contextResult = resolvePageContext();
 
+        // Handle both sync and async context resolution
+        if (contextResult && typeof contextResult.then === 'function') {
+            // Async - wait for resolution
+            contextResult.then(function(pageContext) {
+                initWidgetWithContext(pageContext);
+            });
+        } else {
+            // Sync - proceed immediately
+            initWidgetWithContext(contextResult);
+        }
+    }
+
+    /**
+     * Initialize the widget with resolved context.
+     * @param {Object} pageContext - Resolved page context
+     */
+    function initWidgetWithContext(pageContext) {
         // Resolve welcome message
         var welcomeMessage = config.welcomeMessage;
         if (!welcomeMessage) {
