@@ -106,6 +106,8 @@ class BillSyncService:
         self.config_path = config_path or DEFAULT_CONFIG_PATH
         self.rate_limit = self._load_rate_limit_config()
         self._last_request_time: float = 0
+        # Cache for legislator lookups (openstates_id -> {name, slug})
+        self._legislator_cache: dict[str, dict] = {}
 
     def _load_rate_limit_config(self) -> RateLimitConfig:
         """Load rate limit configuration from YAML file."""
@@ -129,6 +131,106 @@ class BillSyncService:
         except Exception as e:
             logger.error(f"Failed to load rate limit config: {e}")
             return RateLimitConfig()
+
+    async def _build_legislator_mapping(self) -> None:
+        """
+        Build a mapping from OpenStates person IDs to legislator info.
+
+        Fetches the legislators collection from Webflow and creates a lookup table
+        for resolving sponsor references to DDP URLs.
+        """
+        if self._legislator_cache:
+            return  # Already cached
+
+        legislators_collection_id = self.settings.webflow_legislators_collection_id
+        if not legislators_collection_id:
+            logger.warning("No legislators collection ID configured, skipping legislator mapping")
+            return
+
+        webflow_api_key = self.settings.webflow_api_key.get_secret_value()
+        if not webflow_api_key:
+            logger.warning("No Webflow API key configured, skipping legislator mapping")
+            return
+
+        logger.info("Building legislator mapping for sponsor linking...")
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                headers = {
+                    "Authorization": f"Bearer {webflow_api_key}",
+                    "accept": "application/json",
+                }
+
+                offset = 0
+                page_size = 100
+
+                while True:
+                    params = {"limit": page_size, "offset": offset}
+                    response = await client.get(
+                        f"https://api.webflow.com/v2/collections/{legislators_collection_id}/items",
+                        headers=headers,
+                        params=params,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    items = data.get("items", [])
+
+                    if not items:
+                        break
+
+                    for item in items:
+                        fields = item.get("fieldData", {})
+                        openstates_id = fields.get("openstatesid", "")
+                        name = fields.get("name", "")
+                        slug = fields.get("slug", "")
+
+                        if openstates_id and slug:
+                            self._legislator_cache[openstates_id] = {
+                                "name": name,
+                                "slug": slug,
+                            }
+
+                    pagination = data.get("pagination", {})
+                    total = pagination.get("total", 0)
+                    if len(self._legislator_cache) >= total or len(items) < page_size:
+                        break
+
+                    offset += page_size
+
+            logger.info(
+                f"Built legislator mapping with {len(self._legislator_cache)} entries"
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Failed to build legislator mapping",
+                error=str(e),
+            )
+
+    def _format_sponsor_with_link(self, sponsorship: dict) -> str:
+        """
+        Format a sponsor with optional DDP link.
+
+        Args:
+            sponsorship: OpenStates sponsorship dict with name and optional person.id
+
+        Returns:
+            Formatted sponsor string, with DDP link if available
+        """
+        name = sponsorship.get("name", "Unknown")
+
+        # Check if we have a person ID to look up
+        person = sponsorship.get("person")
+        if person and isinstance(person, dict):
+            person_id = person.get("id", "")
+            if person_id:
+                legislator_info = self._legislator_cache.get(person_id)
+                if legislator_info and legislator_info.get("slug"):
+                    slug = legislator_info["slug"]
+                    ddp_url = f"https://digitaldemocracyproject.org/legislators/{slug}"
+                    return f"[{name}]({ddp_url})"
+
+        return name
 
     def parse_openstates_url(self, url: str) -> OpenStatesUrl | None:
         """
@@ -335,7 +437,7 @@ class BillSyncService:
             parts.append(f"\n### Current Status")
             parts.append(f"**Latest Action ({action_date}):** {action_desc}")
 
-        # Sponsors
+        # Sponsors (with DDP links when available)
         sponsorships = bill_data.get("sponsorships", [])
         if sponsorships:
             parts.append(f"\n### Sponsors")
@@ -343,14 +445,14 @@ class BillSyncService:
             secondary = [s for s in sponsorships if not s.get("primary")]
 
             if primary:
-                primary_names = [s.get("name", "Unknown") for s in primary]
-                parts.append(f"**Primary Sponsor(s):** {', '.join(primary_names)}")
+                primary_formatted = [self._format_sponsor_with_link(s) for s in primary]
+                parts.append(f"**Primary Sponsor(s):** {', '.join(primary_formatted)}")
 
             if secondary:
-                secondary_names = [s.get("name", "Unknown") for s in secondary[:10]]  # Limit to 10
+                secondary_formatted = [self._format_sponsor_with_link(s) for s in secondary[:10]]  # Limit to 10
                 if len(secondary) > 10:
-                    secondary_names.append(f"and {len(secondary) - 10} others")
-                parts.append(f"**Co-Sponsors:** {', '.join(secondary_names)}")
+                    secondary_formatted.append(f"and {len(secondary) - 10} others")
+                parts.append(f"**Co-Sponsors:** {', '.join(secondary_formatted)}")
 
         # Action History
         actions = bill_data.get("actions", [])
@@ -618,6 +720,9 @@ class BillSyncService:
         Returns:
             SyncBatchResult with aggregated results
         """
+        # Build legislator mapping for sponsor DDP links
+        await self._build_legislator_mapping()
+
         total = len(bills)
         successful = 0
         failed = 0
@@ -696,6 +801,9 @@ class BillSyncService:
             SyncBatchResult with aggregated results
         """
         import time
+
+        # Build legislator mapping for sponsor DDP links
+        await self._build_legislator_mapping()
 
         total = len(bills)
         successful = 0

@@ -40,6 +40,108 @@ class OpenStatesSource:
         self.settings = settings or get_settings()
         self.metadata_extractor = metadata_extractor or MetadataExtractor()
         self.api_key = self.settings.openstates_api_key.get_secret_value()
+        # Cache for legislator lookups (openstates_id -> {name, slug})
+        self._legislator_cache: dict[str, dict] = {}
+
+    async def _build_legislator_mapping(self) -> None:
+        """
+        Build a mapping from OpenStates person IDs to legislator info.
+
+        Fetches the legislators collection from Webflow and creates a lookup table
+        for resolving sponsor references to DDP URLs.
+        """
+        if self._legislator_cache:
+            return  # Already cached
+
+        legislators_collection_id = self.settings.webflow_legislators_collection_id
+        if not legislators_collection_id:
+            logger.debug("No legislators collection ID configured, skipping legislator mapping")
+            return
+
+        webflow_api_key = self.settings.webflow_api_key.get_secret_value()
+        if not webflow_api_key:
+            logger.debug("No Webflow API key configured, skipping legislator mapping")
+            return
+
+        logger.info("Building legislator mapping for sponsor linking...")
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                headers = {
+                    "Authorization": f"Bearer {webflow_api_key}",
+                    "accept": "application/json",
+                }
+
+                offset = 0
+                page_size = 100
+
+                while True:
+                    params = {"limit": page_size, "offset": offset}
+                    response = await client.get(
+                        f"https://api.webflow.com/v2/collections/{legislators_collection_id}/items",
+                        headers=headers,
+                        params=params,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    items = data.get("items", [])
+
+                    if not items:
+                        break
+
+                    for item in items:
+                        fields = item.get("fieldData", {})
+                        openstates_id = fields.get("openstatesid", "")
+                        name = fields.get("name", "")
+                        slug = fields.get("slug", "")
+
+                        if openstates_id and slug:
+                            self._legislator_cache[openstates_id] = {
+                                "name": name,
+                                "slug": slug,
+                            }
+
+                    pagination = data.get("pagination", {})
+                    total = pagination.get("total", 0)
+                    if len(self._legislator_cache) >= total or len(items) < page_size:
+                        break
+
+                    offset += page_size
+
+            logger.info(
+                f"Built legislator mapping with {len(self._legislator_cache)} entries"
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Failed to build legislator mapping",
+                error=str(e),
+            )
+
+    def _format_sponsor_with_link(self, sponsorship: dict) -> str:
+        """
+        Format a sponsor with optional DDP link.
+
+        Args:
+            sponsorship: OpenStates sponsorship dict with name and optional person.id
+
+        Returns:
+            Formatted sponsor string, with DDP link if available
+        """
+        name = sponsorship.get("name", "Unknown")
+
+        # Check if we have a person ID to look up
+        person = sponsorship.get("person")
+        if person and isinstance(person, dict):
+            person_id = person.get("id", "")
+            if person_id:
+                legislator_info = self._legislator_cache.get(person_id)
+                if legislator_info and legislator_info.get("slug"):
+                    slug = legislator_info["slug"]
+                    ddp_url = f"https://digitaldemocracyproject.org/legislators/{slug}"
+                    return f"[{name}]({ddp_url})"
+
+        return name
 
     async def fetch(
         self,
@@ -59,6 +161,9 @@ class OpenStatesSource:
         Yields:
             DocumentSource objects for each bill
         """
+        # Build legislator mapping for sponsor DDP links
+        await self._build_legislator_mapping()
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             headers = {"X-API-Key": self.api_key}
 
@@ -505,7 +610,7 @@ class OpenStatesSource:
             parts.append("## Summary")
             parts.append(abstracts[0].get("abstract", ""))
 
-        # Sponsors
+        # Sponsors (with DDP links when available)
         sponsorships = bill.get("sponsorships", [])
         if sponsorships:
             parts.append("## Sponsors")
@@ -513,10 +618,11 @@ class OpenStatesSource:
             cosponsors = [s for s in sponsorships if not s.get("primary")]
 
             if primary:
-                parts.append(f"**Primary Sponsor:** {primary[0].get('name', 'Unknown')}")
+                primary_formatted = self._format_sponsor_with_link(primary[0])
+                parts.append(f"**Primary Sponsor:** {primary_formatted}")
             if cosponsors:
-                cosponsor_names = [s.get("name", "") for s in cosponsors[:10]]
-                parts.append(f"**Cosponsors:** {', '.join(cosponsor_names)}")
+                cosponsor_formatted = [self._format_sponsor_with_link(s) for s in cosponsors[:10]]
+                parts.append(f"**Cosponsors:** {', '.join(cosponsor_formatted)}")
                 if len(cosponsors) > 10:
                     parts.append(f"  (and {len(cosponsors) - 10} more)")
 
