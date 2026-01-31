@@ -497,11 +497,13 @@ class WebflowSource:
                     fields = item.get("fieldData", {})
                     name = fields.get("name", "")
                     org_type = fields.get("type-2", "")
+                    slug = fields.get("slug", "")
 
                     if item_id and name:
                         self._organization_cache[item_id] = {
                             "name": name,
                             "type": org_type,
+                            "slug": slug,
                         }
 
                 pagination = data.get("pagination", {})
@@ -1172,8 +1174,13 @@ class WebflowSource:
                 for org in supporting_orgs:
                     org_name = org.get("name", "")
                     org_type = org.get("type", "")
+                    org_slug = org.get("slug", "")
                     if org_name:
-                        line = f"- {org_name}"
+                        # Include DDP link if slug is available
+                        if org_slug:
+                            line = f"- [{org_name}](https://digitaldemocracyproject.org/member-organizations/{org_slug})"
+                        else:
+                            line = f"- {org_name}"
                         if org_type:
                             line += f" ({org_type})"
                         support_lines.append(line)
@@ -1184,8 +1191,13 @@ class WebflowSource:
                 for org in opposing_orgs:
                     org_name = org.get("name", "")
                     org_type = org.get("type", "")
+                    org_slug = org.get("slug", "")
                     if org_name:
-                        line = f"- {org_name}"
+                        # Include DDP link if slug is available
+                        if org_slug:
+                            line = f"- [{org_name}](https://digitaldemocracyproject.org/member-organizations/{org_slug})"
+                        else:
+                            line = f"- {org_name}"
                         if org_type:
                             line += f" ({org_type})"
                         oppose_lines.append(line)
