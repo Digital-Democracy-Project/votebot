@@ -407,12 +407,17 @@ class BillSyncService:
         )
         return None
 
-    def format_bill_history_chunk(self, bill_data: dict[str, Any]) -> str:
+    def format_bill_history_chunk(
+        self,
+        bill_data: dict[str, Any],
+        ddp_url: str | None = None,
+    ) -> str:
         """
         Format bill data into a text chunk for RAG.
 
         Args:
             bill_data: OpenStates bill response
+            ddp_url: Optional DDP URL for the bill page
 
         Returns:
             Formatted text chunk
@@ -425,8 +430,13 @@ class BillSyncService:
         jurisdiction = bill_data.get("jurisdiction", {})
         jurisdiction_name = jurisdiction.get("name", "Unknown") if isinstance(jurisdiction, dict) else str(jurisdiction)
 
-        parts.append(f"## Legislative History: {identifier}")
-        parts.append(f"**Title:** {title}")
+        # Include DDP link if available
+        if ddp_url:
+            parts.append(f"## Legislative History: [{identifier}]({ddp_url})")
+            parts.append(f"**Title:** [{title}]({ddp_url})")
+        else:
+            parts.append(f"## Legislative History: {identifier}")
+            parts.append(f"**Title:** {title}")
         parts.append(f"**Jurisdiction:** {jurisdiction_name}")
 
         # Current Status
@@ -542,6 +552,7 @@ class BillSyncService:
         webflow_bill_id: str,
         bill_title: str,
         jurisdiction_name: str,
+        bill_slug: str | None = None,
     ) -> BillSyncResult:
         """
         Sync a single bill from OpenStates.
@@ -551,6 +562,7 @@ class BillSyncService:
             webflow_bill_id: The Webflow item ID
             bill_title: Bill title from Webflow
             jurisdiction_name: Human-readable jurisdiction name
+            bill_slug: Webflow slug for DDP URL generation
 
         Returns:
             BillSyncResult with sync status
@@ -580,8 +592,11 @@ class BillSyncService:
                 error="Bill not found in OpenStates",
             )
 
+        # Build DDP URL if slug is available
+        ddp_url = f"https://digitaldemocracyproject.org/bills/{bill_slug}" if bill_slug else None
+
         # Format the history chunk
-        history_chunk = self.format_bill_history_chunk(bill_data)
+        history_chunk = self.format_bill_history_chunk(bill_data, ddp_url=ddp_url)
 
         # Extract metadata
         extra_metadata = self.extract_metadata_from_openstates(bill_data, webflow_bill_id)
@@ -737,6 +752,7 @@ class BillSyncService:
             session_year = fields.get("session-year", "")
             session_code = fields.get("session-code", "")
             jurisdiction_id = fields.get("jurisdiction", "")
+            slug = fields.get("slug", "")
 
             # Get jurisdiction code
             jurisdiction_code = self.JURISDICTION_MAP.get(jurisdiction_id, "")
@@ -762,6 +778,7 @@ class BillSyncService:
                 webflow_bill_id=webflow_id,
                 bill_title=title,
                 jurisdiction_name=jurisdiction_code,
+                bill_slug=slug,
             )
 
             if result.success:
@@ -830,6 +847,7 @@ class BillSyncService:
             title = fields.get("name", "Unknown")
             openstates_url = fields.get("open-states-url-2", "")
             jurisdiction_id = fields.get("jurisdiction", "")
+            slug = fields.get("slug", "")
 
             # Get jurisdiction code
             jurisdiction_code = self.JURISDICTION_MAP.get(jurisdiction_id, jurisdiction_id[:8])
@@ -846,6 +864,7 @@ class BillSyncService:
                 webflow_bill_id=webflow_id,
                 bill_title=title,
                 jurisdiction_name=jurisdiction_code,
+                bill_slug=slug,
             )
 
             if result.success:
