@@ -52,7 +52,7 @@ Pass the context explicitly when you know what content the user is viewing:
         wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
         pageContext: {
             type: 'bill',
-            id: 'HR-1',
+            id: 'HR 1',
             title: 'One Big Beautiful Bill Act',
             jurisdiction: 'US'
         }
@@ -61,7 +61,7 @@ Pass the context explicitly when you know what content the user is viewing:
 <script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>
 ```
 
-**Welcome message:** "Welcome! I can answer detailed questions about **One Big Beautiful Bill Act (HR-1)**. You can also ask me about other bills, legislators, or Digital Democracy Project in general."
+**Welcome message:** "Welcome! I can answer detailed questions about **One Big Beautiful Bill Act (HR 1)**. You can also ask me about other bills, legislators, or Digital Democracy Project in general."
 
 ### Mode 2: Website Auto-Detection
 
@@ -82,7 +82,7 @@ The widget detects context from (in order of priority):
 1. **Data attributes** on any element:
    ```html
    <body data-ddp-type="bill"
-         data-ddp-id="HR-1"
+         data-ddp-id="HR 1"
          data-ddp-title="One Big Beautiful Bill Act"
          data-ddp-jurisdiction="US">
    ```
@@ -94,7 +94,7 @@ The widget detects context from (in order of priority):
      "@context": "https://schema.org",
      "@type": "Legislation",
      "name": "One Big Beautiful Bill Act",
-     "identifier": "HR-1"
+     "identifier": "HR 1"
    }
    </script>
    ```
@@ -161,7 +161,7 @@ DDPChatWidget.toggle();
 DDPChatWidget.setPageContext({ type: 'bill', id: 'HB-1234', title: 'My Bill' });
 
 // Update page context AND show a new personalized welcome message
-DDPChatWidget.setPageContext({ type: 'bill', id: 'HR-1', title: 'Big Bill' }, true);
+DDPChatWidget.setPageContext({ type: 'bill', id: 'HR 1', title: 'Big Bill' }, true);
 
 // Get current page context
 DDPChatWidget.getPageContext();

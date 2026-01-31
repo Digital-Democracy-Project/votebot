@@ -22,7 +22,7 @@
  *     wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
  *     pageContext: {
  *       type: 'bill',
- *       id: 'HR-1',
+ *       id: 'HR 1',
  *       title: 'One Big Beautiful Bill Act',
  *       jurisdiction: 'US'
  *     }

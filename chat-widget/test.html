@@ -143,7 +143,7 @@
             <div class="context-preview" id="mobile-context-preview">
 {
   "type": "bill",
-  "id": "HR-1",
+  "id": "HR 1",
   "title": "One Big Beautiful Bill Act",
   "jurisdiction": "US"
 }
@@ -155,7 +155,7 @@
         wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
         pageContext: {
             type: 'bill',
-            id: 'HR-1',
+            id: 'HR 1',
             title: 'One Big Beautiful Bill Act',
             jurisdiction: 'US'
         }
@@ -177,7 +177,7 @@
 
             <h3>Add Data Attributes to Your Page</h3>
             <pre>&lt;body data-ddp-type="bill"
-      data-ddp-id="HR-1"
+      data-ddp-id="HR 1"
       data-ddp-title="One Big Beautiful Bill Act"
       data-ddp-jurisdiction="US"&gt;
   ...
@@ -189,7 +189,7 @@
   "@context": "https://schema.org",
   "@type": "Legislation",
   "name": "One Big Beautiful Bill Act",
-  "identifier": "HR-1"
+  "identifier": "HR 1"
 }
 &lt;/script&gt;</pre>
 
@@ -210,7 +210,7 @@
 
         <div style="margin: 15px 0;">
             <strong>Bill context:</strong><br>
-            <em>"Welcome! I can answer detailed questions about <strong>One Big Beautiful Bill Act (HR-1)</strong>. You can also ask me about other bills, legislators, or Digital Democracy Project in general."</em>
+            <em>"Welcome! I can answer detailed questions about <strong>One Big Beautiful Bill Act (HR 1)</strong>. You can also ask me about other bills, legislators, or Digital Democracy Project in general."</em>
         </div>
 
         <div style="margin: 15px 0;">
@@ -229,7 +229,7 @@
         <pre>// Update context dynamically (e.g., when user navigates)
 DDPChatWidget.setPageContext({
     type: 'bill',
-    id: 'HR-1',
+    id: 'HR 1',
     title: 'One Big Beautiful Bill Act'
 }, true);  // true = show new welcome message
 
@@ -264,7 +264,7 @@ var ctx = DDPChatWidget.getPageContext();</pre>
             botName: 'VoteBot',
             pageContext: {
                 type: 'bill',
-                id: 'HR-1',
+                id: 'HR 1',
                 title: 'One Big Beautiful Bill Act',
                 jurisdiction: 'US'
             }
@@ -301,7 +301,7 @@ var ctx = DDPChatWidget.getPageContext();</pre>
                 general: { type: 'general' },
                 bill: {
                     type: 'bill',
-                    id: 'HR-1',
+                    id: 'HR 1',
                     title: 'One Big Beautiful Bill Act',
                     jurisdiction: 'US',
                     url: window.location.href
