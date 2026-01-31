@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoteBot - Digital Democracy Project</title>
+    <meta name="description" content="Ask questions about legislation, legislators, and civic engagement.">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a5f7a 0%, #159895 100%);
+        }
+        .container {
+            min-height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            text-align: center;
+            color: white;
+        }
+        .logo {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+        }
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+        .tagline {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            margin-bottom: 2rem;
+            max-width: 500px;
+        }
+        .cta {
+            background: white;
+            color: #1a5f7a;
+            padding: 1rem 2rem;
+            border-radius: 50px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .cta:hover {
+            transform: scale(1.05);
+            box-shadow: 0 6px 30px rgba(0,0,0,0.3);
+        }
+        .footer {
+            margin-top: 3rem;
+            opacity: 0.8;
+            font-size: 0.9rem;
+        }
+        .footer a {
+            color: white;
+            text-decoration: underline;
+        }
+        @media (max-width: 480px) {
+            h1 {
+                font-size: 1.8rem;
+            }
+            .tagline {
+                font-size: 1rem;
+            }
+            .logo {
+                font-size: 3rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🗳️</div>
+        <h1>VoteBot</h1>
+        <p class="tagline">Your AI assistant for legislation, legislators, and civic engagement. Ask me anything!</p>
+        <button class="cta" onclick="DDPChatWidget.open()">Start a Conversation</button>
+        <div class="footer">
+            Powered by <a href="https://digitaldemocracyproject.org" target="_blank">Digital Democracy Project</a>
+        </div>
+    </div>
+
+    <!-- VoteBot Widget Configuration -->
+    <script>
+        // Parse ddp_url from query string if present
+        var params = new URLSearchParams(window.location.search);
+        var ddpUrl = params.get('ddp_url');
+
+        window.DDPChatConfig = {
+            wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
+            primaryColor: '#1a5f7a',
+            botName: 'VoteBot'
+        };
+
+        // If ddp_url provided, the widget will resolve it automatically
+        // Otherwise, it defaults to general context
+    </script>
+    <script src="./dist/ddp-chat.min.js"></script>
+</body>
+</html>
