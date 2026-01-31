@@ -271,29 +271,19 @@ class VoteBotAgent:
             retrieved_context=retrieved_context,
         )
 
-        # Step 4: Calculate RAG confidence and perform web search if needed
+        # Step 4: Calculate RAG confidence and determine if web search should be enabled
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
-        if self._should_use_web_search(rag_confidence, page_context.type, message):
-            web_search_results = await self._perform_web_search(
-                query=message,
-                page_context=page_context,
-            )
-            if web_search_results:
-                web_context = self.web_search.format_results_for_context(web_search_results)
-                system_prompt = f"{system_prompt}\n\n{web_context}"
-                logger.info(
-                    "Web search results added to streaming context",
-                    results_count=len(web_search_results),
-                )
+        enable_web_search = self._should_use_web_search(rag_confidence, page_context.type, message)
 
         # Step 5: Build messages
         messages = self._build_messages(message, conversation_history)
 
-        # Step 6: Stream response
+        # Step 6: Stream response (with OpenAI web search if enabled)
         full_response = ""
         async for chunk in self.llm.stream(
             messages=messages,
             system_prompt=system_prompt,
+            enable_web_search=enable_web_search,
         ):
             full_response += chunk.text
 

@@ -292,24 +292,35 @@ class LLMService:
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        enable_web_search: bool = False,
     ) -> AsyncIterator[StreamChunk]:
         """
         Stream a completion from the LLM.
 
-        Note: The Responses API supports streaming via the 'stream' parameter.
-        Falls back to Chat Completions API for streaming if needed.
+        Uses Responses API when web search is enabled, Chat Completions otherwise.
 
         Args:
             messages: List of message dicts with 'role' and 'content'
             system_prompt: Optional system prompt to prepend
             max_tokens: Override default max tokens
             temperature: Override default temperature
+            enable_web_search: Enable OpenAI web search tool
 
         Yields:
             StreamChunk objects with text fragments
         """
-        # For streaming, we use Chat Completions API as it has better streaming support
-        # The Responses API streaming is still evolving
+        # Use Responses API for web search streaming
+        if enable_web_search:
+            async for chunk in self._stream_with_responses_api(
+                messages=messages,
+                system_prompt=system_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ):
+                yield chunk
+            return
+
+        # For non-web-search, use Chat Completions API (better streaming support)
         full_messages = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
@@ -340,6 +351,98 @@ class LLMService:
                 if chunk.choices[0].finish_reason:
                     yield StreamChunk(text="", done=True)
                     break
+
+    async def _stream_with_responses_api(
+        self,
+        messages: list[dict],
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """
+        Stream using Responses API with web search enabled.
+
+        Args:
+            messages: List of message dicts
+            system_prompt: Optional system prompt
+            max_tokens: Override max tokens
+            temperature: Override temperature
+
+        Yields:
+            StreamChunk objects
+        """
+        # Build input from messages (get the last user message)
+        user_message = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "")
+                break
+
+        # Build conversation context from history
+        conversation_context = ""
+        for msg in messages[:-1]:  # All but last message
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "user":
+                conversation_context += f"User: {content}\n"
+            elif role == "assistant":
+                conversation_context += f"Assistant: {content}\n"
+
+        # Combine system prompt with conversation context
+        instructions = system_prompt or ""
+        if conversation_context:
+            instructions = f"{instructions}\n\nPrevious conversation:\n{conversation_context}"
+
+        logger.info(
+            "Starting OpenAI stream with web search (Responses API)",
+            model=self.model,
+            web_search=True,
+        )
+
+        try:
+            # Use Responses API with streaming
+            async with self.client.responses.stream(
+                model=self.model,
+                input=user_message,
+                instructions=instructions if instructions else None,
+                max_output_tokens=max_tokens or self.max_tokens,
+                temperature=temperature or self.temperature,
+                tools=[{"type": "web_search_preview"}],
+            ) as stream:
+                async for event in stream:
+                    # Handle different event types from Responses API streaming
+                    if hasattr(event, "type"):
+                        if event.type == "response.output_text.delta":
+                            if hasattr(event, "delta") and event.delta:
+                                yield StreamChunk(text=event.delta, done=False)
+                        elif event.type == "response.completed":
+                            yield StreamChunk(text="", done=True)
+                            return
+
+        except Exception as e:
+            logger.error("Responses API streaming error, falling back to Chat Completions", error=str(e))
+            # Fallback to Chat Completions without web search
+            full_messages = []
+            if system_prompt:
+                full_messages.append({"role": "system", "content": system_prompt})
+            full_messages.extend(messages)
+
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=full_messages,
+                max_tokens=max_tokens or self.max_tokens,
+                temperature=temperature or self.temperature,
+                stream=True,
+            )
+
+            async for chunk in stream:
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta.content:
+                        yield StreamChunk(text=delta.content, done=False)
+                    if chunk.choices[0].finish_reason:
+                        yield StreamChunk(text="", done=True)
+                        break
 
     async def health_check(self) -> bool:
         """
