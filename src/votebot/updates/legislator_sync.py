@@ -210,25 +210,56 @@ class LegislatorSyncService:
 
         self._last_request_time = time.time()
 
-    def _extract_jurisdiction_from_openstates_id(self, person_id: str) -> str:
+    async def _get_sponsor_name(self, person_id: str) -> str | None:
         """
-        Extract jurisdiction code from OpenStates person ID.
+        Fetch the sponsor name format from OpenStates for bill filtering.
+
+        The OpenStates bills API 'sponsor' parameter requires the family_name
+        as used in sponsorship records, not the full name or person ID.
 
         Args:
-            person_id: OpenStates person ID like "ocd-person/6a3fae94-..."
+            person_id: OpenStates person ID (e.g., "ocd-person/6a3fae94-...")
 
         Returns:
-            Jurisdiction code or empty string if not determinable
+            Family name for sponsor filtering, or None if not found
         """
-        # OpenStates person IDs don't directly contain jurisdiction
-        # We'll need to rely on the legislator data from Webflow
-        return ""
+        await self._apply_rate_limit()
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                headers = {"x-api-key": self.api_key}
+                response = await client.get(
+                    f"{self.OPENSTATES_API_BASE}/people",
+                    headers=headers,
+                    params={"id": person_id},
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    results = data.get("results", [])
+                    if results:
+                        person = results[0]
+                        # Use family_name which matches the sponsor format in bills
+                        family_name = person.get("family_name")
+                        if family_name:
+                            return family_name
+                        # Fallback to extracting from full name
+                        name = person.get("name", "")
+                        if name:
+                            # Take the last word as family name
+                            return name.split()[-1]
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch sponsor name for {person_id}: {e}")
+
+        return None
 
     async def fetch_sponsored_bills(
         self,
         person_id: str,
         jurisdiction: str,
-        per_page: int = 50,
+        sponsor_name: str | None = None,
+        per_page: int = 20,  # OpenStates limits to 20 when using sponsor filter
     ) -> list[dict[str, Any]]:
         """
         Fetch bills sponsored by a legislator from OpenStates.
@@ -236,11 +267,19 @@ class LegislatorSyncService:
         Args:
             person_id: OpenStates person ID (e.g., "ocd-person/6a3fae94-...")
             jurisdiction: Jurisdiction code (e.g., "fl", "us")
+            sponsor_name: Family name for sponsor filtering (fetched if not provided)
             per_page: Number of results per page
 
         Returns:
             List of bill dicts from OpenStates
         """
+        # Get sponsor name if not provided
+        if not sponsor_name:
+            sponsor_name = await self._get_sponsor_name(person_id)
+            if not sponsor_name:
+                logger.warning(f"Could not determine sponsor name for {person_id}")
+                return []
+
         all_bills = []
         page = 1
 
@@ -251,10 +290,11 @@ class LegislatorSyncService:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     headers = {"x-api-key": self.api_key}
                     params = {
-                        "sponsor": person_id,
+                        "sponsor": sponsor_name,
                         "jurisdiction": jurisdiction,
                         "per_page": per_page,
                         "page": page,
+                        "include": "sponsorships",
                     }
 
                     response = await client.get(
@@ -276,7 +316,15 @@ class LegislatorSyncService:
                     if not results:
                         break
 
-                    all_bills.extend(results)
+                    # Filter to only bills where this person is actually a sponsor
+                    # (sponsor name search may match multiple people)
+                    for bill in results:
+                        sponsorships = bill.get("sponsorships", [])
+                        for s in sponsorships:
+                            person = s.get("person")
+                            if person and person.get("id") == person_id:
+                                all_bills.append(bill)
+                                break
 
                     # Check pagination
                     pagination = data.get("pagination", {})
