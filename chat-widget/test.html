@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DDP Chat Widget - Test Page</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            line-height: 1.6;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #1a5f7a;
+        }
+        .card {
+            background: white;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 24px;
+        }
+        h2 {
+            margin-top: 0;
+            font-size: 1.2rem;
+            color: #333;
+        }
+        pre {
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.85rem;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background: #1a5f7a;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        .btn:hover {
+            background: #159895;
+        }
+        .btn-secondary {
+            background: #64748b;
+        }
+        .status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            margin-left: 10px;
+        }
+        .status.connected {
+            background: #dcfce7;
+            color: #166534;
+        }
+        .status.disconnected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            color: #64748b;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>DDP Chat Widget Test Page</h1>
+
+    <div class="card">
+        <h2>Widget Status <span id="status" class="status disconnected">Disconnected</span></h2>
+        <p>The chat widget should appear as a floating button in the bottom-right corner.</p>
+        <button class="btn" onclick="DDPChatWidget.open()">Open Widget</button>
+        <button class="btn btn-secondary" onclick="DDPChatWidget.close()">Close Widget</button>
+        <button class="btn btn-secondary" onclick="checkStatus()">Check Status</button>
+    </div>
+
+    <div class="card">
+        <h2>Page Context API</h2>
+        <p>Change the page context to test different scenarios:</p>
+        <button class="btn btn-secondary" onclick="setContext('general')">General</button>
+        <button class="btn btn-secondary" onclick="setContext('bill')">Bill Page</button>
+        <button class="btn btn-secondary" onclick="setContext('legislator')">Legislator Page</button>
+        <pre id="contextDisplay">{
+  "type": "general"
+}</pre>
+    </div>
+
+    <div class="card">
+        <h2>Embedding Code</h2>
+        <p>To embed this widget on your website:</p>
+        <pre>&lt;script&gt;
+    window.DDPChatConfig = {
+        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+        position: 'bottom-right',
+        primaryColor: '#1a5f7a',
+        pageContext: {
+            type: 'bill',
+            id: 'FL-HB-1234',
+            title: 'Education Funding Act'
+        }
+    };
+&lt;/script&gt;
+&lt;script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async&gt;&lt;/script&gt;</pre>
+    </div>
+
+    <div class="card">
+        <h2>Test Human Handoff</h2>
+        <p>Send one of these messages to trigger human handoff:</p>
+        <ul>
+            <li>"I want to speak to a human"</li>
+            <li>"Can I talk to a real person?"</li>
+            <li>"This bot is not helpful"</li>
+        </ul>
+    </div>
+
+    <footer>
+        <p>Digital Democracy Project - VoteBot Chat Widget v1.0.0</p>
+    </footer>
+
+    <!-- Widget Configuration -->
+    <script>
+        window.DDPChatConfig = {
+            wsUrl: 'ws://localhost:8000/ws/chat',  // Local testing
+            position: 'bottom-right',
+            primaryColor: '#1a5f7a',
+            botName: 'VoteBot',
+            welcomeMessage: 'Welcome! Ask me anything about legislation, legislators, or civic engagement. This is a test page for the embeddable widget.',
+            pageContext: {
+                type: 'general'
+            }
+        };
+
+        function checkStatus() {
+            const statusEl = document.getElementById('status');
+            if (window.DDPChatWidget && window.DDPChatWidget.isConnected()) {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+            } else {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status disconnected';
+            }
+        }
+
+        function setContext(type) {
+            const contexts = {
+                general: { type: 'general' },
+                bill: {
+                    type: 'bill',
+                    id: 'FL-HB-1234',
+                    title: 'Education Funding Act',
+                    jurisdiction: 'FL',
+                    url: window.location.href
+                },
+                legislator: {
+                    type: 'legislator',
+                    id: 'FL-LEG-001',
+                    title: 'Sen. Jane Smith',
+                    jurisdiction: 'FL',
+                    url: window.location.href
+                }
+            };
+
+            const context = contexts[type];
+            if (window.DDPChatWidget) {
+                window.DDPChatWidget.setPageContext(context);
+            }
+            document.getElementById('contextDisplay').textContent = JSON.stringify(context, null, 2);
+        }
+
+        // Auto-check status periodically
+        setInterval(checkStatus, 2000);
+    </script>
+
+    <!-- Load Widget (use local file for testing) -->
+    <script src="./dist/ddp-chat.min.js"></script>
+</body>
+</html>

@@ -24,6 +24,14 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         """Initialize the middleware."""
         super().__init__(app)
 
+    async def __call__(self, scope, receive, send):
+        """Handle ASGI requests, bypassing middleware for WebSocket."""
+        # Skip middleware for WebSocket connections (BaseHTTPMiddleware doesn't support them)
+        if scope["type"] == "websocket":
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Process the request and log relevant information."""
         # Generate request ID

@@ -58,6 +58,10 @@ Thumbs.db
 data/
 middleware.py
 
+# Node.js (chat-widget)
+node_modules/
+package-lock.json
+
 # Test results and data caches
 scripts/*_test_results.json
 scripts/*_webflow.json

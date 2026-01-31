@@ -78,6 +78,9 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `OPENSTATES_API_KEY` | OpenStates API key | For ingestion |
 | `REDIS_URL` | Redis connection URL | Optional |
 | `API_KEY` | API key for authentication | Yes |
+| `SLACK_BOT_TOKEN` | Slack Bot Token (xoxb-...) | For handoff |
+| `SLACK_APP_TOKEN` | Slack App Token (xapp-...) | For handoff |
+| `SLACK_SUPPORT_CHANNEL` | Slack channel for support | For handoff |
 
 ## API Endpoints
 
@@ -125,6 +128,93 @@ Process a chat message and return a response.
 GET /votebot/v1/health       # Basic health check
 GET /votebot/v1/health/ready # Readiness check (verifies dependencies)
 GET /votebot/v1/health/live  # Liveness check
+```
+
+### WebSocket
+
+```
+WS /ws/chat?session_id={session_id}
+```
+
+Real-time streaming chat with human handoff support.
+
+## Chat Widget
+
+An embeddable JavaScript widget is available in the `chat-widget/` directory. See [chat-widget/README.md](chat-widget/README.md) for embedding instructions.
+
+```html
+<script>
+    window.DDPChatConfig = {
+        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+        pageContext: { type: 'bill', id: 'HB-1234' }
+    };
+</script>
+<script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>
+```
+
+## Slack Human Handoff
+
+VoteBot supports seamless handoff to human agents via Slack when users request human assistance.
+
+### Setup
+
+1. **Create a Slack App** in your workspace at https://api.slack.com/apps
+
+2. **Enable Socket Mode** in the app settings
+
+3. **Add Bot Token Scopes:**
+   - `channels:history` - Read public channel messages
+   - `channels:read` - List public channels
+   - `chat:write` - Send messages
+   - `groups:read` - List private channels
+   - `groups:history` - Read private channel messages
+   - `reactions:read` - Read message reactions
+   - `users:read` - Get user info
+
+4. **Add App Token Scope:**
+   - `connections:write` - Connect via Socket Mode
+
+5. **Subscribe to Bot Events:**
+   - `message.channels` - Messages in public channels
+   - `message.groups` - Messages in private channels
+   - `reaction_added` - Emoji reactions
+
+6. **Install the app** to your workspace
+
+7. **Create a support channel** (e.g., `#votebot-support`) and invite the bot
+
+8. **Add environment variables:**
+   ```bash
+   SLACK_BOT_TOKEN=xoxb-your-bot-token
+   SLACK_APP_TOKEN=xapp-your-app-token
+   SLACK_SUPPORT_CHANNEL=#votebot-support
+   ```
+
+### How It Works
+
+1. User sends message like "I want to talk to a human"
+2. VoteBot detects handoff request (`requires_human: true`)
+3. A thread is created in the support channel with conversation context
+4. Human agents reply in the Slack thread
+5. Agent messages are relayed to the user in real-time
+6. Agent reacts with ✅ to resolve and return to VoteBot
+
+### Thread Format
+
+```
+🆘 Human Assistance Requested
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Session: abc12345
+Page: Bill - Education Funding Act (FL-HB-1234)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Latest Message:
+> I want to talk to someone about this bill
+
+Recent Conversation:
+👤 User: What does this bill do?
+🤖 Bot: This bill addresses education funding...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 Reply in thread to respond | ✅ to resolve
 ```
 
 ## Data Ingestion
@@ -194,7 +284,8 @@ votebot/
 │   ├── services/            # External integrations
 │   │   ├── llm.py           # OpenAI client
 │   │   ├── embeddings.py    # Embedding generation
-│   │   └── vector_store.py  # Pinecone operations
+│   │   ├── vector_store.py  # Pinecone operations
+│   │   └── slack.py         # Slack human handoff
 │   ├── ingestion/           # Data ingestion
 │   │   ├── pipeline.py      # Main orchestrator
 │   │   ├── sources/         # Data source connectors
@@ -202,10 +293,14 @@ votebot/
 │   └── updates/             # Real-time updates
 │       ├── scheduler.py     # Hourly polling
 │       └── change_detection.py
-└── tests/
-    ├── unit/
-    ├── integration/
-    └── load/
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   └── load/
+└── chat-widget/             # Embeddable chat widget
+    ├── src/                 # Widget source files
+    ├── dist/                # Built widget (ddp-chat.min.js)
+    └── test.html            # Local testing page
 ```
 
 ## Performance Targets

@@ -1,0 +1,13 @@
+{
+  "name": "ddp-chat-widget",
+  "version": "1.0.0",
+  "description": "Embeddable chat widget for Digital Democracy Project VoteBot",
+  "private": true,
+  "scripts": {
+    "build": "node build.js",
+    "watch": "node build.js --watch"
+  },
+  "devDependencies": {
+    "terser": "^5.0.0"
+  }
+}

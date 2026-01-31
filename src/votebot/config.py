@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     aws_access_key_id: SecretStr = Field(default=SecretStr(""))
     aws_secret_access_key: SecretStr = Field(default=SecretStr(""))
 
+    # Slack Integration (for human handoff)
+    slack_bot_token: SecretStr = Field(default=SecretStr(""))
+    slack_app_token: SecretStr = Field(default=SecretStr(""))
+    slack_support_channel: str = "#votebot-support"
+
 
 @lru_cache
 def get_settings() -> Settings:
