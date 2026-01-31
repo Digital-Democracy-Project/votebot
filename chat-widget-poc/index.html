@@ -580,7 +580,7 @@
             </ul>
 
             <p style="margin-top: 2rem; font-size: 0.9rem; opacity: 0.8;">
-                <strong>Note:</strong> Make sure VoteBot is running on localhost:8000
+                <strong>Note:</strong> Connected to production VoteBot at api.digitaldemocracyproject.org
             </p>
         </div>
 
@@ -632,7 +632,7 @@
     <script>
         // Configuration
         const CONFIG = {
-            wsUrl: 'ws://localhost:8000/ws/chat',
+            wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
             reconnectDelay: [1000, 2000, 4000, 8000],
             maxReconnectAttempts: 4,
         };
