@@ -4,20 +4,30 @@
  * Embeddable chat widget for Digital Democracy Project VoteBot.
  * Uses Shadow DOM for style isolation.
  *
- * Usage:
+ * Two modes of operation:
+ * 1. Website Mode (autoDetect: true) - Automatically detects page context from URL, meta tags, or DOM
+ * 2. Mobile App Mode - Explicitly pass pageContext with bill/legislator details
+ *
+ * Usage (Website with auto-detection):
  * <script>
  *   window.DDPChatConfig = {
  *     wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
- *     position: 'bottom-right',
- *     primaryColor: '#1a5f7a',
+ *     autoDetect: true
+ *   };
+ * </script>
+ *
+ * Usage (Mobile App with explicit context):
+ * <script>
+ *   window.DDPChatConfig = {
+ *     wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
  *     pageContext: {
  *       type: 'bill',
- *       id: 'FL-HB-1234',
- *       title: 'Education Funding Act'
+ *       id: 'HR-1',
+ *       title: 'One Big Beautiful Bill Act',
+ *       jurisdiction: 'US'
  *     }
  *   };
  * </script>
- * <script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>
  */
 
 (function() {
@@ -36,10 +46,9 @@
         primaryColor: '#1a5f7a',
         botName: 'VoteBot',
         avatar: '\uD83D\uDDF3\uFE0F',
-        welcomeMessage: 'Welcome! Ask me anything about legislation, legislators, or civic engagement.',
-        pageContext: {
-            type: 'general'
-        }
+        welcomeMessage: null,  // null = auto-generate based on context
+        pageContext: null,     // null = use autoDetect or default to general
+        autoDetect: false      // true = detect context from page
     };
 
     // Merge user config with defaults
@@ -49,9 +58,218 @@
     var WIDGET_CSS = '/* CSS_PLACEHOLDER */';
 
     /**
+     * Auto-detect page context from the current page.
+     * Checks URL patterns, meta tags, data attributes, and JSON-LD.
+     * @returns {Object} Detected page context
+     */
+    function autoDetectPageContext() {
+        var context = { type: 'general' };
+        var url = window.location.href;
+        var pathname = window.location.pathname;
+
+        // 1. Check for DDP data attributes on body or container
+        var ddpElement = document.querySelector('[data-ddp-type]');
+        if (ddpElement) {
+            context.type = ddpElement.getAttribute('data-ddp-type') || 'general';
+            context.id = ddpElement.getAttribute('data-ddp-id');
+            context.title = ddpElement.getAttribute('data-ddp-title');
+            context.jurisdiction = ddpElement.getAttribute('data-ddp-jurisdiction');
+            context.url = url;
+            console.log('[DDPChat] Context detected from data attributes:', context);
+            return context;
+        }
+
+        // 2. Check for JSON-LD structured data
+        var jsonLdScripts = document.querySelectorAll('script[type="application/ld+json"]');
+        for (var i = 0; i < jsonLdScripts.length; i++) {
+            try {
+                var data = JSON.parse(jsonLdScripts[i].textContent);
+                if (data['@type'] === 'Legislation' || data['@type'] === 'Bill') {
+                    context.type = 'bill';
+                    context.title = data.name || data.headline;
+                    context.id = data.identifier || data.legislationIdentifier;
+                    context.url = url;
+                    console.log('[DDPChat] Context detected from JSON-LD:', context);
+                    return context;
+                }
+                if (data['@type'] === 'Person' && data.jobTitle) {
+                    context.type = 'legislator';
+                    context.title = data.name;
+                    context.id = data.identifier;
+                    context.url = url;
+                    console.log('[DDPChat] Context detected from JSON-LD:', context);
+                    return context;
+                }
+            } catch (e) {
+                // Invalid JSON, skip
+            }
+        }
+
+        // 3. Check meta tags
+        var ogType = document.querySelector('meta[property="og:type"]');
+        var ogTitle = document.querySelector('meta[property="og:title"]');
+        if (ogType && ogTitle) {
+            var typeValue = ogType.getAttribute('content');
+            if (typeValue === 'article' || typeValue === 'legislation') {
+                // Check if it looks like a bill page
+                if (pathname.match(/\/bill[s]?\//i) || pathname.match(/\/legislation\//i)) {
+                    context.type = 'bill';
+                    context.title = ogTitle.getAttribute('content');
+                    context.url = url;
+                }
+            }
+        }
+
+        // 4. Check URL patterns for common DDP routes
+        // Bill patterns: /bill/HR-1, /bills/FL/HB-1234, /legislation/US-HR-1
+        var billMatch = pathname.match(/\/bill[s]?\/(?:([A-Z]{2})[-\/])?([A-Z]+[-\s]?\d+)/i);
+        if (billMatch) {
+            context.type = 'bill';
+            context.jurisdiction = billMatch[1] || null;
+            context.id = billMatch[2];
+            context.title = extractPageTitle('bill');
+            context.url = url;
+            console.log('[DDPChat] Context detected from URL (bill):', context);
+            return context;
+        }
+
+        // Legislator patterns: /legislator/john-smith, /legislators/FL/john-smith
+        var legMatch = pathname.match(/\/legislator[s]?\/(?:([A-Z]{2})[-\/])?([a-z0-9-]+)/i);
+        if (legMatch) {
+            context.type = 'legislator';
+            context.jurisdiction = legMatch[1] || null;
+            context.id = legMatch[2];
+            context.title = extractPageTitle('legislator');
+            context.url = url;
+            console.log('[DDPChat] Context detected from URL (legislator):', context);
+            return context;
+        }
+
+        // Organization patterns: /organization/nra, /org/aclu
+        var orgMatch = pathname.match(/\/org(?:anization)?[s]?\/([a-z0-9-]+)/i);
+        if (orgMatch) {
+            context.type = 'organization';
+            context.id = orgMatch[1];
+            context.title = extractPageTitle('organization');
+            context.url = url;
+            console.log('[DDPChat] Context detected from URL (organization):', context);
+            return context;
+        }
+
+        console.log('[DDPChat] No specific context detected, using general');
+        return context;
+    }
+
+    /**
+     * Extract page title from DOM, cleaning up common prefixes/suffixes.
+     * @param {string} type - The context type for smarter extraction
+     * @returns {string|null} Extracted title
+     */
+    function extractPageTitle(type) {
+        // Try og:title first (usually cleaner)
+        var ogTitle = document.querySelector('meta[property="og:title"]');
+        if (ogTitle) {
+            return cleanTitle(ogTitle.getAttribute('content'));
+        }
+
+        // Try the main h1
+        var h1 = document.querySelector('h1');
+        if (h1) {
+            return cleanTitle(h1.textContent);
+        }
+
+        // Fall back to document title
+        return cleanTitle(document.title);
+    }
+
+    /**
+     * Clean up a title by removing common site suffixes.
+     * @param {string} title - Raw title
+     * @returns {string} Cleaned title
+     */
+    function cleanTitle(title) {
+        if (!title) return null;
+        // Remove common suffixes like " | Site Name" or " - Site Name"
+        return title
+            .replace(/\s*[|\-–—]\s*(Digital Democracy|DDP|OpenStates|Congress\.gov).*$/i, '')
+            .replace(/\s*[|\-–—]\s*[^|–—-]+$/, '')
+            .trim();
+    }
+
+    /**
+     * Generate a personalized welcome message based on page context.
+     * @param {Object} context - Page context
+     * @returns {string} Welcome message
+     */
+    function generateWelcomeMessage(context) {
+        if (!context || context.type === 'general') {
+            return 'Welcome! Ask me anything about legislation, legislators, or civic engagement.';
+        }
+
+        var title = context.title;
+        var id = context.id;
+
+        switch (context.type) {
+            case 'bill':
+                if (title && id) {
+                    return 'Welcome! I can answer detailed questions about **' + title + ' (' + id + ')**. You can also ask me about other bills, legislators, or Digital Democracy Project in general.';
+                } else if (title) {
+                    return 'Welcome! I can answer detailed questions about **' + title + '**. You can also ask me about other bills, legislators, or Digital Democracy Project in general.';
+                } else if (id) {
+                    return 'Welcome! I can answer detailed questions about **' + id + '**. You can also ask me about other bills, legislators, or Digital Democracy Project in general.';
+                }
+                return 'Welcome! I can answer detailed questions about this bill. You can also ask me about other legislation, legislators, or Digital Democracy Project in general.';
+
+            case 'legislator':
+                if (title) {
+                    return 'Welcome! I can answer questions about **' + title + '**, including their voting record, sponsored bills, and positions. You can also ask me about other legislators or legislation.';
+                }
+                return 'Welcome! I can answer questions about this legislator, including their voting record, sponsored bills, and positions. You can also ask me about other legislators or legislation.';
+
+            case 'organization':
+                if (title) {
+                    return 'Welcome! I can provide information about **' + title + '**, including their legislative positions and supported bills. You can also ask me about legislators or legislation.';
+                }
+                return 'Welcome! I can provide information about this organization, including their legislative positions and supported bills. You can also ask me about legislators or legislation.';
+
+            default:
+                return 'Welcome! Ask me anything about legislation, legislators, or civic engagement.';
+        }
+    }
+
+    /**
+     * Resolve the final page context from config and auto-detection.
+     * @returns {Object} Final page context
+     */
+    function resolvePageContext() {
+        // If explicit pageContext provided, use it (mobile app mode)
+        if (config.pageContext && config.pageContext.type) {
+            console.log('[DDPChat] Using explicit pageContext:', config.pageContext);
+            return config.pageContext;
+        }
+
+        // If autoDetect enabled, detect from page
+        if (config.autoDetect) {
+            return autoDetectPageContext();
+        }
+
+        // Default to general
+        return { type: 'general' };
+    }
+
+    /**
      * Initialize the widget.
      */
     function initWidget() {
+        // Resolve page context
+        var pageContext = resolvePageContext();
+
+        // Resolve welcome message
+        var welcomeMessage = config.welcomeMessage;
+        if (!welcomeMessage) {
+            welcomeMessage = generateWelcomeMessage(pageContext);
+        }
+
         // Create container element
         var container = document.createElement('div');
         container.id = 'ddp-chat-widget';
@@ -89,8 +307,8 @@
         // Add container to document
         document.body.appendChild(container);
 
-        // Initialize chat module
-        DDPChat.init(DDPUI.handleUIUpdate, config.pageContext);
+        // Initialize chat module with resolved context
+        DDPChat.init(DDPUI.handleUIUpdate, pageContext);
 
         // Connect WebSocket
         DDPWebSocket.connect(
@@ -103,11 +321,11 @@
         setupEventListeners();
 
         // Show welcome message
-        if (config.welcomeMessage) {
-            DDPUI.addSystemMessage(config.welcomeMessage);
+        if (welcomeMessage) {
+            DDPUI.addSystemMessage(welcomeMessage);
         }
 
-        console.log('[DDPChat] Widget initialized');
+        console.log('[DDPChat] Widget initialized with context:', pageContext);
     }
 
     /**
@@ -183,11 +401,16 @@
         },
 
         /**
-         * Update page context.
+         * Update page context and optionally refresh welcome message.
          * @param {Object} context - New page context
+         * @param {boolean} showWelcome - Whether to show a new welcome message (default: false)
          */
-        setPageContext: function(context) {
+        setPageContext: function(context, showWelcome) {
             DDPChat.setPageContext(context);
+            if (showWelcome) {
+                var message = generateWelcomeMessage(context);
+                DDPUI.addSystemMessage(message);
+            }
         },
 
         /**
@@ -212,6 +435,16 @@
          */
         getSessionId: function() {
             return DDPWebSocket.getSessionId();
+        },
+
+        /**
+         * Generate a welcome message for a given context.
+         * Useful for mobile apps that want to customize the message.
+         * @param {Object} context - Page context
+         * @returns {string}
+         */
+        generateWelcomeMessage: function(context) {
+            return generateWelcomeMessage(context);
         }
     };
 

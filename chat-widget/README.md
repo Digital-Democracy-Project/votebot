@@ -4,12 +4,16 @@ Embeddable chat widget for Digital Democracy Project VoteBot.
 
 ## Features
 
-- Single JavaScript file (~22KB minified)
+- Single JavaScript file (~27KB minified)
 - Shadow DOM for style isolation
 - WebSocket streaming with auto-reconnection
 - Markdown rendering
+- **Personalized welcome messages** based on page context
+- **Auto-detect mode** for websites (detects bill/legislator from page)
+- **Explicit context mode** for mobile apps
 - Human agent handoff support via Slack
-- Mobile responsive
+- **Full-screen mobile experience** on smaller screens (<480px)
+- Safe area support for notched phones (iPhone X+)
 
 ## Quick Start
 
@@ -34,21 +38,79 @@ Output: `dist/ddp-chat.min.js`
 
 The test page is configured to connect to `ws://localhost:8000/ws/chat`.
 
-## Embedding on Your Website
+## Page Context Modes
 
-Add this to your HTML:
+The widget supports two modes for providing page context:
+
+### Mode 1: Mobile App / Explicit Context
+
+Pass the context explicitly when you know what content the user is viewing:
 
 ```html
 <script>
     window.DDPChatConfig = {
         wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
-        position: 'bottom-right',
-        primaryColor: '#1a5f7a',
         pageContext: {
             type: 'bill',
-            id: 'FL-HB-1234',
-            title: 'Education Funding Act'
+            id: 'HR-1',
+            title: 'One Big Beautiful Bill Act',
+            jurisdiction: 'US'
         }
+    };
+</script>
+<script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>
+```
+
+**Welcome message:** "Welcome! I can answer detailed questions about **One Big Beautiful Bill Act (HR-1)**. You can also ask me about other bills, legislators, or Digital Democracy Project in general."
+
+### Mode 2: Website Auto-Detection
+
+Let the widget automatically detect context from the page:
+
+```html
+<script>
+    window.DDPChatConfig = {
+        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+        autoDetect: true
+    };
+</script>
+<script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>
+```
+
+The widget detects context from (in order of priority):
+
+1. **Data attributes** on any element:
+   ```html
+   <body data-ddp-type="bill"
+         data-ddp-id="HR-1"
+         data-ddp-title="One Big Beautiful Bill Act"
+         data-ddp-jurisdiction="US">
+   ```
+
+2. **JSON-LD structured data**:
+   ```html
+   <script type="application/ld+json">
+   {
+     "@context": "https://schema.org",
+     "@type": "Legislation",
+     "name": "One Big Beautiful Bill Act",
+     "identifier": "HR-1"
+   }
+   </script>
+   ```
+
+3. **URL patterns**: `/bill/HR-1`, `/legislator/john-smith`, `/organization/aclu`
+
+4. **Meta tags**: `og:title`, `og:type`
+
+## Embedding on Your Website
+
+Basic embedding (no context):
+
+```html
+<script>
+    window.DDPChatConfig = {
+        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws'
     };
 </script>
 <script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>
@@ -63,8 +125,9 @@ Add this to your HTML:
 | `primaryColor` | string | `#1a5f7a` | Primary brand color |
 | `botName` | string | `VoteBot` | Bot display name |
 | `avatar` | string | `🗳️` | Bot avatar emoji |
-| `welcomeMessage` | string | (default message) | Initial system message |
-| `pageContext` | object | `{type: 'general'}` | Page context for VoteBot |
+| `welcomeMessage` | string | `null` | Custom welcome message (null = auto-generate) |
+| `pageContext` | object | `null` | Explicit page context (null = use autoDetect) |
+| `autoDetect` | boolean | `false` | Auto-detect context from page |
 
 ### Page Context
 
@@ -94,11 +157,17 @@ DDPChatWidget.close();
 // Toggle the chat popup
 DDPChatWidget.toggle();
 
-// Update page context (e.g., when user navigates)
+// Update page context (e.g., when user navigates in a SPA)
 DDPChatWidget.setPageContext({ type: 'bill', id: 'HB-1234', title: 'My Bill' });
+
+// Update page context AND show a new personalized welcome message
+DDPChatWidget.setPageContext({ type: 'bill', id: 'HR-1', title: 'Big Bill' }, true);
 
 // Get current page context
 DDPChatWidget.getPageContext();
+
+// Generate a welcome message for a given context (useful for previews)
+DDPChatWidget.generateWelcomeMessage({ type: 'bill', title: 'My Bill', id: 'HB-1' });
 
 // Check connection status
 DDPChatWidget.isConnected();

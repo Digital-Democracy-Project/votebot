@@ -54,6 +54,10 @@
         .btn-secondary {
             background: #64748b;
         }
+        .btn-small {
+            padding: 6px 12px;
+            font-size: 0.85rem;
+        }
         .status {
             display: inline-block;
             padding: 4px 12px;
@@ -69,11 +73,42 @@
             background: #fee2e2;
             color: #991b1b;
         }
+        .mode-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .mode-tab {
+            padding: 10px 20px;
+            border: 2px solid #1a5f7a;
+            border-radius: 8px;
+            background: white;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .mode-tab.active {
+            background: #1a5f7a;
+            color: white;
+        }
+        .mode-content {
+            display: none;
+        }
+        .mode-content.active {
+            display: block;
+        }
         footer {
             text-align: center;
             margin-top: 40px;
             color: #64748b;
             font-size: 0.9rem;
+        }
+        .context-preview {
+            background: #f1f5f9;
+            padding: 12px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            margin-top: 10px;
         }
     </style>
 </head>
@@ -89,32 +124,120 @@
     </div>
 
     <div class="card">
-        <h2>Page Context API</h2>
-        <p>Change the page context to test different scenarios:</p>
-        <button class="btn btn-secondary" onclick="setContext('general')">General</button>
-        <button class="btn btn-secondary" onclick="setContext('bill')">Bill Page</button>
-        <button class="btn btn-secondary" onclick="setContext('legislator')">Legislator Page</button>
-        <pre id="contextDisplay">{
-  "type": "general"
-}</pre>
+        <h2>Page Context Modes</h2>
+        <div class="mode-tabs">
+            <button class="mode-tab active" onclick="showMode('mobile')">Mobile App Mode</button>
+            <button class="mode-tab" onclick="showMode('website')">Website Auto-Detect</button>
+        </div>
+
+        <!-- Mobile App Mode -->
+        <div id="mode-mobile" class="mode-content active">
+            <p>In <strong>Mobile App Mode</strong>, you explicitly pass the page context. This is ideal for mobile apps or when you have full control over the context.</p>
+
+            <h3>Test Different Contexts</h3>
+            <button class="btn btn-small" onclick="setMobileContext('bill')">Bill Context</button>
+            <button class="btn btn-small" onclick="setMobileContext('legislator')">Legislator Context</button>
+            <button class="btn btn-small" onclick="setMobileContext('organization')">Organization Context</button>
+            <button class="btn btn-small btn-secondary" onclick="setMobileContext('general')">General</button>
+
+            <div class="context-preview" id="mobile-context-preview">
+{
+  "type": "bill",
+  "id": "HR-1",
+  "title": "One Big Beautiful Bill Act",
+  "jurisdiction": "US"
+}
+            </div>
+
+            <h3>Embedding Code</h3>
+            <pre>&lt;script&gt;
+    window.DDPChatConfig = {
+        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+        pageContext: {
+            type: 'bill',
+            id: 'HR-1',
+            title: 'One Big Beautiful Bill Act',
+            jurisdiction: 'US'
+        }
+        // welcomeMessage is auto-generated based on context
+    };
+&lt;/script&gt;
+&lt;script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js"&gt;&lt;/script&gt;</pre>
+        </div>
+
+        <!-- Website Auto-Detect Mode -->
+        <div id="mode-website" class="mode-content">
+            <p>In <strong>Website Auto-Detect Mode</strong>, the widget automatically detects the page context from:</p>
+            <ul>
+                <li>Data attributes: <code>data-ddp-type</code>, <code>data-ddp-id</code>, <code>data-ddp-title</code></li>
+                <li>JSON-LD structured data</li>
+                <li>URL patterns (e.g., <code>/bill/HR-1</code>, <code>/legislator/john-smith</code>)</li>
+                <li>Meta tags (<code>og:title</code>, <code>og:type</code>)</li>
+            </ul>
+
+            <h3>Add Data Attributes to Your Page</h3>
+            <pre>&lt;body data-ddp-type="bill"
+      data-ddp-id="HR-1"
+      data-ddp-title="One Big Beautiful Bill Act"
+      data-ddp-jurisdiction="US"&gt;
+  ...
+&lt;/body&gt;</pre>
+
+            <h3>Or Use JSON-LD</h3>
+            <pre>&lt;script type="application/ld+json"&gt;
+{
+  "@context": "https://schema.org",
+  "@type": "Legislation",
+  "name": "One Big Beautiful Bill Act",
+  "identifier": "HR-1"
+}
+&lt;/script&gt;</pre>
+
+            <h3>Embedding Code (Auto-Detect)</h3>
+            <pre>&lt;script&gt;
+    window.DDPChatConfig = {
+        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+        autoDetect: true  // Automatically detect context from page
+    };
+&lt;/script&gt;
+&lt;script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js"&gt;&lt;/script&gt;</pre>
+        </div>
     </div>
 
     <div class="card">
-        <h2>Embedding Code</h2>
-        <p>To embed this widget on your website:</p>
-        <pre>&lt;script&gt;
-    window.DDPChatConfig = {
-        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
-        position: 'bottom-right',
-        primaryColor: '#1a5f7a',
-        pageContext: {
-            type: 'bill',
-            id: 'FL-HB-1234',
-            title: 'Education Funding Act'
-        }
-    };
-&lt;/script&gt;
-&lt;script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async&gt;&lt;/script&gt;</pre>
+        <h2>Welcome Message Preview</h2>
+        <p>The welcome message is automatically personalized based on page context:</p>
+
+        <div style="margin: 15px 0;">
+            <strong>Bill context:</strong><br>
+            <em>"Welcome! I can answer detailed questions about <strong>One Big Beautiful Bill Act (HR-1)</strong>. You can also ask me about other bills, legislators, or Digital Democracy Project in general."</em>
+        </div>
+
+        <div style="margin: 15px 0;">
+            <strong>Legislator context:</strong><br>
+            <em>"Welcome! I can answer questions about <strong>Sen. John Smith</strong>, including their voting record, sponsored bills, and positions. You can also ask me about other legislators or legislation."</em>
+        </div>
+
+        <div style="margin: 15px 0;">
+            <strong>General context:</strong><br>
+            <em>"Welcome! Ask me anything about legislation, legislators, or civic engagement."</em>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>JavaScript API</h2>
+        <pre>// Update context dynamically (e.g., when user navigates)
+DDPChatWidget.setPageContext({
+    type: 'bill',
+    id: 'HR-1',
+    title: 'One Big Beautiful Bill Act'
+}, true);  // true = show new welcome message
+
+// Generate a welcome message for a context
+var msg = DDPChatWidget.generateWelcomeMessage(context);
+
+// Get current context
+var ctx = DDPChatWidget.getPageContext();</pre>
     </div>
 
     <div class="card">
@@ -133,19 +256,23 @@
 
     <!-- Widget Configuration -->
     <script>
+        // Default to Mobile App Mode with bill context for testing
         window.DDPChatConfig = {
             wsUrl: 'ws://localhost:8000/ws/chat',  // Local testing
             position: 'bottom-right',
             primaryColor: '#1a5f7a',
             botName: 'VoteBot',
-            welcomeMessage: 'Welcome! Ask me anything about legislation, legislators, or civic engagement. This is a test page for the embeddable widget.',
             pageContext: {
-                type: 'general'
+                type: 'bill',
+                id: 'HR-1',
+                title: 'One Big Beautiful Bill Act',
+                jurisdiction: 'US'
             }
+            // welcomeMessage not set = auto-generated based on context
         };
 
         function checkStatus() {
-            const statusEl = document.getElementById('status');
+            var statusEl = document.getElementById('status');
             if (window.DDPChatWidget && window.DDPChatWidget.isConnected()) {
                 statusEl.textContent = 'Connected';
                 statusEl.className = 'status connected';
@@ -155,30 +282,51 @@
             }
         }
 
-        function setContext(type) {
-            const contexts = {
+        function showMode(mode) {
+            // Update tabs
+            document.querySelectorAll('.mode-tab').forEach(function(tab) {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+
+            // Update content
+            document.querySelectorAll('.mode-content').forEach(function(content) {
+                content.classList.remove('active');
+            });
+            document.getElementById('mode-' + mode).classList.add('active');
+        }
+
+        function setMobileContext(type) {
+            var contexts = {
                 general: { type: 'general' },
                 bill: {
                     type: 'bill',
-                    id: 'FL-HB-1234',
-                    title: 'Education Funding Act',
-                    jurisdiction: 'FL',
+                    id: 'HR-1',
+                    title: 'One Big Beautiful Bill Act',
+                    jurisdiction: 'US',
                     url: window.location.href
                 },
                 legislator: {
                     type: 'legislator',
-                    id: 'FL-LEG-001',
-                    title: 'Sen. Jane Smith',
+                    id: 'john-smith',
+                    title: 'Sen. John Smith',
                     jurisdiction: 'FL',
+                    url: window.location.href
+                },
+                organization: {
+                    type: 'organization',
+                    id: 'aclu',
+                    title: 'American Civil Liberties Union',
                     url: window.location.href
                 }
             };
 
-            const context = contexts[type];
+            var context = contexts[type];
             if (window.DDPChatWidget) {
-                window.DDPChatWidget.setPageContext(context);
+                // Update context and show new welcome message
+                window.DDPChatWidget.setPageContext(context, true);
             }
-            document.getElementById('contextDisplay').textContent = JSON.stringify(context, null, 2);
+            document.getElementById('mobile-context-preview').textContent = JSON.stringify(context, null, 2);
         }
 
         // Auto-check status periodically

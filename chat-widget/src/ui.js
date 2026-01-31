@@ -302,11 +302,28 @@ const DDPUI = (function() {
     }
 
     /**
-     * Add a system message.
+     * Add a system message with optional markdown rendering.
      * @param {string} content - Message content
+     * @param {boolean} renderMarkdown - Whether to render markdown (default: true)
      */
-    function addSystemMessage(content) {
-        addMessage('system', content);
+    function addSystemMessage(content, renderMarkdown) {
+        if (renderMarkdown !== false) {
+            // Render markdown for system messages (welcome messages, etc.)
+            hideTypingIndicator();
+
+            var messageDiv = document.createElement('div');
+            messageDiv.className = 'ddp-message system';
+
+            var contentDiv = document.createElement('div');
+            contentDiv.className = 'ddp-message-content';
+            contentDiv.innerHTML = markdownParser.parse(content);
+
+            messageDiv.appendChild(contentDiv);
+            elements.messagesContainer.appendChild(messageDiv);
+            scrollToBottom();
+        } else {
+            addMessage('system', content);
+        }
     }
 
     /**
