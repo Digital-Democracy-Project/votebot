@@ -621,10 +621,10 @@ class OpenStatesSource:
                 primary_formatted = self._format_sponsor_with_link(primary[0])
                 parts.append(f"**Primary Sponsor:** {primary_formatted}")
             if cosponsors:
-                cosponsor_formatted = [self._format_sponsor_with_link(s) for s in cosponsors[:10]]
+                cosponsor_formatted = [self._format_sponsor_with_link(s) for s in cosponsors[:30]]
                 parts.append(f"**Cosponsors:** {', '.join(cosponsor_formatted)}")
-                if len(cosponsors) > 10:
-                    parts.append(f"  (and {len(cosponsors) - 10} more)")
+                if len(cosponsors) > 30:
+                    parts.append(f"  (and {len(cosponsors) - 30} more)")
 
         # Actions/History
         actions = bill.get("actions", [])

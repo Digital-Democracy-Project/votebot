@@ -232,6 +232,25 @@ class BillSyncService:
 
         return name
 
+    def _format_voter_with_link(self, legislator_id: str, name: str) -> str:
+        """
+        Format a voter name with optional DDP link.
+
+        Args:
+            legislator_id: OpenStates person ID (e.g., "ocd-person/...")
+            name: Voter's display name
+
+        Returns:
+            Formatted voter string, with DDP link if available
+        """
+        if legislator_id:
+            legislator_info = self._legislator_cache.get(legislator_id)
+            if legislator_info and legislator_info.get("slug"):
+                slug = legislator_info["slug"]
+                ddp_url = f"https://digitaldemocracyproject.org/legislators/{slug}"
+                return f"[{name}]({ddp_url})"
+        return name
+
     def parse_openstates_url(self, url: str) -> OpenStatesUrl | None:
         """
         Parse an OpenStates URL to extract components.
@@ -459,9 +478,9 @@ class BillSyncService:
                 parts.append(f"**Primary Sponsor(s):** {', '.join(primary_formatted)}")
 
             if secondary:
-                secondary_formatted = [self._format_sponsor_with_link(s) for s in secondary[:10]]  # Limit to 10
-                if len(secondary) > 10:
-                    secondary_formatted.append(f"and {len(secondary) - 10} others")
+                secondary_formatted = [self._format_sponsor_with_link(s) for s in secondary[:30]]
+                if len(secondary) > 30:
+                    secondary_formatted.append(f"and {len(secondary) - 30} others")
                 parts.append(f"**Co-Sponsors:** {', '.join(secondary_formatted)}")
 
         # Action History
@@ -504,6 +523,42 @@ class BillSyncService:
                 parts.append(f"\n**{org_name} - {vote_date}**")
                 parts.append(f"Motion: {motion}")
                 parts.append(f"Result: **{result.upper()}** (Yes: {yes_count}, No: {no_count})")
+
+                # Individual votes (with DDP links when available)
+                individual_votes = vote.get("votes", [])
+                if individual_votes:
+                    # Group by vote option
+                    yes_voters = []
+                    no_voters = []
+                    other_voters = []
+
+                    for v in individual_votes:
+                        option = v.get("option", "").lower()
+                        legislator_id = v.get("legislator_id", "")
+                        voter_name = v.get("voter_name", "Unknown")
+
+                        # Format with DDP link if available
+                        formatted = self._format_voter_with_link(legislator_id, voter_name)
+
+                        if option == "yes":
+                            yes_voters.append(formatted)
+                        elif option == "no":
+                            no_voters.append(formatted)
+                        else:
+                            other_voters.append(f"{formatted} ({option})")
+
+                    if yes_voters:
+                        parts.append(f"**Voted Yes:** {', '.join(yes_voters[:20])}")
+                        if len(yes_voters) > 20:
+                            parts.append(f"  ...and {len(yes_voters) - 20} others")
+                    if no_voters:
+                        parts.append(f"**Voted No:** {', '.join(no_voters[:20])}")
+                        if len(no_voters) > 20:
+                            parts.append(f"  ...and {len(no_voters) - 20} others")
+                    if other_voters:
+                        parts.append(f"**Other:** {', '.join(other_voters[:10])}")
+                        if len(other_voters) > 10:
+                            parts.append(f"  ...and {len(other_voters) - 10} others")
 
         return "\n".join(parts)
 
