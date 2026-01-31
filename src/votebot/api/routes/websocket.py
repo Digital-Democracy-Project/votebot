@@ -358,6 +358,7 @@ async def handle_user_message(session_id: str, payload: dict):
         jurisdiction=page_context_data.get("jurisdiction"),
         title=page_context_data.get("title"),
         url=page_context_data.get("url"),
+        slug=page_context_data.get("slug"),
     )
 
     logger.info(
