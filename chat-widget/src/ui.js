@@ -43,8 +43,11 @@ const DDPUI = (function() {
             html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
             html = html.replace(/_(.+?)_/g, '<em>$1</em>');
 
-            // Links
+            // Markdown links [text](url)
             html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+            // Auto-link bare URLs (not already in an href)
+            html = html.replace(/(^|[^"'>])(https?:\/\/[^\s<]+[^\s<.,;:!?"'\)\]])/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
 
             // Blockquotes
             html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
