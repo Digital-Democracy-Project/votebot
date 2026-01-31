@@ -1073,16 +1073,37 @@ class WebflowSource:
 
             # Create metadata for PDF content
             name = fields.get("name", "Unknown Bill")
+            slug = fields.get("slug", "")
+            bill_id = self._get_bill_id(fields)
+
+            # Build DDP URL for the bill page
+            ddp_url = f"https://digitaldemocracyproject.org/bills/{slug}" if slug else None
+
+            # Prepend header with bill identification and DDP link
+            header_parts = []
+            if ddp_url:
+                header_parts.append(f"# [{name}]({ddp_url})")
+                header_parts.append(f"**Bill:** [{bill_id}]({ddp_url})")
+            else:
+                header_parts.append(f"# {name}")
+                header_parts.append(f"**Bill:** {bill_id}")
+            header_parts.append(f"**Source:** [Official Legislative Text]({pdf_url})")
+            header_parts.append("\n---\n")
+
+            # Combine header with PDF content
+            content_with_header = "\n".join(header_parts) + doc.content
+
             metadata = DocumentMetadata(
                 document_id=f"bill-pdf-{item_id}",
                 document_type="bill-text",
                 source="webflow-pdf",
                 title=f"{name} - Full Text",
                 jurisdiction=self._get_jurisdiction(fields),
-                bill_id=self._get_bill_id(fields),
+                bill_id=bill_id,
                 url=pdf_url,
                 extra={
                     "webflow_id": item_id,
+                    "slug": slug,  # Include slug for DDP linking
                     "content_type": "pdf",
                     "session": fields.get("bill-session"),
                     "bill_prefix": fields.get("bill-prefix"),
@@ -1091,7 +1112,7 @@ class WebflowSource:
             )
 
             return DocumentSource(
-                content=doc.content,
+                content=content_with_header,
                 metadata=metadata,
             )
 
