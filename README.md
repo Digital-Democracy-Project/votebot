@@ -138,15 +138,53 @@ WS /ws/chat?session_id={session_id}
 
 Real-time streaming chat with human handoff support.
 
+### Content Resolution
+
+```
+GET /votebot/v1/content/resolve?url={ddp_url}
+```
+
+Resolve a DDP URL to content metadata for the chat widget.
+
+**Example:**
+```bash
+curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025"
+```
+
+**Response:**
+```json
+{
+  "type": "bill",
+  "id": "HR 1",
+  "title": "One Big Beautiful Bill Act (HR1)",
+  "jurisdiction": "US",
+  "description": "The One Big Beautiful Bill Act aims to reform...",
+  "status": "",
+  "url": "https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025",
+  "slug": "one-big-beautiful-bill-act-hr1-2025"
+}
+```
+
 ## Chat Widget
 
 An embeddable JavaScript widget is available in the `chat-widget/` directory. See [chat-widget/README.md](chat-widget/README.md) for embedding instructions.
 
+### Hosted Version
+
+VoteBot is hosted at **https://votebot.digitaldemocracyproject.org/**
+
+You can pass a DDP URL to provide page context:
+```
+https://votebot.digitaldemocracyproject.org/?ddp_url=https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025
+```
+
+### Embedding on Your Site
+
 ```html
 <script>
     window.DDPChatConfig = {
-        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
-        pageContext: { type: 'bill', id: 'HB-1234' }
+        wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
+        pageContext: { type: 'bill', id: 'HR 1', title: 'My Bill' }
     };
 </script>
 <script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>

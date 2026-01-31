@@ -2,6 +2,12 @@
 
 Embeddable chat widget for Digital Democracy Project VoteBot.
 
+## Live Demo
+
+**Hosted version:** https://votebot.digitaldemocracyproject.org/
+
+**With page context:** https://votebot.digitaldemocracyproject.org/?ddp_url=https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025
+
 ## Features
 
 - Single JavaScript file (~27KB minified)
@@ -11,6 +17,8 @@ Embeddable chat widget for Digital Democracy Project VoteBot.
 - **Personalized welcome messages** based on page context
 - **Auto-detect mode** for websites (detects bill/legislator from page)
 - **Explicit context mode** for mobile apps
+- **URL parameter support** for passing DDP URLs (`?ddp_url=...`)
+- **Content resolution API** to fetch metadata from Webflow CMS
 - Human agent handoff support via Slack
 - **Full-screen mobile experience** on smaller screens (<480px)
 - Safe area support for notched phones (iPhone X+)
@@ -49,7 +57,7 @@ Pass the context explicitly when you know what content the user is viewing:
 ```html
 <script>
     window.DDPChatConfig = {
-        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+        wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
         pageContext: {
             type: 'bill',
             id: 'HR 1',
@@ -70,7 +78,7 @@ Let the widget automatically detect context from the page:
 ```html
 <script>
     window.DDPChatConfig = {
-        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+        wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
         autoDetect: true
     };
 </script>
@@ -103,6 +111,25 @@ The widget detects context from (in order of priority):
 
 4. **Meta tags**: `og:title`, `og:type`
 
+### Mode 3: URL Parameter (for hosted version)
+
+Pass a DDP URL as a query parameter to automatically resolve context:
+
+```
+https://votebot.digitaldemocracyproject.org/?ddp_url=https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025
+```
+
+The widget calls the content resolution API to fetch metadata from Webflow CMS:
+
+```bash
+GET /votebot/v1/content/resolve?url=https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025
+```
+
+**Supported URL patterns:**
+- Bills: `/bills/{slug}`
+- Legislators: `/legislators/{slug}`
+- Organizations: `/member-organizations/{slug}`
+
 ## Embedding on Your Website
 
 Basic embedding (no context):
@@ -110,7 +137,7 @@ Basic embedding (no context):
 ```html
 <script>
     window.DDPChatConfig = {
-        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws'
+        wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat'
     };
 </script>
 <script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>
@@ -181,10 +208,13 @@ DDPChatWidget.getSessionId();
 ### Prerequisites
 
 - VoteBot server running with WebSocket support
-- DDP-API server for hosting the widget file
+- Nginx for reverse proxy
+- Domain configured in Cloudflare (or similar DNS)
 - (Optional) Slack workspace configured for human handoff
 
-### Step 1: Build the Widget
+### Server Setup
+
+#### Step 1: Build the Widget
 
 ```bash
 cd chat-widget
@@ -192,47 +222,92 @@ npm install
 npm run build
 ```
 
-### Step 2: Copy to DDP-API Static Directory
+#### Step 2: Deploy Widget to Server
 
 ```bash
-# Create the widget directory if it doesn't exist
-mkdir -p /path/to/DDP-API/static/widget
+# On the server, create the web directory
+sudo mkdir -p /var/www/votebot
 
-# Copy the built widget
-cp dist/ddp-chat.min.js /path/to/DDP-API/static/widget/
+# Copy widget files
+scp dist/ddp-chat.min.js your-server:/var/www/votebot/
+scp index.html your-server:/var/www/votebot/
 ```
 
-### Step 3: Configure DDP-API to Serve Static Files
+#### Step 3: Configure Nginx
 
-Add to `/DDP-API/app/main.py`:
+**For the widget site (votebot.digitaldemocracyproject.org):**
 
-```python
-from pathlib import Path
-from fastapi.staticfiles import StaticFiles
-
-# Mount widget static files
-static_dir = Path(__file__).parent.parent / "static" / "widget"
-if static_dir.exists():
-    app.mount("/widget", StaticFiles(directory=str(static_dir)), name="widget")
+```bash
+sudo cp nginx.conf /etc/nginx/sites-available/votebot
+sudo ln -s /etc/nginx/sites-available/votebot /etc/nginx/sites-enabled/
 ```
 
-### Step 4: Deploy
+**For the API (api.digitaldemocracyproject.org), add these location blocks:**
 
-1. Deploy DDP-API with the widget file
-2. Ensure VoteBot is running with WebSocket endpoint at `/ws/chat`
-3. The widget will be available at:
-   ```
-   https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js
-   ```
+```nginx
+# VoteBot API endpoints
+location /votebot/ {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+# WebSocket support for VoteBot
+location /ws/chat {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 86400;
+}
+```
+
+#### Step 4: Set Up SSL
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot --nginx -d votebot.digitaldemocracyproject.org
+```
+
+#### Step 5: Start VoteBot
+
+```bash
+cd ~/votebot
+source venv/bin/activate
+PYTHONPATH=src uvicorn votebot.main:app --host 127.0.0.1 --port 8000
+```
+
+Or run as a background service:
+
+```bash
+nohup sh -c 'PYTHONPATH=src uvicorn votebot.main:app --host 127.0.0.1 --port 8000' > /tmp/votebot.log 2>&1 &
+```
+
+### Production URLs
+
+| Resource | URL |
+|----------|-----|
+| Widget landing page | https://votebot.digitaldemocracyproject.org/ |
+| Widget with context | https://votebot.digitaldemocracyproject.org/?ddp_url={DDP_URL} |
+| Widget JS file | https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js |
+| WebSocket endpoint | wss://api.digitaldemocracyproject.org/ws/chat |
+| Content resolve API | https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url={URL} |
 
 ### Production Checklist
 
 - [ ] Widget built with `npm run build`
-- [ ] Widget file copied to DDP-API static directory
-- [ ] DDP-API configured to serve `/widget` static files
-- [ ] VoteBot WebSocket endpoint accessible at `/ws/chat`
+- [ ] Widget files deployed to `/var/www/votebot/`
+- [ ] Nginx configured for votebot subdomain
+- [ ] Nginx configured to proxy `/votebot/` and `/ws/chat` to VoteBot
+- [ ] SSL certificates installed via certbot
+- [ ] DNS configured in Cloudflare (proxy enabled)
+- [ ] VoteBot running on port 8000
 - [ ] CORS configured to allow widget connections from embedding sites
-- [ ] SSL/TLS configured for `wss://` connections
 - [ ] (Optional) Slack integration configured for human handoff
 
 ## Human Handoff
