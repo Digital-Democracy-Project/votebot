@@ -238,22 +238,57 @@
     }
 
     /**
-     * Resolve the final page context from config and auto-detection.
+     * Parse URL parameters for page context.
+     * Supports: ?ddp_type=bill&ddp_id=HR%201&ddp_title=My%20Bill&ddp_jurisdiction=US
+     * @returns {Object|null} Context from URL params, or null if not present
+     */
+    function getContextFromUrlParams() {
+        var params = new URLSearchParams(window.location.search);
+        var type = params.get('ddp_type');
+
+        if (!type) return null;
+
+        var context = {
+            type: type,
+            id: params.get('ddp_id'),
+            title: params.get('ddp_title'),
+            jurisdiction: params.get('ddp_jurisdiction'),
+            url: params.get('ddp_url') || window.location.href
+        };
+
+        // Clean up null values
+        Object.keys(context).forEach(function(key) {
+            if (context[key] === null) delete context[key];
+        });
+
+        console.log('[DDPChat] Context from URL params:', context);
+        return context;
+    }
+
+    /**
+     * Resolve the final page context from URL params, config, or auto-detection.
+     * Priority: URL params > explicit config > autoDetect > general
      * @returns {Object} Final page context
      */
     function resolvePageContext() {
-        // If explicit pageContext provided, use it (mobile app mode)
+        // 1. Check URL parameters first (highest priority)
+        var urlContext = getContextFromUrlParams();
+        if (urlContext) {
+            return urlContext;
+        }
+
+        // 2. If explicit pageContext provided, use it (mobile app mode)
         if (config.pageContext && config.pageContext.type) {
             console.log('[DDPChat] Using explicit pageContext:', config.pageContext);
             return config.pageContext;
         }
 
-        // If autoDetect enabled, detect from page
+        // 3. If autoDetect enabled, detect from page
         if (config.autoDetect) {
             return autoDetectPageContext();
         }
 
-        // Default to general
+        // 4. Default to general
         return { type: 'general' };
     }
 
