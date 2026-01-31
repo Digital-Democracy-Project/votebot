@@ -29,6 +29,10 @@ class PageContext(BaseModel):
         None,
         description="URL of the current page",
     )
+    slug: str | None = Field(
+        None,
+        description="URL slug for the content item",
+    )
 
 
 class NavigationContext(BaseModel):

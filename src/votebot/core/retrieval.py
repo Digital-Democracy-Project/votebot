@@ -288,15 +288,15 @@ class RetrievalService:
         """
         filters = {}
 
-        # Add hard filters for bill/legislator pages
-        if page_context.type == "bill" and page_context.id:
-            filters["bill_id"] = page_context.id
+        # For bills, use slug as the filter (more reliable than bill_id format)
+        if page_context.type == "bill":
+            if page_context.slug:
+                filters["slug"] = page_context.slug
+            # Don't filter by bill_id as format varies (e.g., "HR 1" vs "HR-1-119")
         elif page_context.type == "legislator" and page_context.id:
             filters["legislator_id"] = page_context.id
 
-        # Add jurisdiction filter if specified
-        if page_context.jurisdiction:
-            filters["jurisdiction"] = page_context.jurisdiction
+        # Note: jurisdiction filter removed as it's stored as Webflow ID, not code
 
         return filters
 
