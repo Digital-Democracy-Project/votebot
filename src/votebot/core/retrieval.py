@@ -65,6 +65,9 @@ class RetrievalService:
         """
         Retrieve relevant chunks for a query.
 
+        For bill queries, prioritizes actual legislative text (document_type="bill-text")
+        over CMS summaries (document_type="bill").
+
         Args:
             query: The user's query
             page_context: Context about the current page
@@ -85,30 +88,36 @@ class RetrievalService:
             filters=filters,
         )
 
-        # Perform semantic search
-        results = await self.vector_store.query(
-            query=query,
-            top_k=max_chunks * 2,  # Retrieve extra for filtering
-            filter=filters if filters else None,
-        )
+        # For bill queries, use two-phase retrieval to prioritize legislative text
+        if page_context.type == "bill":
+            final_results = await self._retrieve_bill_with_text_priority(
+                query=query,
+                filters=filters,
+                max_chunks=max_chunks,
+            )
+        else:
+            # Standard retrieval for non-bill queries
+            results = await self.vector_store.query(
+                query=query,
+                top_k=max_chunks * 2,
+                filter=filters if filters else None,
+            )
 
-        # Filter by similarity threshold
-        filtered_results = [
-            r for r in results if r.score >= self.config.similarity_threshold
-        ]
+            # Filter by similarity threshold
+            filtered_results = [
+                r for r in results if r.score >= self.config.similarity_threshold
+            ]
 
-        # Deduplicate if enabled
-        if self.config.deduplicate:
-            filtered_results = self._deduplicate(filtered_results)
+            # Deduplicate if enabled
+            if self.config.deduplicate:
+                filtered_results = self._deduplicate(filtered_results)
 
-        # Limit to max chunks
-        final_results = filtered_results[:max_chunks]
+            final_results = filtered_results[:max_chunks]
 
         logger.info(
             "Retrieval completed",
-            total_retrieved=len(results),
-            after_threshold=len(filtered_results),
             final_count=len(final_results),
+            page_type=page_context.type,
         )
 
         return RetrievalResult(
@@ -117,6 +126,86 @@ class RetrievalService:
             filters_applied=filters,
             total_retrieved=len(final_results),
         )
+
+    async def _retrieve_bill_with_text_priority(
+        self,
+        query: str,
+        filters: dict,
+        max_chunks: int,
+    ) -> list[SearchResult]:
+        """
+        Retrieve bill content with priority for actual legislative text.
+
+        First tries to get chunks from bill-text (PDF/legislative text),
+        then fills remaining slots with bill summary content.
+
+        Args:
+            query: The search query
+            filters: Base filters (bill_id, jurisdiction)
+            max_chunks: Maximum chunks to return
+
+        Returns:
+            List of SearchResult prioritizing legislative text
+        """
+        # Phase 1: Get legislative text chunks (document_type="bill-text")
+        text_filters = {**filters, "document_type": "bill-text"}
+        text_results = await self.vector_store.query(
+            query=query,
+            top_k=max_chunks,
+            filter=text_filters,
+        )
+        text_results = [
+            r for r in text_results if r.score >= self.config.similarity_threshold
+        ]
+
+        logger.info(
+            "Bill text retrieval phase 1",
+            text_chunks_found=len(text_results),
+        )
+
+        # Phase 2: If we don't have enough, get summary content
+        remaining_slots = max_chunks - len(text_results)
+        summary_results = []
+
+        if remaining_slots > 0:
+            # Get bill summaries (document_type="bill")
+            summary_filters = {**filters, "document_type": "bill"}
+            summary_results = await self.vector_store.query(
+                query=query,
+                top_k=remaining_slots * 2,
+                filter=summary_filters,
+            )
+            summary_results = [
+                r for r in summary_results if r.score >= self.config.similarity_threshold
+            ]
+
+            logger.info(
+                "Bill text retrieval phase 2",
+                summary_chunks_found=len(summary_results),
+            )
+
+        # Combine results: legislative text first, then summaries
+        combined = text_results + summary_results
+
+        # Deduplicate
+        if self.config.deduplicate:
+            combined = self._deduplicate(combined)
+
+        # If we still don't have results, try without document_type filter
+        if not combined:
+            logger.info("No typed results, falling back to unfiltered query")
+            all_results = await self.vector_store.query(
+                query=query,
+                top_k=max_chunks * 2,
+                filter=filters if filters else None,
+            )
+            combined = [
+                r for r in all_results if r.score >= self.config.similarity_threshold
+            ]
+            if self.config.deduplicate:
+                combined = self._deduplicate(combined)
+
+        return combined[:max_chunks]
 
     async def retrieve_for_bill(
         self,

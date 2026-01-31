@@ -36,15 +36,15 @@ class Settings(BaseSettings):
     openai_max_tokens: int = 4096
     openai_temperature: float = 0.7
 
-    # Web Search (Responses API)
+    # Web Search (Tavily API for reliable web search fallback)
     web_search_enabled: bool = True
-    web_search_context_size: Literal["low", "medium", "high"] = "medium"
     web_search_on_low_confidence: bool = True
     web_search_confidence_threshold: float = 0.5
     # Higher threshold for legislators (triggers web search more easily)
     web_search_legislator_confidence_threshold: float = 0.7
     # Higher threshold for organizations (triggers web search more easily)
     web_search_organization_confidence_threshold: float = 0.7
+    tavily_api_key: SecretStr = Field(default=SecretStr(""))
 
     # Pinecone
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))

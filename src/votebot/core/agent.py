@@ -16,6 +16,7 @@ from votebot.config import Settings, get_settings
 from votebot.core.prompts import build_system_prompt, format_retrieved_chunks
 from votebot.core.retrieval import RetrievalService
 from votebot.services.llm import LLMService, WebSearchCitation
+from votebot.services.web_search import WebSearchService, WebSearchResult
 
 logger = structlog.get_logger()
 
@@ -68,6 +69,7 @@ class VoteBotAgent:
         self.settings = settings or get_settings()
         self.llm = LLMService(self.settings)
         self.retrieval = RetrievalService(self.settings)
+        self.web_search = WebSearchService(self.settings)
 
     async def process_message(
         self,
@@ -132,22 +134,51 @@ class VoteBotAgent:
         # Step 6: Calculate pre-LLM confidence based on retrieval quality
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
 
-        # Step 7: Generate response (with web search fallback if RAG confidence is low)
-        # Legislator queries use a higher threshold to trigger web search more easily
-        llm_response = await self.llm.complete_with_fallback(
+        # Step 7: Web search fallback if RAG confidence is low
+        web_search_used = False
+        web_search_results: list[WebSearchResult] = []
+        web_citations: list[WebSearchCitation] = []
+
+        if self._should_use_web_search(rag_confidence, page_context.type):
+            web_search_results = await self._perform_web_search(
+                query=message,
+                page_context=page_context,
+            )
+            if web_search_results:
+                web_search_used = True
+                # Add web search results to the context
+                web_context = self.web_search.format_results_for_context(web_search_results)
+                system_prompt = f"{system_prompt}\n\n{web_context}"
+                # Create web citations
+                web_citations = [
+                    WebSearchCitation(
+                        url=r.url,
+                        title=r.title,
+                        snippet=r.snippet,
+                    )
+                    for r in web_search_results
+                ]
+                logger.info(
+                    "Web search results added to context",
+                    results_count=len(web_search_results),
+                )
+
+        # Step 8: Generate response
+        llm_response = await self.llm.complete(
             messages=messages,
             system_prompt=system_prompt,
-            rag_confidence=rag_confidence,
-            page_context_type=page_context.type,
         )
+        # Attach web search info to response
+        llm_response.web_search_used = web_search_used
+        llm_response.web_citations = web_citations
 
-        # Step 8: Extract citations from RAG
+        # Step 9: Extract citations from RAG
         citations = self._extract_citations(
             response=llm_response.content,
             retrieved_chunks=retrieval_result.chunks,
         )
 
-        # Step 9: Calculate final confidence
+        # Step 10: Calculate final confidence
         confidence = self._calculate_confidence(
             response=llm_response.content,
             retrieval_count=retrieval_result.total_retrieved,
@@ -155,7 +186,7 @@ class VoteBotAgent:
             web_search_used=llm_response.web_search_used,
         )
 
-        # Step 10: Check for human handoff
+        # Step 11: Check for human handoff
         requires_human = self._check_human_handoff(
             message=message,
             response=llm_response.content,
@@ -238,10 +269,25 @@ class VoteBotAgent:
             retrieved_context=retrieved_context,
         )
 
-        # Step 4: Build messages
+        # Step 4: Calculate RAG confidence and perform web search if needed
+        rag_confidence = self._calculate_rag_confidence(retrieval_result)
+        if self._should_use_web_search(rag_confidence, page_context.type):
+            web_search_results = await self._perform_web_search(
+                query=message,
+                page_context=page_context,
+            )
+            if web_search_results:
+                web_context = self.web_search.format_results_for_context(web_search_results)
+                system_prompt = f"{system_prompt}\n\n{web_context}"
+                logger.info(
+                    "Web search results added to streaming context",
+                    results_count=len(web_search_results),
+                )
+
+        # Step 5: Build messages
         messages = self._build_messages(message, conversation_history)
 
-        # Step 5: Stream response
+        # Step 6: Stream response
         full_response = ""
         async for chunk in self.llm.stream(
             messages=messages,
@@ -521,3 +567,82 @@ class VoteBotAgent:
                 return True
 
         return False
+
+    def _should_use_web_search(
+        self,
+        rag_confidence: float,
+        page_context_type: str | None,
+    ) -> bool:
+        """
+        Determine if web search should be used based on RAG confidence.
+
+        Args:
+            rag_confidence: Confidence score from RAG retrieval
+            page_context_type: Type of page context
+
+        Returns:
+            True if web search should be triggered
+        """
+        if not self.settings.web_search_enabled or not self.settings.web_search_on_low_confidence:
+            return False
+
+        if not self.web_search.is_configured():
+            return False
+
+        # Use higher threshold for legislator/organization queries
+        if page_context_type == "legislator":
+            threshold = self.settings.web_search_legislator_confidence_threshold
+        elif page_context_type == "organization":
+            threshold = self.settings.web_search_organization_confidence_threshold
+        else:
+            threshold = self.settings.web_search_confidence_threshold
+
+        should_search = rag_confidence < threshold
+
+        if should_search:
+            logger.info(
+                "Web search triggered due to low RAG confidence",
+                rag_confidence=rag_confidence,
+                threshold=threshold,
+                page_context_type=page_context_type,
+            )
+
+        return should_search
+
+    async def _perform_web_search(
+        self,
+        query: str,
+        page_context: PageContext,
+    ) -> list[WebSearchResult]:
+        """
+        Perform web search based on the query and page context.
+
+        Args:
+            query: The user's query
+            page_context: Context about the current page
+
+        Returns:
+            List of web search results
+        """
+        try:
+            # Use specialized search based on page type
+            if page_context.type == "bill":
+                # Include bill info in search query
+                search_query = query
+                if page_context.title:
+                    search_query = f"{page_context.title} {query}"
+                return await self.web_search.search_legislation(search_query)
+
+            elif page_context.type == "legislator":
+                search_query = query
+                if page_context.title:
+                    search_query = f"{page_context.title} {query}"
+                return await self.web_search.search_legislator(search_query)
+
+            else:
+                # General search
+                return await self.web_search.search(query)
+
+        except Exception as e:
+            logger.error("Web search failed", error=str(e))
+            return []

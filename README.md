@@ -10,6 +10,8 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 
 - **Context-Aware Responses**: Understands the page context (bill, legislator, general) to provide relevant answers
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
+- **Bill Text Prioritization**: For bill queries, prioritizes actual legislative text over CMS summaries
+- **Web Search Fallback**: Automatically searches the web (via Tavily API) when RAG confidence is low
 - **Human Handoff**: Supports seamless handoff to human agents when needed
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, and custom sources
 - **Real-Time Updates**: Hourly polling for content changes
@@ -78,6 +80,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `OPENSTATES_API_KEY` | OpenStates API key | For ingestion |
 | `REDIS_URL` | Redis connection URL | Optional |
 | `API_KEY` | API key for authentication | Yes |
+| `TAVILY_API_KEY` | Tavily API key for web search fallback | For web search |
 | `SLACK_BOT_TOKEN` | Slack Bot Token (xoxb-...) | For handoff |
 | `SLACK_APP_TOKEN` | Slack App Token (xapp-...) | For handoff |
 | `SLACK_SUPPORT_CHANNEL` | Slack channel for support | For handoff |
