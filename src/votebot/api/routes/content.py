@@ -118,6 +118,7 @@ async def resolve_content(
             "status": fields.get("status", ""),
             "url": url,
             "slug": slug,
+            "webflow_id": item.get("id"),  # Used for Pinecone filtering
         }
     elif content_type == "legislator":
         return {

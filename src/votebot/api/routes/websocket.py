@@ -359,6 +359,7 @@ async def handle_user_message(session_id: str, payload: dict):
         title=page_context_data.get("title"),
         url=page_context_data.get("url"),
         slug=page_context_data.get("slug"),
+        webflow_id=page_context_data.get("webflow_id"),
     )
 
     logger.info(

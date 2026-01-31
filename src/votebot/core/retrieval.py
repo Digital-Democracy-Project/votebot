@@ -288,11 +288,13 @@ class RetrievalService:
         """
         filters = {}
 
-        # For bills, use slug as the filter (more reliable than bill_id format)
+        # For bills, use webflow_id as the filter (present in both summary and PDF chunks)
         if page_context.type == "bill":
-            if page_context.slug:
+            if page_context.webflow_id:
+                filters["webflow_id"] = page_context.webflow_id
+            # Fallback to slug if no webflow_id (only matches summary chunks, not PDFs)
+            elif page_context.slug:
                 filters["slug"] = page_context.slug
-            # Don't filter by bill_id as format varies (e.g., "HR 1" vs "HR-1-119")
         elif page_context.type == "legislator" and page_context.id:
             filters["legislator_id"] = page_context.id
 

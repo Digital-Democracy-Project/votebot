@@ -33,6 +33,10 @@ class PageContext(BaseModel):
         None,
         description="URL slug for the content item",
     )
+    webflow_id: str | None = Field(
+        None,
+        description="Webflow CMS item ID for Pinecone filtering",
+    )
 
 
 class NavigationContext(BaseModel):
