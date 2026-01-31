@@ -88,12 +88,13 @@ class RetrievalService:
             filters=filters,
         )
 
-        # For bill queries, use two-phase retrieval to prioritize legislative text
+        # For bill queries, use multi-phase retrieval to prioritize legislative text
         if page_context.type == "bill":
             final_results = await self._retrieve_bill_with_text_priority(
                 query=query,
                 filters=filters,
                 max_chunks=max_chunks,
+                page_context=page_context,
             )
         else:
             # Standard retrieval for non-bill queries
@@ -132,17 +133,20 @@ class RetrievalService:
         query: str,
         filters: dict,
         max_chunks: int,
+        page_context: PageContext | None = None,
     ) -> list[SearchResult]:
         """
         Retrieve bill content with priority for actual legislative text.
 
-        First tries to get chunks from bill-text (PDF/legislative text),
-        then fills remaining slots with bill summary content.
+        Phase 1: Get bill-text (PDF/legislative text) with webflow_id filter
+        Phase 2: Get bill summaries with webflow_id filter
+        Phase 3: Get bill-history (no webflow_id in metadata) using semantic search
 
         Args:
             query: The search query
-            filters: Base filters (bill_id, jurisdiction)
+            filters: Base filters (webflow_id)
             max_chunks: Maximum chunks to return
+            page_context: Page context with bill info for enhanced history search
 
         Returns:
             List of SearchResult prioritizing legislative text
@@ -184,8 +188,38 @@ class RetrievalService:
                 summary_chunks_found=len(summary_results),
             )
 
-        # Combine results: legislative text first, then summaries
-        combined = text_results + summary_results
+        # Phase 3: Get legislative history (bill-history doesn't have webflow_id in metadata)
+        # Enhance query with bill identifier for better semantic matching
+        remaining_slots = max_chunks - len(text_results) - len(summary_results)
+        history_results = []
+
+        if remaining_slots > 0:
+            # Build enhanced query with bill identifiers for better matching
+            history_query = query
+            if page_context:
+                bill_id = page_context.id or ""
+                bill_title = page_context.title or ""
+                if bill_id or bill_title:
+                    history_query = f"{bill_id} {bill_title} {query}".strip()
+
+            history_filters = {"document_type": "bill-history"}
+            history_results = await self.vector_store.query(
+                query=history_query,
+                top_k=remaining_slots * 2,
+                filter=history_filters,
+            )
+            history_results = [
+                r for r in history_results if r.score >= self.config.similarity_threshold
+            ]
+
+            logger.info(
+                "Bill text retrieval phase 3",
+                history_chunks_found=len(history_results),
+                history_query_preview=history_query[:50],
+            )
+
+        # Combine results: legislative text first, then summaries, then history
+        combined = text_results + summary_results + history_results
 
         # Deduplicate
         if self.config.deduplicate:
