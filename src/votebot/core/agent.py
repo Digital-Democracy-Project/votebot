@@ -134,43 +134,45 @@ class VoteBotAgent:
         # Step 6: Calculate pre-LLM confidence based on retrieval quality
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
 
-        # Step 7: Web search fallback if RAG confidence is low
-        web_search_used = False
-        web_search_results: list[WebSearchResult] = []
-        web_citations: list[WebSearchCitation] = []
+        # Step 7: Determine if web search should be enabled
+        enable_web_search = self._should_use_web_search(rag_confidence, page_context.type, message)
 
-        if self._should_use_web_search(rag_confidence, page_context.type):
-            web_search_results = await self._perform_web_search(
+        # Step 8: Generate response (with OpenAI web search if enabled)
+        llm_response = await self.llm.complete(
+            messages=messages,
+            system_prompt=system_prompt,
+            enable_web_search=enable_web_search,
+        )
+
+        # Step 8b: If OpenAI web search was enabled but didn't return citations,
+        # fall back to Tavily for supplementary search
+        if enable_web_search and not llm_response.web_citations:
+            logger.info("OpenAI web search returned no citations, trying Tavily fallback")
+            tavily_results = await self._perform_web_search(
                 query=message,
                 page_context=page_context,
             )
-            if web_search_results:
-                web_search_used = True
-                # Add web search results to the context
-                web_context = self.web_search.format_results_for_context(web_search_results)
-                system_prompt = f"{system_prompt}\n\n{web_context}"
-                # Create web citations
-                web_citations = [
+            if tavily_results:
+                # Add Tavily results to context and regenerate
+                web_context = self.web_search.format_results_for_context(tavily_results)
+                enhanced_prompt = f"{system_prompt}\n\n{web_context}"
+                llm_response = await self.llm.complete(
+                    messages=messages,
+                    system_prompt=enhanced_prompt,
+                )
+                llm_response.web_search_used = True
+                llm_response.web_citations = [
                     WebSearchCitation(
                         url=r.url,
                         title=r.title,
                         snippet=r.snippet,
                     )
-                    for r in web_search_results
+                    for r in tavily_results
                 ]
                 logger.info(
-                    "Web search results added to context",
-                    results_count=len(web_search_results),
+                    "Tavily fallback web search added to context",
+                    results_count=len(tavily_results),
                 )
-
-        # Step 8: Generate response
-        llm_response = await self.llm.complete(
-            messages=messages,
-            system_prompt=system_prompt,
-        )
-        # Attach web search info to response
-        llm_response.web_search_used = web_search_used
-        llm_response.web_citations = web_citations
 
         # Step 9: Extract citations from RAG
         citations = self._extract_citations(
@@ -271,7 +273,7 @@ class VoteBotAgent:
 
         # Step 4: Calculate RAG confidence and perform web search if needed
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
-        if self._should_use_web_search(rag_confidence, page_context.type):
+        if self._should_use_web_search(rag_confidence, page_context.type, message):
             web_search_results = await self._perform_web_search(
                 query=message,
                 page_context=page_context,
@@ -572,21 +574,20 @@ class VoteBotAgent:
         self,
         rag_confidence: float,
         page_context_type: str | None,
+        message: str | None = None,
     ) -> bool:
         """
-        Determine if web search should be used based on RAG confidence.
+        Determine if web search should be used based on RAG confidence and query content.
 
         Args:
             rag_confidence: Confidence score from RAG retrieval
             page_context_type: Type of page context
+            message: The user's message (for detecting current events queries)
 
         Returns:
             True if web search should be triggered
         """
-        if not self.settings.web_search_enabled or not self.settings.web_search_on_low_confidence:
-            return False
-
-        if not self.web_search.is_configured():
+        if not self.settings.web_search_enabled:
             return False
 
         # Use higher threshold for legislator/organization queries
@@ -597,17 +598,67 @@ class VoteBotAgent:
         else:
             threshold = self.settings.web_search_confidence_threshold
 
-        should_search = rag_confidence < threshold
+        # Check if RAG confidence is below threshold
+        confidence_trigger = rag_confidence < threshold
+
+        # Check if query is about current/recent events (force web search)
+        current_events_trigger = False
+        if message:
+            current_events_trigger = self._is_current_events_query(message)
+
+        should_search = confidence_trigger or current_events_trigger
 
         if should_search:
             logger.info(
-                "Web search triggered due to low RAG confidence",
+                "Web search triggered",
                 rag_confidence=rag_confidence,
                 threshold=threshold,
+                confidence_trigger=confidence_trigger,
+                current_events_trigger=current_events_trigger,
                 page_context_type=page_context_type,
             )
 
         return should_search
+
+    def _is_current_events_query(self, message: str) -> bool:
+        """
+        Detect if the query is asking about current/recent events.
+
+        Args:
+            message: The user's message
+
+        Returns:
+            True if the query appears to be about current events
+        """
+        message_lower = message.lower()
+
+        # Time-related keywords that suggest current events
+        current_time_keywords = [
+            "2026", "2025",  # Recent years
+            "this year", "this month", "this week", "today",
+            "recently", "latest", "current", "now",
+            "just passed", "just introduced", "newly",
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december",
+        ]
+
+        # Action keywords that suggest recent activity
+        recent_action_keywords = [
+            "what happened", "what's happening", "what is happening",
+            "any news", "any updates", "recent news",
+            "passed congress", "signed into law", "introduced",
+            "being debated", "under consideration",
+        ]
+
+        for keyword in current_time_keywords:
+            if keyword in message_lower:
+                return True
+
+        for phrase in recent_action_keywords:
+            if phrase in message_lower:
+                return True
+
+        return False
 
     async def _perform_web_search(
         self,

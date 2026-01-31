@@ -36,8 +36,9 @@ class Settings(BaseSettings):
     openai_max_tokens: int = 4096
     openai_temperature: float = 0.7
 
-    # Web Search (Tavily API for reliable web search fallback)
+    # Web Search (OpenAI Responses API + Tavily fallback)
     web_search_enabled: bool = True
+    web_search_context_size: Literal["low", "medium", "high"] = "medium"
     web_search_on_low_confidence: bool = True
     web_search_confidence_threshold: float = 0.5
     # Higher threshold for legislators (triggers web search more easily)
@@ -49,7 +50,7 @@ class Settings(BaseSettings):
     # Pinecone
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))
     pinecone_environment: str = "us-east-1"
-    pinecone_index_name: str = "votebot"
+    pinecone_index_name: str = "votebot-large"
     pinecone_namespace: str = "default"
 
     # Redis (for caching and session storage)
