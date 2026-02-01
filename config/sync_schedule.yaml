@@ -60,6 +60,18 @@ retry:
   max_attempts: 3
   backoff_seconds: 5
 
+# Legislator Bills Sync Configuration
+# Syncs sponsored bills for each legislator from OpenStates
+# Runs separately from bill sync to spread API usage
+legislator_bills:
+  enabled: true
+  sync_time_utc: "06:00"  # 6 AM UTC = 1 AM EST (2 hours after main sync)
+  frequency: weekly       # Run weekly to avoid API exhaustion
+  sync_day: sunday        # Run on Sundays when API usage is typically lower
+  # Rate limiting (more conservative than bill sync)
+  delay_between_legislators_ms: 2000  # 2 seconds between legislators
+  max_legislators_per_run: 50         # Process in batches to avoid timeouts
+
 # Notification Settings (future use)
 notifications:
   on_failure: true

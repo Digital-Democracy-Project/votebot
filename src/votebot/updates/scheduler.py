@@ -105,6 +105,38 @@ class UpdateScheduler:
             replace_existing=True,
         )
 
+        # Add weekly legislator bills sync job
+        leg_bills_config = self._sync_config.get("legislator_bills", {})
+        if leg_bills_config.get("enabled", False):
+            leg_sync_time = leg_bills_config.get("sync_time_utc", "06:00")
+            leg_hour, leg_minute = map(int, leg_sync_time.split(":"))
+            sync_day = leg_bills_config.get("sync_day", "sunday")
+
+            # Map day name to cron day_of_week (0=Monday, 6=Sunday)
+            day_map = {
+                "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                "friday": 4, "saturday": 5, "sunday": 6
+            }
+            day_of_week = day_map.get(sync_day.lower(), 6)
+
+            self.scheduler.add_job(
+                self._run_legislator_bills_sync,
+                trigger=CronTrigger(
+                    day_of_week=day_of_week,
+                    hour=leg_hour,
+                    minute=leg_minute,
+                ),
+                id="weekly_legislator_bills_sync",
+                name="Weekly Legislator Bills Sync",
+                replace_existing=True,
+            )
+
+            logger.info(
+                "Legislator bills sync scheduled",
+                sync_time=leg_sync_time,
+                sync_day=sync_day,
+            )
+
         self.scheduler.start()
         self._is_running = True
 
@@ -425,6 +457,200 @@ class UpdateScheduler:
             }
 
         return await self._run_openstates_sync()
+
+    async def _run_legislator_bills_sync(self) -> dict[str, Any]:
+        """
+        Run the weekly legislator bills sync.
+
+        Fetches sponsored bills for each legislator from OpenStates
+        and creates legislator-bills documents for RAG.
+
+        Returns:
+            Dict with sync results
+        """
+        from votebot.ingestion.sources.webflow import WebflowSource
+        from votebot.ingestion.metadata import MetadataExtractor
+        from votebot.updates.legislator_sync import LegislatorSyncService
+
+        start_time = datetime.utcnow()
+        logger.info("Starting weekly legislator bills sync")
+
+        try:
+            # Get config
+            leg_bills_config = self._sync_config.get("legislator_bills", {})
+            delay_ms = leg_bills_config.get("delay_between_legislators_ms", 2000)
+            max_per_run = leg_bills_config.get("max_legislators_per_run", 50)
+
+            # Initialize services
+            sync_service = LegislatorSyncService(self.settings)
+            webflow = WebflowSource(self.settings, MetadataExtractor())
+
+            # Fetch legislators from Webflow
+            legislators = []
+            async for doc in webflow.fetch_legislators(limit=0):
+                extra = doc.metadata.extra
+                legislator = {
+                    "openstates_id": doc.metadata.legislator_id,
+                    "name": doc.metadata.title,
+                    "slug": extra.get("slug", ""),
+                    "jurisdiction": doc.metadata.jurisdiction or "us",
+                    "party": extra.get("party", ""),
+                    "chamber": extra.get("chamber", ""),
+                }
+                if legislator["openstates_id"]:
+                    legislators.append(legislator)
+
+            logger.info(f"Fetched {len(legislators)} legislators from Webflow")
+
+            # Limit per run to avoid timeouts
+            if max_per_run > 0 and len(legislators) > max_per_run:
+                # Rotate which legislators get synced by using date-based offset
+                day_of_year = datetime.utcnow().timetuple().tm_yday
+                offset = (day_of_year * max_per_run) % len(legislators)
+                legislators = legislators[offset:offset + max_per_run]
+                if len(legislators) < max_per_run:
+                    # Wrap around
+                    legislators.extend(legislators[:max_per_run - len(legislators)])
+                logger.info(f"Processing batch of {len(legislators)} legislators (offset {offset})")
+
+            # Override rate limit for paced sync
+            sync_service.rate_limit.delay_between_requests_ms = delay_ms
+
+            # Run sync
+            result = await sync_service.sync_all_legislators(legislators)
+
+            duration = (datetime.utcnow() - start_time).total_seconds()
+
+            logger.info(
+                "Weekly legislator bills sync completed",
+                duration_seconds=duration,
+                total_legislators=result.total_legislators,
+                successful=result.successful,
+                failed=result.failed,
+                total_bills=result.total_bills_found,
+                chunks_created=result.chunks_created,
+            )
+
+            # Call callbacks
+            for callback in self._update_callbacks:
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback({"legislator_bills_sync": result})
+                    else:
+                        callback({"legislator_bills_sync": result})
+                except Exception as e:
+                    logger.error("Sync callback failed", error=str(e))
+
+            return {
+                "success": True,
+                "duration_seconds": duration,
+                "total_legislators": result.total_legislators,
+                "successful": result.successful,
+                "failed": result.failed,
+                "total_bills": result.total_bills_found,
+                "chunks_created": result.chunks_created,
+                "errors": result.errors[:10] if result.errors else [],
+            }
+
+        except Exception as e:
+            logger.exception("Legislator bills sync failed", error=str(e))
+            return {
+                "success": False,
+                "error": str(e),
+            }
+
+    async def trigger_legislator_bills_sync(
+        self,
+        limit: int = 0,
+        jurisdiction: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Manually trigger a legislator bills sync.
+
+        Args:
+            limit: Maximum legislators to process (0 = use config default)
+            jurisdiction: Filter by jurisdiction code (e.g., 'fl', 'us')
+
+        Returns:
+            Dict with sync results
+        """
+        from votebot.ingestion.sources.webflow import WebflowSource
+        from votebot.ingestion.metadata import MetadataExtractor
+        from votebot.updates.legislator_sync import LegislatorSyncService
+
+        logger.info(
+            "Manual legislator bills sync triggered",
+            limit=limit,
+            jurisdiction=jurisdiction,
+        )
+
+        start_time = datetime.utcnow()
+
+        try:
+            # Get config
+            leg_bills_config = self._sync_config.get("legislator_bills", {})
+            delay_ms = leg_bills_config.get("delay_between_legislators_ms", 2000)
+
+            # Initialize services
+            sync_service = LegislatorSyncService(self.settings)
+            webflow = WebflowSource(self.settings, MetadataExtractor())
+
+            # Fetch legislators from Webflow
+            legislators = []
+            count = 0
+            async for doc in webflow.fetch_legislators(limit=0):
+                extra = doc.metadata.extra
+                legislator = {
+                    "openstates_id": doc.metadata.legislator_id,
+                    "name": doc.metadata.title,
+                    "slug": extra.get("slug", ""),
+                    "jurisdiction": doc.metadata.jurisdiction or "us",
+                    "party": extra.get("party", ""),
+                    "chamber": extra.get("chamber", ""),
+                }
+
+                if not legislator["openstates_id"]:
+                    continue
+
+                # Filter by jurisdiction if specified
+                if jurisdiction:
+                    if legislator["jurisdiction"].lower() != jurisdiction.lower():
+                        continue
+
+                legislators.append(legislator)
+                count += 1
+
+                if limit > 0 and count >= limit:
+                    break
+
+            logger.info(f"Processing {len(legislators)} legislators")
+
+            # Override rate limit for paced sync
+            sync_service.rate_limit.delay_between_requests_ms = delay_ms
+
+            # Run sync
+            result = await sync_service.sync_all_legislators(legislators)
+
+            duration = (datetime.utcnow() - start_time).total_seconds()
+
+            return {
+                "success": True,
+                "mode": "manual",
+                "duration_seconds": duration,
+                "total_legislators": result.total_legislators,
+                "successful": result.successful,
+                "failed": result.failed,
+                "total_bills": result.total_bills_found,
+                "chunks_created": result.chunks_created,
+                "errors": result.errors[:10] if result.errors else [],
+            }
+
+        except Exception as e:
+            logger.exception("Manual legislator bills sync failed", error=str(e))
+            return {
+                "success": False,
+                "error": str(e),
+            }
 
     @property
     def is_running(self) -> bool:
