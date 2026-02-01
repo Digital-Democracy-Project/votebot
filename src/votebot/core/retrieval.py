@@ -339,6 +339,14 @@ class RetrievalService:
 
         # Note: jurisdiction filter removed as it's stored as Webflow ID, not code
 
+        logger.info(
+            "Built retrieval filters",
+            page_type=page_context.type,
+            webflow_id=page_context.webflow_id,
+            slug=page_context.slug,
+            filters=filters,
+        )
+
         return filters
 
     def _deduplicate(self, results: list[SearchResult]) -> list[SearchResult]:

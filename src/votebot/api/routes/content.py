@@ -130,6 +130,7 @@ async def resolve_content(
             "chamber": fields.get("chamber", ""),
             "url": url,
             "slug": slug,
+            "webflow_id": item.get("id"),  # Used for Pinecone filtering
         }
     elif content_type == "organization":
         return {
@@ -139,6 +140,7 @@ async def resolve_content(
             "organization_type": fields.get("type-2", ""),
             "url": url,
             "slug": slug,
+            "webflow_id": item.get("id"),  # Used for Pinecone filtering
         }
 
     return {"type": "general", "url": url}
