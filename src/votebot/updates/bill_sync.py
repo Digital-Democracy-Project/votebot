@@ -91,6 +91,23 @@ class BillSyncService:
         # Add more as needed
     }
 
+    # Mapping of jurisdiction codes to human-readable source names
+    JURISDICTION_SOURCE_NAMES = {
+        "us": "US Congress",
+        "fl": "Florida Legislature",
+        "wa": "Washington Legislature",
+        "va": "Virginia Legislature",
+        "mi": "Michigan Legislature",
+        "ma": "Massachusetts Legislature",
+        "ut": "Utah Legislature",
+        "az": "Arizona Legislature",
+        "al": "Alabama Legislature",
+        "ca": "California Legislature",
+        "ny": "New York Legislature",
+        "tx": "Texas Legislature",
+        # Add more as needed
+    }
+
     def __init__(self, settings: Settings | None = None, config_path: Path | None = None):
         """
         Initialize the bill sync service.
@@ -131,6 +148,22 @@ class BillSyncService:
         except Exception as e:
             logger.error(f"Failed to load rate limit config: {e}")
             return RateLimitConfig()
+
+    def _get_source_name(self, jurisdiction: str) -> str:
+        """
+        Get a human-readable source name for a jurisdiction.
+
+        Args:
+            jurisdiction: Jurisdiction code (e.g., 'fl', 'us', 'wa')
+
+        Returns:
+            Human-readable source name (e.g., 'Florida Legislature', 'US Congress')
+        """
+        jurisdiction_lower = jurisdiction.lower() if jurisdiction else ""
+        return self.JURISDICTION_SOURCE_NAMES.get(
+            jurisdiction_lower,
+            f"{jurisdiction.upper()} Legislature" if jurisdiction else "State Legislature"
+        )
 
     async def _build_legislator_mapping(self) -> None:
         """
@@ -657,10 +690,11 @@ class BillSyncService:
         extra_metadata = self.extract_metadata_from_openstates(bill_data, webflow_bill_id)
 
         # Create document for ingestion
+        source_name = self._get_source_name(jurisdiction_name)
         metadata = DocumentMetadata(
             document_id=f"bill-history-{webflow_bill_id}",
             document_type="bill-history",
-            source="openstates",
+            source=source_name,
             title=f"{bill_title} - Legislative History",
             jurisdiction=jurisdiction_name,
             bill_id=parsed.bill_id,

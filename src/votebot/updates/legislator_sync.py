@@ -65,6 +65,22 @@ class LegislatorSyncService:
 
     OPENSTATES_API_BASE = "https://v3.openstates.org"
 
+    # Mapping of jurisdiction codes to human-readable source names
+    JURISDICTION_SOURCE_NAMES = {
+        "us": "US Congress",
+        "fl": "Florida Legislature",
+        "wa": "Washington Legislature",
+        "va": "Virginia Legislature",
+        "mi": "Michigan Legislature",
+        "ma": "Massachusetts Legislature",
+        "ut": "Utah Legislature",
+        "az": "Arizona Legislature",
+        "al": "Alabama Legislature",
+        "ca": "California Legislature",
+        "ny": "New York Legislature",
+        "tx": "Texas Legislature",
+    }
+
     def __init__(self, settings: Settings | None = None, config_path: Path | None = None):
         """
         Initialize the legislator sync service.
@@ -104,6 +120,22 @@ class LegislatorSyncService:
         except Exception as e:
             logger.error(f"Failed to load rate limit config: {e}")
             return RateLimitConfig()
+
+    def _get_source_name(self, jurisdiction: str) -> str:
+        """
+        Get a human-readable source name for a jurisdiction.
+
+        Args:
+            jurisdiction: Jurisdiction code (e.g., 'fl', 'us', 'wa')
+
+        Returns:
+            Human-readable source name (e.g., 'Florida Legislature', 'US Congress')
+        """
+        jurisdiction_lower = jurisdiction.lower() if jurisdiction else ""
+        return self.JURISDICTION_SOURCE_NAMES.get(
+            jurisdiction_lower,
+            f"{jurisdiction.upper()} Legislature" if jurisdiction else "State Legislature"
+        )
 
     async def _build_bill_mapping(self) -> None:
         """
@@ -530,10 +562,11 @@ class LegislatorSyncService:
         content = self.format_legislator_bills_chunk(legislator, bills)
 
         # Create document metadata
+        source_name = self._get_source_name(jurisdiction)
         metadata = DocumentMetadata(
             document_id=f"legislator-bills-{openstates_id}",
             document_type="legislator-bills",
-            source="openstates",
+            source=source_name,
             title=f"{name} - Sponsored Bills",
             jurisdiction=jurisdiction.upper(),
             legislator_id=openstates_id,
