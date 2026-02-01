@@ -1333,6 +1333,128 @@ class WebflowSource:
 
         return fields.get("govid", fields.get("name", "unknown"))
 
+    async def fetch_item_by_id(
+        self,
+        collection_id: str,
+        item_id: str,
+    ) -> dict | None:
+        """
+        Fetch a single item from Webflow CMS by its ID.
+
+        Args:
+            collection_id: Webflow collection ID
+            item_id: Webflow item ID
+
+        Returns:
+            Item data dict or None if not found
+        """
+        url = f"{self.BASE_URL}/collections/{collection_id}/items/{item_id}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "accept": "application/json",
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.get(url, headers=headers)
+                if response.status_code == 404:
+                    logger.warning(
+                        "Webflow item not found",
+                        collection_id=collection_id,
+                        item_id=item_id,
+                    )
+                    return None
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    "Webflow API error",
+                    collection_id=collection_id,
+                    item_id=item_id,
+                    status_code=e.response.status_code,
+                )
+                return None
+            except Exception as e:
+                logger.error(
+                    "Failed to fetch Webflow item",
+                    collection_id=collection_id,
+                    item_id=item_id,
+                    error=str(e),
+                )
+                return None
+
+    async def fetch_item_by_slug(
+        self,
+        collection_id: str,
+        slug: str,
+    ) -> dict | None:
+        """
+        Fetch a single item from Webflow CMS by its slug.
+
+        Note: This requires pagination through the collection, so fetch_item_by_id
+        is preferred when the item ID is known.
+
+        Args:
+            collection_id: Webflow collection ID
+            slug: Item slug to search for
+
+        Returns:
+            Item data dict or None if not found
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "accept": "application/json",
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            offset = 0
+            page_size = 100
+
+            while True:
+                try:
+                    params = {"limit": page_size, "offset": offset}
+                    response = await client.get(
+                        f"{self.BASE_URL}/collections/{collection_id}/items",
+                        headers=headers,
+                        params=params,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    items = data.get("items", [])
+
+                    if not items:
+                        break
+
+                    # Search for matching slug
+                    for item in items:
+                        fields = item.get("fieldData", {})
+                        if fields.get("slug") == slug:
+                            return item
+
+                    # Check pagination
+                    pagination = data.get("pagination", {})
+                    total = pagination.get("total", 0)
+                    if offset + len(items) >= total or len(items) < page_size:
+                        break
+
+                    offset += page_size
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to search Webflow collection by slug",
+                        collection_id=collection_id,
+                        slug=slug,
+                        error=str(e),
+                    )
+                    break
+
+            logger.warning(
+                "Webflow item not found by slug",
+                collection_id=collection_id,
+                slug=slug,
+            )
+            return None
+
     async def fetch_page(self, url: str) -> DocumentSource | None:
         """
         Fetch a specific Webflow page by URL.

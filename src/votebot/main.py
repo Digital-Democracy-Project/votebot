@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from votebot.api.middleware.logging import LoggingMiddleware
-from votebot.api.routes import chat_router, content_router, health_router, websocket_router
+from votebot.api.routes import chat_router, content_router, health_router, sync_router, websocket_router
 from votebot.api.schemas.common import ErrorResponse
 from votebot.config import get_settings
 from votebot.utils.logging import setup_logging
@@ -65,6 +65,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix=settings.api_prefix)
     app.include_router(chat_router, prefix=settings.api_prefix)
     app.include_router(content_router, prefix=settings.api_prefix)
+    app.include_router(sync_router, prefix=settings.api_prefix)
     app.include_router(websocket_router)  # WebSocket at root level
 
     # Global exception handlers
