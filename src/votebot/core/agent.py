@@ -362,21 +362,33 @@ class VoteBotAgent:
         """
         citations = []
 
-        # Look for citation patterns like [Source: doc-id]
-        citation_pattern = r"\[Source:\s*([^\]]+)\]"
-        matches = re.findall(citation_pattern, response)
+        # Look for citation patterns:
+        # 1. Markdown link format: [Source: name](url)
+        # 2. Plain format: [Source: name]
+        markdown_pattern = r"\[Source:\s*([^\]]+)\]\(([^)]+)\)"
+        plain_pattern = r"\[Source:\s*([^\]]+)\](?!\()"
 
-        # Match citations to retrieved chunks
-        for match in matches:
-            match_lower = match.lower().strip()
+        # Extract markdown citations (with URLs)
+        markdown_matches = re.findall(markdown_pattern, response)
+        # Extract plain citations (without URLs)
+        plain_matches = re.findall(plain_pattern, response)
+
+        # Combine all source names for matching
+        all_source_names = [m[0] for m in markdown_matches] + plain_matches
+
+        # Match citations to retrieved chunks by source name or doc_id
+        for source_name in all_source_names:
+            source_lower = source_name.lower().strip()
             for chunk in retrieved_chunks:
                 chunk_id_lower = chunk.id.lower()
-                source = chunk.metadata.get("source", "Unknown")
+                chunk_source = chunk.metadata.get("source", "").lower()
 
-                if match_lower in chunk_id_lower or chunk_id_lower in match_lower:
+                # Match by source name OR document ID
+                if (source_lower in chunk_source or chunk_source in source_lower or
+                    source_lower in chunk_id_lower or chunk_id_lower in source_lower):
                     citations.append(
                         Citation(
-                            source=source,
+                            source=chunk.metadata.get("source", "Unknown"),
                             document_id=chunk.id,
                             excerpt=chunk.content[:200],
                             url=chunk.metadata.get("url"),

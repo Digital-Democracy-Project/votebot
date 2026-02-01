@@ -129,11 +129,15 @@ Use this information to provide an accurate, grounded response. Cite specific so
 """
 
 # Citation instruction
-CITATION_INSTRUCTION = """When citing sources, use this format: [Source: document_name]
+CITATION_INSTRUCTION = """When citing sources, use markdown links to make them clickable. Use the Source URL provided in each source's header.
+
+Format: [Source: source_name](source_url)
 
 For example:
-- "According to the bill text [Source: HR-1234], this provision would..."
-- "The legislator's voting record shows [Source: VoteRecord-Smith-2024]..."
+- "According to the bill text [Source: Congress.gov](https://www.congress.gov/bill/...), this provision would..."
+- "The vote passed 215-214 [Source: US Congress](https://v3.openstates.org/bills/...)."
+
+If no Source URL is provided for a source, fall back to: [Source: source_name]
 """
 
 # Human handoff detection prompt
@@ -269,20 +273,19 @@ def format_retrieved_chunks(chunks: list[dict]) -> str:
         doc_id = chunk.get("id", f"doc-{i}")
         content = chunk.get("content", "")
         doc_type = metadata.get("document_type", "")
+        source_url = metadata.get("url", "")
 
         # Build DDP URL if slug is available
         ddp_url = _build_ddp_url(metadata, doc_type)
 
-        # Format the chunk header with URL if available
+        # Format the chunk header with URLs
+        header_parts = [f"### Source {i}: {source} [{doc_id}]"]
+        if source_url:
+            header_parts.append(f"**Source URL:** {source_url}")
         if ddp_url:
-            formatted_chunks.append(
-                f"### Source {i}: {source} [{doc_id}]\n"
-                f"**DDP URL:** {ddp_url}\n\n{content}"
-            )
-        else:
-            formatted_chunks.append(
-                f"### Source {i}: {source} [{doc_id}]\n{content}"
-            )
+            header_parts.append(f"**DDP URL:** {ddp_url}")
+
+        formatted_chunks.append("\n".join(header_parts) + f"\n\n{content}")
 
     return "\n\n".join(formatted_chunks)
 
