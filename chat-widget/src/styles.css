@@ -134,6 +134,11 @@
     .ddp-chat-input {
         font-size: 16px; /* Prevents iOS zoom on focus */
         padding: 12px 16px;
+        touch-action: manipulation; /* Prevents zoom on double-tap */
+    }
+
+    .ddp-send-button {
+        touch-action: manipulation;
     }
 
     /* More compact header on mobile */
@@ -151,6 +156,9 @@
         padding: 10px 12px;
         /* Extra padding for home indicator on iPhone */
         padding-bottom: max(10px, env(safe-area-inset-bottom));
+        /* Ensure input area is always visible above keyboard */
+        position: sticky;
+        bottom: 0;
     }
 
     /* Slightly smaller powered-by on mobile */
