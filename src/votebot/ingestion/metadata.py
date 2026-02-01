@@ -104,8 +104,9 @@ class MetadataExtractor:
         """
         if source == "congress.gov":
             return self._extract_congress_bill_metadata(raw_data)
-        elif source == "openstates":
-            return self._extract_openstates_bill_metadata(raw_data)
+        # Detect OpenStates data by structure (has nested jurisdiction dict)
+        elif isinstance(raw_data.get("jurisdiction"), dict) or "legislative_session" in raw_data:
+            return self._extract_openstates_bill_metadata(raw_data, source)
         else:
             return self._extract_generic_bill_metadata(raw_data, source)
 
@@ -326,7 +327,7 @@ class MetadataExtractor:
             },
         )
 
-    def _extract_openstates_bill_metadata(self, raw_data: dict) -> DocumentMetadata:
+    def _extract_openstates_bill_metadata(self, raw_data: dict, source: str = "OpenStates") -> DocumentMetadata:
         """Extract metadata from OpenStates bill data."""
         bill_id = raw_data.get("identifier", "")
         jurisdiction = raw_data.get("jurisdiction", {}).get("name", "")
@@ -339,7 +340,7 @@ class MetadataExtractor:
         return DocumentMetadata(
             document_id=f"bill-openstates-{bill_id}",
             document_type="bill",
-            source="openstates",
+            source=source,
             title=raw_data.get("title"),
             jurisdiction=jurisdiction,
             bill_id=bill_id,

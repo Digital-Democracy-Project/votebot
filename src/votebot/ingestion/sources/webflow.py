@@ -582,16 +582,20 @@ class WebflowSource:
             logger.debug(f"No content extracted for organization {name}")
             return None
 
-        # Create metadata
+        # Create metadata with DDP URL for citation linking
+        slug = fields.get("slug", "")
+        ddp_url = f"https://digitaldemocracyproject.org/member-organizations/{slug}" if slug else None
+
         metadata = DocumentMetadata(
             document_id=f"organization-{item_id}",
             document_type="organization",
-            source="webflow-cms",
+            source="Digital Democracy Project",
             title=name,
             jurisdiction=None,  # Organizations can be local, state, or national
+            url=ddp_url,
             extra={
                 "webflow_id": item_id,
-                "slug": fields.get("slug", ""),  # DDP URL slug for linking
+                "slug": slug,  # DDP URL slug for linking
                 "organization_type": fields.get("type-2", ""),
                 "website": fields.get("website", ""),
                 "bills_support_count": len(bills_support),
@@ -847,17 +851,21 @@ class WebflowSource:
             logger.debug(f"No content extracted for legislator {name}")
             return None
 
-        # Create metadata
+        # Create metadata with DDP URL for citation linking
+        slug = fields.get("slug", "")
+        ddp_url = f"https://digitaldemocracyproject.org/legislators/{slug}" if slug else None
+
         metadata = DocumentMetadata(
             document_id=f"legislator-{openstates_id}",
             document_type="legislator",
-            source="webflow-cms",
+            source="Digital Democracy Project",
             title=name,
             jurisdiction=state_code,
             legislator_id=openstates_id,
+            url=ddp_url,
             extra={
                 "webflow_id": item_id,
-                "slug": fields.get("slug", ""),  # DDP URL slug for linking
+                "slug": slug,  # DDP URL slug for linking
                 "party": fields.get("party-2", fields.get("party", "")),
                 "chamber": fields.get("chamber", ""),
                 "district": fields.get("district", ""),
@@ -1005,19 +1013,22 @@ class WebflowSource:
             opposing_orgs=opposing_orgs,
         )
 
-        # Create enhanced metadata with all fields
+        # Create enhanced metadata with DDP URL for citation linking
+        slug = fields.get("slug", "")
+        ddp_url = f"https://digitaldemocracyproject.org/bills/{slug}" if slug else None
+
         metadata = DocumentMetadata(
             document_id=f"bill-webflow-{item_id}",
             document_type="bill",
-            source="webflow-cms",
+            source="Digital Democracy Project",
             title=name,
             jurisdiction=self._get_jurisdiction(fields),
             bill_id=self._get_bill_id(fields),
-            url=fields.get("gov-url"),
+            url=ddp_url,  # Use DDP URL for citation linking
             extra={
                 "webflow_id": item_id,
                 # Bill identification
-                "slug": fields.get("slug", ""),  # DDP citation URL
+                "slug": slug,  # DDP citation URL
                 "session_code": fields.get("session-code", ""),
                 "bill_prefix": fields.get("bill-prefix", ""),
                 "bill_number": fields.get("bill-number", ""),

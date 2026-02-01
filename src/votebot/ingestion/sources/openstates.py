@@ -25,6 +25,22 @@ class OpenStatesSource:
 
     BASE_URL = "https://v3.openstates.org"
 
+    # Mapping of jurisdiction codes to human-readable source names
+    JURISDICTION_SOURCE_NAMES = {
+        "us": "US Congress",
+        "fl": "Florida Legislature",
+        "wa": "Washington Legislature",
+        "va": "Virginia Legislature",
+        "mi": "Michigan Legislature",
+        "ma": "Massachusetts Legislature",
+        "ut": "Utah Legislature",
+        "az": "Arizona Legislature",
+        "al": "Alabama Legislature",
+        "ca": "California Legislature",
+        "ny": "New York Legislature",
+        "tx": "Texas Legislature",
+    }
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -42,6 +58,22 @@ class OpenStatesSource:
         self.api_key = self.settings.openstates_api_key.get_secret_value()
         # Cache for legislator lookups (openstates_id -> {name, slug})
         self._legislator_cache: dict[str, dict] = {}
+
+    def _get_source_name(self, jurisdiction: str) -> str:
+        """
+        Get a human-readable source name for a jurisdiction.
+
+        Args:
+            jurisdiction: Jurisdiction code (e.g., 'fl', 'us', 'wa')
+
+        Returns:
+            Human-readable source name (e.g., 'Florida Legislature', 'US Congress')
+        """
+        jurisdiction_lower = jurisdiction.lower() if jurisdiction else ""
+        return self.JURISDICTION_SOURCE_NAMES.get(
+            jurisdiction_lower,
+            f"{jurisdiction.upper()} Legislature" if jurisdiction else "State Legislature"
+        )
 
     async def _build_legislator_mapping(self) -> None:
         """
@@ -217,10 +249,14 @@ class OpenStatesSource:
                     if not content:
                         continue
 
+                    # Get jurisdiction from bill detail or function parameter
+                    bill_jurisdiction = bill_detail.get("jurisdiction", {}).get("id", jurisdiction)
+                    source_name = self._get_source_name(bill_jurisdiction)
+
                     # Extract metadata
                     metadata = self.metadata_extractor.extract_bill_metadata(
                         bill_detail,
-                        source="openstates",
+                        source=source_name,
                     )
 
                     yield DocumentSource(
@@ -271,9 +307,13 @@ class OpenStatesSource:
             if not content:
                 return None
 
+            # Get jurisdiction from bill and derive source name
+            bill_jurisdiction = bill.get("jurisdiction", {}).get("id", "")
+            source_name = self._get_source_name(bill_jurisdiction)
+
             metadata = self.metadata_extractor.extract_bill_metadata(
                 bill,
-                source="openstates",
+                source=source_name,
             )
 
             return DocumentSource(
@@ -330,6 +370,9 @@ class OpenStatesSource:
                     if not content:
                         continue
 
+                    # Use jurisdiction-based source name
+                    source_name = self._get_source_name(jurisdiction)
+
                     metadata = self.metadata_extractor.extract_legislator_metadata(
                         {
                             "id": person.get("id"),
@@ -339,7 +382,7 @@ class OpenStatesSource:
                             "chamber": person.get("current_role", {}).get("org_classification"),
                             "district": person.get("current_role", {}).get("district"),
                         },
-                        source="openstates",
+                        source=source_name,
                     )
 
                     yield DocumentSource(
@@ -461,6 +504,9 @@ class OpenStatesSource:
                             state = part.upper()
                             break
 
+            # Use jurisdiction-based source name
+            source_name = self._get_source_name(state)
+
             metadata = self.metadata_extractor.extract_legislator_metadata(
                 {
                     "id": person.get("id"),
@@ -475,7 +521,7 @@ class OpenStatesSource:
                     "offices": person.get("offices", []),
                     "current_role": current_role,
                 },
-                source="openstates",
+                source=source_name,
             )
 
             return DocumentSource(

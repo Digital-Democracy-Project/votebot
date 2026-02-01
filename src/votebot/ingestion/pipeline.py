@@ -348,12 +348,13 @@ class IngestionPipeline:
                     errors.append(f"Could not decode: {file_path}")
                     continue
 
-                # Create metadata
+                # Create metadata with DDP URL for citation linking
                 metadata = DocumentMetadata(
                     document_id=f"training-{path.stem}",
                     document_type="training",
-                    source="training-docs",
+                    source="Digital Democracy Project",
                     title=path.stem.replace("-", " ").replace("_", " ").title(),
+                    url="https://digitaldemocracyproject.org",
                     extra={
                         "filename": path.name,
                     },
