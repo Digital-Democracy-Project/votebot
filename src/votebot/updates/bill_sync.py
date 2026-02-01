@@ -351,10 +351,18 @@ class BillSyncService:
         Returns:
             Bill data dict or None if not found
         """
-        # URL encode the bill_id (spaces become %20)
-        encoded_bill_id = bill_id.replace(" ", "%20")
-        url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction}/{session}/{encoded_bill_id}"
-        headers = {"x-api-key": self.api_key}
+        # Remove spaces from bill_id (OpenStates expects "HB363" not "HB 363" or "HB%20363")
+        clean_bill_id = bill_id.replace(" ", "")
+        url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction}/{session}/{clean_bill_id}"
+
+        logger.info(
+            "Fetching bill from OpenStates",
+            url=url,
+            jurisdiction=jurisdiction,
+            session=session,
+            original_bill_id=bill_id,
+            clean_bill_id=clean_bill_id,
+        )
 
         last_error: Exception | None = None
 
@@ -364,12 +372,13 @@ class BillSyncService:
 
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
-                    # Pass include as a list to generate multiple query params
-                    # e.g., ?include=votes&include=sponsorships&include=actions
+                    # OpenStates v3 API accepts apikey as query param
                     response = await client.get(
                         url,
-                        headers=headers,
-                        params={"include": ["votes", "sponsorships", "actions"]},
+                        params={
+                            "apikey": self.api_key,
+                            "include": ["votes", "sponsorships", "actions"],
+                        },
                     )
 
                     # Handle 404 - bill not found (don't retry)
