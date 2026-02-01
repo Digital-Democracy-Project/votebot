@@ -367,6 +367,13 @@ class BillSyncService:
         last_error: Exception | None = None
 
         for attempt in range(self.rate_limit.max_retry_attempts):
+            logger.info(
+                "OpenStates fetch attempt",
+                attempt=attempt + 1,
+                max_attempts=self.rate_limit.max_retry_attempts,
+                url=url,
+            )
+
             # Apply rate limiting before each request
             await self._apply_rate_limit()
 
@@ -403,12 +410,13 @@ class BillSyncService:
                         retry_after = int(response.headers.get("Retry-After", self.rate_limit.retry_backoff_seconds))
                         backoff = retry_after * (2 ** attempt)  # Exponential backoff
                         logger.warning(
-                            "Rate limited by OpenStates, backing off",
+                            "Rate limited by OpenStates (429), backing off",
                             attempt=attempt + 1,
                             backoff_seconds=backoff,
                             jurisdiction=jurisdiction,
                             bill_id=bill_id,
                         )
+                        last_error = Exception(f"Rate limited (429)")
                         await asyncio.sleep(backoff)
                         continue
 
@@ -416,13 +424,14 @@ class BillSyncService:
                     if response.status_code >= 500:
                         backoff = self.rate_limit.retry_backoff_seconds * (2 ** attempt)
                         logger.warning(
-                            "OpenStates server error, retrying",
+                            "OpenStates server error (5xx), retrying",
                             status_code=response.status_code,
                             attempt=attempt + 1,
                             backoff_seconds=backoff,
                             jurisdiction=jurisdiction,
                             bill_id=bill_id,
                         )
+                        last_error = Exception(f"Server error ({response.status_code})")
                         await asyncio.sleep(backoff)
                         continue
 
