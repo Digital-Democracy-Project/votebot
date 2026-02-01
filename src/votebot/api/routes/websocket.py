@@ -367,6 +367,9 @@ async def handle_user_message(session_id: str, payload: dict):
         session_id=session_id,
         message_preview=message[:50],
         page_type=page_context.type,
+        webflow_id=page_context.webflow_id,
+        slug=page_context.slug,
+        bill_id=page_context.id,
     )
 
     # Send stream start
