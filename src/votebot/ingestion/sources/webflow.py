@@ -1047,6 +1047,57 @@ class WebflowSource:
             if pdf_doc:
                 yield pdf_doc
 
+    def _get_source_from_url(self, url: str) -> str:
+        """
+        Extract a human-readable source name from a government URL.
+
+        Args:
+            url: The government website URL (e.g., https://www.congress.gov/...)
+
+        Returns:
+            Human-readable source name (e.g., "Congress.gov", "Florida Senate")
+        """
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+
+            # Remove www. prefix
+            if domain.startswith("www."):
+                domain = domain[4:]
+
+            # Map known domains to friendly names
+            domain_map = {
+                "congress.gov": "Congress.gov",
+                "flsenate.gov": "Florida Senate",
+                "flhouse.gov": "Florida House",
+                "myfloridahouse.gov": "Florida House",
+                "leg.wa.gov": "Washington Legislature",
+                "apps.leg.wa.gov": "Washington Legislature",
+                "legislature.mi.gov": "Michigan Legislature",
+                "le.utah.gov": "Utah Legislature",
+                "azleg.gov": "Arizona Legislature",
+                "malegislature.gov": "Massachusetts Legislature",
+                "lis.virginia.gov": "Virginia Legislature",
+                "virginiageneralassembly.gov": "Virginia Legislature",
+            }
+
+            # Check for exact match
+            if domain in domain_map:
+                return domain_map[domain]
+
+            # Check for partial match (e.g., "apps.leg.wa.gov" contains "leg.wa.gov")
+            for key, value in domain_map.items():
+                if key in domain or domain.endswith(key):
+                    return value
+
+            # Fallback: use the domain as-is, capitalized nicely
+            return domain.replace(".", " ").title().replace(" Gov", ".gov")
+
+        except Exception:
+            return "Government Source"
+
     async def _process_bill_pdf(
         self,
         pdf_url: str,
@@ -1076,6 +1127,9 @@ class WebflowSource:
             slug = fields.get("slug", "")
             bill_id = self._get_bill_id(fields)
 
+            # Derive source name from the government URL
+            source_name = self._get_source_from_url(pdf_url)
+
             # Build DDP URL for the bill page
             ddp_url = f"https://digitaldemocracyproject.org/bills/{slug}" if slug else None
 
@@ -1096,7 +1150,7 @@ class WebflowSource:
             metadata = DocumentMetadata(
                 document_id=f"bill-pdf-{item_id}",
                 document_type="bill-text",
-                source="webflow-pdf",
+                source=source_name,
                 title=f"{name} - Full Text",
                 jurisdiction=self._get_jurisdiction(fields),
                 bill_id=bill_id,
