@@ -381,6 +381,13 @@ class BillSyncService:
                         },
                     )
 
+                    # Log the response for debugging
+                    logger.info(
+                        "OpenStates API response",
+                        status_code=response.status_code,
+                        url=str(response.url),
+                    )
+
                     # Handle 404 - bill not found (don't retry)
                     if response.status_code == 404:
                         logger.warning(
