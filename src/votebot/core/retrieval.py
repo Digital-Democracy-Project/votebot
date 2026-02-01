@@ -188,8 +188,8 @@ class RetrievalService:
                 summary_chunks_found=len(summary_results),
             )
 
-        # Phase 3: Get legislative history (bill-history doesn't have webflow_id in metadata)
-        # Enhance query with bill identifier for better semantic matching
+        # Phase 3: Get legislative history
+        # Filter by webflow_id if available to ensure we get the right bill's history
         remaining_slots = max_chunks - len(text_results) - len(summary_results)
         history_results = []
 
@@ -203,6 +203,11 @@ class RetrievalService:
                     history_query = f"{bill_id} {bill_title} {query}".strip()
 
             history_filters = {"document_type": "bill-history"}
+            # Apply webflow_id filter if available to get the correct bill's history
+            if filters.get("webflow_id"):
+                history_filters["webflow_id"] = filters["webflow_id"]
+            elif filters.get("slug"):
+                history_filters["slug"] = filters["slug"]
             history_results = await self.vector_store.query(
                 query=history_query,
                 top_k=remaining_slots * 2,

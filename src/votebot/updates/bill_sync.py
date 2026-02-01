@@ -627,6 +627,7 @@ class BillSyncService:
             status = "in_committee"
 
         return {
+            "webflow_id": webflow_bill_id,  # For filtering in RAG retrieval
             "bill_status": status,
             "latest_action_date": latest_action.get("date") if latest_action else None,
             "latest_action_description": latest_action.get("description", "")[:200] if latest_action else None,
@@ -688,6 +689,9 @@ class BillSyncService:
 
         # Extract metadata
         extra_metadata = self.extract_metadata_from_openstates(bill_data, webflow_bill_id)
+        # Add slug for RAG retrieval filtering
+        if bill_slug:
+            extra_metadata["slug"] = bill_slug
 
         # Create document for ingestion
         source_name = self._get_source_name(jurisdiction_name)
