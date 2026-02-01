@@ -109,6 +109,15 @@ async def sync_bill(
         jurisdiction_id = fields.get("jurisdiction", "")
         slug = fields.get("slug", "")
 
+        logger.info(
+            "Bill sync - extracted fields",
+            item_id=item_id,
+            title=title,
+            openstates_url=openstates_url[:50] if openstates_url else None,
+            jurisdiction_id=jurisdiction_id,
+            slug=slug,
+        )
+
         chunks_created = 0
         document_id = ""
 
@@ -118,6 +127,12 @@ async def sync_bill(
 
             # Get jurisdiction code from the mapping
             jurisdiction_code = bill_sync.JURISDICTION_MAP.get(jurisdiction_id, "")
+            logger.info(
+                "Bill sync - jurisdiction lookup",
+                jurisdiction_id=jurisdiction_id,
+                jurisdiction_code=jurisdiction_code,
+                map_keys=list(bill_sync.JURISDICTION_MAP.keys())[:5],
+            )
 
             result = await bill_sync.sync_bill(
                 openstates_url=openstates_url,
@@ -125,6 +140,13 @@ async def sync_bill(
                 bill_title=title,
                 jurisdiction_name=jurisdiction_code,
                 bill_slug=slug,
+            )
+
+            logger.info(
+                "Bill sync - OpenStates result",
+                success=result.success,
+                chunks_created=result.chunks_created,
+                error=result.error,
             )
 
             if result.success:
@@ -136,6 +158,11 @@ async def sync_bill(
                     item_id=item_id,
                     error=result.error,
                 )
+        else:
+            logger.info(
+                "Bill sync - no OpenStates URL, skipping legislative history",
+                item_id=item_id,
+            )
 
         # Also ingest the Webflow CMS content
         pipeline = IngestionPipeline(settings)
