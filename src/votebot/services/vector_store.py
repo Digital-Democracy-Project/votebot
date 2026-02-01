@@ -165,10 +165,10 @@ class VectorStoreService:
         # Generate query embedding
         query_embedding = await self.embedding_service.embed_query(query)
 
-        logger.debug(
+        logger.info(
             "Querying Pinecone",
             top_k=top_k,
-            has_filter=filter is not None,
+            filter=filter,
         )
 
         # Query Pinecone
@@ -195,9 +195,12 @@ class VectorStoreService:
                 )
             )
 
-        logger.debug(
+        # Log results with scores for debugging
+        scores = [r.score for r in search_results]
+        logger.info(
             "Pinecone query completed",
             result_count=len(search_results),
+            top_scores=scores[:5] if scores else [],
         )
 
         return search_results
