@@ -237,6 +237,108 @@ topic_search_tests:
     category: topic_search
 
 # =============================================================================
+# DIGITAL DEMOCRACY PROJECT - GENERAL INFO
+# =============================================================================
+ddp_info_tests:
+  - id: ddp_what_is
+    prompt: "What is Digital Democracy Project?"
+    expected_data:
+      - "digital democracy"
+    data_source: training_docs
+    category: general_info
+
+  - id: ddp_mission
+    prompt: "What is the mission of Digital Democracy Project?"
+    expected_data:
+      - "democra"
+    data_source: training_docs
+    category: general_info
+
+  - id: ddp_how_works
+    prompt: "How does Digital Democracy Project work?"
+    expected_data:
+      - "bill"
+    data_source: training_docs
+    category: general_info
+
+  - id: ddp_who_runs
+    prompt: "Who runs Digital Democracy Project?"
+    expected_data:
+      - "digital democracy"
+    data_source: training_docs
+    category: general_info
+
+  - id: ddp_get_involved
+    prompt: "How can I get involved with Digital Democracy Project?"
+    expected_data:
+      - "member"
+    data_source: training_docs
+    category: general_info
+    validation: contains_any
+    notes: "May mention membership, organizations, or participation"
+
+  - id: ddp_member_orgs
+    prompt: "What are member organizations in Digital Democracy Project?"
+    expected_data:
+      - "organization"
+    data_source: training_docs
+    category: general_info
+
+# =============================================================================
+# VOATZ APP ENROLLMENT AND USAGE
+# =============================================================================
+voatz_tests:
+  - id: voatz_what_is
+    prompt: "What is Voatz?"
+    expected_data:
+      - "vot"
+    data_source: training_docs
+    category: voatz_info
+    notes: "Should mention voting or voter-related functionality"
+
+  - id: voatz_enrollment
+    prompt: "How do I enroll in the Voatz app?"
+    expected_data:
+      - "app"
+    data_source: training_docs
+    category: voatz_enrollment
+    validation: contains_any
+
+  - id: voatz_download
+    prompt: "Where can I download the Voatz app?"
+    expected_data:
+      - "app"
+    data_source: training_docs
+    category: voatz_enrollment
+    validation: contains_any
+    notes: "Should mention app store or download instructions"
+
+  - id: voatz_account_setup
+    prompt: "How do I set up my Voatz account?"
+    expected_data:
+      - "account"
+    data_source: training_docs
+    category: voatz_enrollment
+    validation: contains_any
+
+  - id: voatz_verify_identity
+    prompt: "How do I verify my identity on Voatz?"
+    expected_data:
+      - "verif"
+    data_source: training_docs
+    category: voatz_enrollment
+    validation: contains_any
+    notes: "Should mention verification process"
+
+  - id: voatz_use_with_ddp
+    prompt: "How do I use Voatz with Digital Democracy Project?"
+    expected_data:
+      - "digital democracy"
+    data_source: training_docs
+    category: voatz_info
+    validation: contains_any
+
+# =============================================================================
 # EDGE CASES / ERROR HANDLING
 # =============================================================================
 edge_case_tests:
@@ -255,13 +357,6 @@ edge_case_tests:
     data_source: none
     category: disambiguation
     notes: "Should ask which state or list multiple options"
-
-  - id: general_ddp_question
-    prompt: "What is Digital Democracy Project?"
-    expected_data:
-      - "digital democracy"
-    data_source: training_docs
-    category: general_info
 
 # =============================================================================
 # WASHINGTON STATE BILL TESTS

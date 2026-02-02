@@ -1,0 +1,152 @@
+# RAG Test Templates for Dynamic Test Generation
+#
+# These templates are used to generate tests for every bill, legislator,
+# and organization in the Webflow CMS. Ground truth is extracted from
+# CMS fields and optionally enriched with OpenStates data.
+#
+# Template variables:
+#   {name} - Entity name
+#   {bill_id} - Bill identifier (e.g., "HB 363")
+#   {jurisdiction} - State code (e.g., "FL")
+#   {jurisdiction_name} - Full state name (e.g., "Florida")
+#   {district} - District number
+#   {party} - Political party
+#   {chamber} - Chamber (House/Senate)
+#   {chamber_title} - Title (Representative/Senator)
+#   {org_type} - Organization type
+#   {slug} - Entity slug for test ID
+
+# =============================================================================
+# BILL TEST TEMPLATES
+# =============================================================================
+bill_templates:
+  - id: "{slug}_summary"
+    prompt: "What is {jurisdiction_name} {bill_id} about?"
+    category: bill_summary
+    validation: keywords
+    ground_truth_field: description_keywords
+    min_matches: 2
+
+  - id: "{slug}_title"
+    prompt: "What is the title of {jurisdiction_name} {bill_id}?"
+    category: bill_title
+    validation: contains
+    ground_truth_field: name
+
+  - id: "{slug}_sponsor"
+    prompt: "Who sponsored {jurisdiction_name} {bill_id}?"
+    category: bill_sponsor
+    validation: contains_any
+    ground_truth_field: sponsors
+    min_matches: 1
+    # Falls back to checking for "sponsor" if no OpenStates data
+
+  - id: "{slug}_status"
+    prompt: "What is the current status of {jurisdiction_name} {bill_id}?"
+    category: bill_status
+    validation: contains_any
+    ground_truth_field: status
+    min_matches: 1
+
+  - id: "{slug}_support_orgs"
+    prompt: "Which organizations support {jurisdiction_name} {bill_id}?"
+    category: org_positions
+    condition: has_support_orgs
+    validation: contains_any
+    ground_truth_field: support_org_names
+    min_matches: 1
+
+  - id: "{slug}_oppose_orgs"
+    prompt: "Which organizations oppose {jurisdiction_name} {bill_id}?"
+    category: org_positions
+    condition: has_oppose_orgs
+    validation: contains_any
+    ground_truth_field: oppose_org_names
+    min_matches: 1
+
+  - id: "{slug}_support_arguments"
+    prompt: "What are the arguments in support of {jurisdiction_name} {bill_id}?"
+    category: bill_arguments
+    condition: has_support_text
+    validation: keywords
+    ground_truth_field: support_keywords
+    min_matches: 2
+
+  - id: "{slug}_oppose_arguments"
+    prompt: "What are the arguments against {jurisdiction_name} {bill_id}?"
+    category: bill_arguments
+    condition: has_oppose_text
+    validation: keywords
+    ground_truth_field: oppose_keywords
+    min_matches: 2
+
+# =============================================================================
+# LEGISLATOR TEST TEMPLATES
+# =============================================================================
+legislator_templates:
+  - id: "{slug}_profile"
+    prompt: "Tell me about {jurisdiction_name} {chamber_title} {name}"
+    category: legislator_profile
+    validation: contains
+    ground_truth_field: name
+
+  - id: "{slug}_district"
+    prompt: "What district does {name} represent?"
+    category: legislator_district
+    validation: contains
+    ground_truth_field: district
+
+  - id: "{slug}_party"
+    prompt: "What party is {name} affiliated with?"
+    category: legislator_party
+    validation: contains
+    ground_truth_field: party
+
+  - id: "{slug}_sponsored_bills"
+    prompt: "What bills has {name} sponsored?"
+    category: sponsored_bills
+    validation: contains_any
+    ground_truth_field: sponsored_bills
+    min_matches: 1
+    # Falls back to checking for "bill" if no OpenStates data
+
+# =============================================================================
+# ORGANIZATION TEST TEMPLATES
+# =============================================================================
+organization_templates:
+  - id: "{slug}_profile"
+    prompt: "Tell me about {name}"
+    category: org_profile
+    validation: contains
+    ground_truth_field: name
+
+  - id: "{slug}_type"
+    prompt: "What type of organization is {name}?"
+    category: org_type
+    condition: has_type
+    validation: contains
+    ground_truth_field: org_type
+
+  - id: "{slug}_supported_bills"
+    prompt: "What bills does {name} support?"
+    category: org_positions
+    condition: has_supported_bills
+    validation: contains_any
+    ground_truth_field: bills_support_names
+    min_matches: 1
+
+  - id: "{slug}_opposed_bills"
+    prompt: "What bills does {name} oppose?"
+    category: org_positions
+    condition: has_opposed_bills
+    validation: contains_any
+    ground_truth_field: bills_oppose_names
+    min_matches: 1
+
+  - id: "{slug}_about"
+    prompt: "What does {name} do?"
+    category: org_about
+    condition: has_about
+    validation: keywords
+    ground_truth_field: about_keywords
+    min_matches: 2
