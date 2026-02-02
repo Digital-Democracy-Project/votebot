@@ -394,9 +394,13 @@ class BillSyncService:
                         "votes",
                         "related_bills",
                     ]
-                    include_str = "&".join(f"include={p}" for p in include_params)
-                    full_url = f"{url}?apikey={self.api_key}&{include_str}"
-                    response = await client.get(full_url)
+                    # Use header-based auth (more secure than query param)
+                    headers = {
+                        "accept": "application/json",
+                        "x-api-key": self.api_key,
+                    }
+                    params = [("include", p) for p in include_params]
+                    response = await client.get(url, headers=headers, params=params)
 
                     # Log the response for debugging
                     logger.info(
