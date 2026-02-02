@@ -374,7 +374,7 @@ class WebflowSource:
 
             for item in all_items:
                 try:
-                    doc = self._process_organization_item(item)
+                    doc = await self._process_organization_item(item)
                     if doc:
                         yield doc
                 except Exception as e:
@@ -523,9 +523,12 @@ class WebflowSource:
                 error=str(e),
             )
 
-    def _resolve_organization_references(self, org_refs: list | None) -> list[dict]:
+    async def _resolve_organization_references(self, org_refs: list | None) -> list[dict]:
         """
         Resolve organization reference IDs to organization information.
+
+        Fetches missing organizations directly from Webflow API and adds them
+        to the cache for future use.
 
         Args:
             org_refs: List of organization reference IDs from Webflow
@@ -543,15 +546,71 @@ class WebflowSource:
                 if org_info:
                     resolved.append(org_info)
                 else:
-                    # Unknown org, include ID as fallback
-                    resolved.append({"name": f"Organization {ref[:8]}...", "type": ""})
+                    # Fetch missing organization from Webflow API
+                    fetched = await self._fetch_organization_by_id(ref)
+                    if fetched:
+                        resolved.append(fetched)
+                    else:
+                        # Still not found, use ID as fallback
+                        logger.warning(
+                            "Organization not found",
+                            org_id=ref,
+                        )
+                        resolved.append({"name": f"Organization {ref[:8]}...", "type": "", "slug": ""})
             elif isinstance(ref, dict):
                 # Already resolved
                 resolved.append(ref)
 
         return resolved
 
-    def _process_organization_item(self, item: dict) -> DocumentSource | None:
+    async def _fetch_organization_by_id(self, org_id: str) -> dict | None:
+        """
+        Fetch a single organization from Webflow and add to cache.
+
+        Args:
+            org_id: Webflow organization item ID
+
+        Returns:
+            Organization info dict or None if not found
+        """
+        if not self.organizations_collection_id:
+            return None
+
+        try:
+            item = await self.fetch_item_by_id(self.organizations_collection_id, org_id)
+            if not item:
+                return None
+
+            fields = item.get("fieldData", {})
+            name = fields.get("name", "")
+            org_type = fields.get("type-2", "")
+            slug = fields.get("slug", "")
+
+            if name:
+                org_info = {
+                    "name": name,
+                    "type": org_type,
+                    "slug": slug,
+                }
+                # Add to cache for future use
+                self._organization_cache[org_id] = org_info
+                logger.info(
+                    "Fetched and cached organization",
+                    org_id=org_id,
+                    name=name,
+                )
+                return org_info
+
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch organization",
+                org_id=org_id,
+                error=str(e),
+            )
+
+        return None
+
+    async def _process_organization_item(self, item: dict) -> DocumentSource | None:
         """
         Process a single organization item from the CMS.
 
@@ -572,8 +631,8 @@ class WebflowSource:
         logger.debug(f"Processing organization: {name}")
 
         # Resolve bill references
-        bills_support = self._resolve_bill_references(fields.get("bills-support", []))
-        bills_oppose = self._resolve_bill_references(fields.get("bills-oppose", []))
+        bills_support = await self._resolve_bill_references(fields.get("bills-support", []))
+        bills_oppose = await self._resolve_bill_references(fields.get("bills-oppose", []))
 
         # Extract content
         content = self._extract_organization_content(fields, bills_support, bills_oppose)
@@ -608,9 +667,12 @@ class WebflowSource:
             metadata=metadata,
         )
 
-    def _resolve_bill_references(self, bill_refs: list | None) -> list[dict]:
+    async def _resolve_bill_references(self, bill_refs: list | None) -> list[dict]:
         """
         Resolve bill reference IDs to bill information.
+
+        Fetches missing bills directly from Webflow API and adds them
+        to the cache for future use.
 
         Args:
             bill_refs: List of bill reference IDs from Webflow
@@ -628,13 +690,69 @@ class WebflowSource:
                 if bill_info:
                     resolved.append(bill_info)
                 else:
-                    # Unknown bill, include ID as fallback
-                    resolved.append({"name": f"Bill {ref[:8]}...", "identifier": ref})
+                    # Fetch missing bill from Webflow API
+                    fetched = await self._fetch_bill_by_id(ref)
+                    if fetched:
+                        resolved.append(fetched)
+                    else:
+                        # Still not found, use ID as fallback
+                        logger.warning(
+                            "Bill not found",
+                            bill_id=ref,
+                        )
+                        resolved.append({"name": f"Bill {ref[:8]}...", "identifier": ref, "slug": ""})
             elif isinstance(ref, dict):
                 # Already resolved
                 resolved.append(ref)
 
         return resolved
+
+    async def _fetch_bill_by_id(self, bill_id: str) -> dict | None:
+        """
+        Fetch a single bill from Webflow and add to cache.
+
+        Args:
+            bill_id: Webflow bill item ID
+
+        Returns:
+            Bill info dict or None if not found
+        """
+        if not self.bills_collection_id:
+            return None
+
+        try:
+            item = await self.fetch_item_by_id(self.bills_collection_id, bill_id)
+            if not item:
+                return None
+
+            fields = item.get("fieldData", {})
+            name = fields.get("name", "")
+            slug = fields.get("slug", "")
+            identifier = f"{fields.get('bill-prefix', '')} {fields.get('bill-number', '')}".strip()
+
+            if name or identifier:
+                bill_info = {
+                    "name": name,
+                    "identifier": identifier if identifier else name,
+                    "slug": slug,
+                }
+                # Add to cache for future use
+                self._bill_cache[bill_id] = bill_info
+                logger.info(
+                    "Fetched and cached bill",
+                    bill_id=bill_id,
+                    name=name,
+                )
+                return bill_info
+
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch bill",
+                bill_id=bill_id,
+                error=str(e),
+            )
+
+        return None
 
     def _extract_organization_content(
         self,
@@ -999,10 +1117,10 @@ class WebflowSource:
         logger.info(f"Processing bill: {name}")
 
         # Resolve organization references for bill positions
-        supporting_orgs = self._resolve_organization_references(
+        supporting_orgs = await self._resolve_organization_references(
             fields.get("member-organizations", [])
         )
-        opposing_orgs = self._resolve_organization_references(
+        opposing_orgs = await self._resolve_organization_references(
             fields.get("organizations-oppose", [])
         )
 

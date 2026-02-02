@@ -118,9 +118,12 @@ class OrganizationSyncService:
         except Exception as e:
             logger.warning("Failed to build bill mapping", error=str(e))
 
-    def _resolve_bill_references(self, bill_refs: list | None) -> list[dict]:
+    async def _resolve_bill_references(self, bill_refs: list | None) -> list[dict]:
         """
         Resolve bill reference IDs to bill information.
+
+        Fetches missing bills directly from Webflow API and adds them
+        to the cache for future use.
 
         Args:
             bill_refs: List of bill reference IDs from Webflow
@@ -138,15 +141,83 @@ class OrganizationSyncService:
                 if bill_info:
                     resolved.append(bill_info)
                 else:
-                    resolved.append({
-                        "name": f"Bill {ref[:8]}...",
-                        "identifier": ref,
-                        "slug": "",
-                    })
+                    # Fetch missing bill from Webflow API
+                    fetched = await self._fetch_bill_by_id(ref)
+                    if fetched:
+                        resolved.append(fetched)
+                    else:
+                        logger.warning("Bill not found", bill_id=ref)
+                        resolved.append({
+                            "name": f"Bill {ref[:8]}...",
+                            "identifier": ref,
+                            "slug": "",
+                        })
             elif isinstance(ref, dict):
                 resolved.append(ref)
 
         return resolved
+
+    async def _fetch_bill_by_id(self, bill_id: str) -> dict | None:
+        """
+        Fetch a single bill from Webflow and add to cache.
+
+        Args:
+            bill_id: Webflow bill item ID
+
+        Returns:
+            Bill info dict or None if not found
+        """
+        bills_collection_id = self.settings.webflow_bills_collection_id
+        if not bills_collection_id:
+            return None
+
+        webflow_api_key = self.settings.webflow_api_key.get_secret_value()
+        if not webflow_api_key:
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                headers = {
+                    "Authorization": f"Bearer {webflow_api_key}",
+                    "accept": "application/json",
+                }
+                response = await client.get(
+                    f"https://api.webflow.com/v2/collections/{bills_collection_id}/items/{bill_id}",
+                    headers=headers,
+                )
+                if response.status_code == 404:
+                    return None
+                response.raise_for_status()
+                item = response.json()
+
+                fields = item.get("fieldData", {})
+                name = fields.get("name", "")
+                slug = fields.get("slug", "")
+                identifier = f"{fields.get('bill-prefix', '')} {fields.get('bill-number', '')}".strip()
+
+                if name or identifier:
+                    bill_info = {
+                        "name": name,
+                        "identifier": identifier if identifier else name,
+                        "slug": slug,
+                    }
+                    # Add to cache for future use
+                    self._bill_cache[bill_id] = bill_info
+                    logger.info(
+                        "Fetched and cached bill",
+                        bill_id=bill_id,
+                        name=name,
+                    )
+                    return bill_info
+
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch bill",
+                bill_id=bill_id,
+                error=str(e),
+            )
+
+        return None
 
     def _html_to_text(self, html: str) -> str:
         """Convert HTML to plain text."""
@@ -299,8 +370,8 @@ class OrganizationSyncService:
         await self._build_bill_mapping()
 
         # Resolve bill references
-        bills_support = self._resolve_bill_references(fields.get("bills-support", []))
-        bills_oppose = self._resolve_bill_references(fields.get("bills-oppose", []))
+        bills_support = await self._resolve_bill_references(fields.get("bills-support", []))
+        bills_oppose = await self._resolve_bill_references(fields.get("bills-oppose", []))
 
         # Extract content
         content = self._extract_organization_content(fields, bills_support, bills_oppose)
