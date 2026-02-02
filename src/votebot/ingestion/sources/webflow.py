@@ -1052,14 +1052,19 @@ class WebflowSource:
             )
 
         # Process PDF if gov-url is available
+        # Check for .pdf extension or /PDF path (case-insensitive)
         gov_url = fields.get("gov-url")
+        is_pdf_url = False
+        if gov_url:
+            url_lower = gov_url.lower()
+            is_pdf_url = url_lower.endswith(".pdf") or url_lower.endswith("/pdf")
         logger.info(
             "PDF processing check",
             include_pdfs=include_pdfs,
             gov_url=gov_url,
-            ends_with_pdf=gov_url.endswith(".pdf") if gov_url else False,
+            is_pdf_url=is_pdf_url,
         )
-        if include_pdfs and gov_url and gov_url.endswith(".pdf"):
+        if include_pdfs and gov_url and is_pdf_url:
             pdf_doc = await self._process_bill_pdf(gov_url, fields, item_id)
             if pdf_doc:
                 yield pdf_doc
