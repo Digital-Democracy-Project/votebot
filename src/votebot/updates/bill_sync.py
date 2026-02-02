@@ -372,21 +372,18 @@ class BillSyncService:
                 attempt=attempt + 1,
                 max_attempts=self.rate_limit.max_retry_attempts,
                 url=url,
+                api_key_prefix=self.api_key[:8] + "..." if self.api_key else "MISSING",
             )
 
             # Apply rate limiting before each request
             await self._apply_rate_limit()
 
             try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                async with httpx.AsyncClient(timeout=30.0, http2=False) as client:
                     # OpenStates v3 API accepts apikey as query param
-                    response = await client.get(
-                        url,
-                        params={
-                            "apikey": self.api_key,
-                            "include": ["votes", "sponsorships", "actions"],
-                        },
-                    )
+                    # Build full URL with params to match curl behavior
+                    full_url = f"{url}?apikey={self.api_key}"
+                    response = await client.get(full_url)
 
                     # Log the response for debugging
                     logger.info(
