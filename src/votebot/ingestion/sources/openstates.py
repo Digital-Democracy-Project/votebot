@@ -1,7 +1,9 @@
 """OpenStates API data source connector."""
 
 import asyncio
-from typing import AsyncIterator
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, AsyncIterator
 
 import httpx
 import structlog
@@ -11,6 +13,89 @@ from votebot.ingestion.metadata import DocumentMetadata, MetadataExtractor
 from votebot.ingestion.pipeline import DocumentSource
 
 logger = structlog.get_logger()
+
+
+@dataclass
+class LegislativeSession:
+    """Represents a legislative session from OpenStates."""
+
+    identifier: str
+    name: str
+    classification: str  # "primary" or "special"
+    start_date: str
+    end_date: str
+
+    def is_current(self) -> bool:
+        """Check if this session is currently active."""
+        today = datetime.now().date()
+        try:
+            start = datetime.strptime(self.start_date, "%Y-%m-%d").date()
+            end = datetime.strptime(self.end_date, "%Y-%m-%d").date()
+            return start <= today <= end
+        except (ValueError, TypeError):
+            return False
+
+    def is_primary(self) -> bool:
+        """Check if this is a primary (regular) session."""
+        return self.classification == "primary"
+
+
+@dataclass
+class JurisdictionInfo:
+    """
+    Jurisdiction metadata from OpenStates API.
+
+    Contains legislative sessions, organizations (chambers), and data freshness info.
+    """
+
+    id: str
+    name: str
+    classification: str  # "state" or "country"
+    url: str
+    latest_bill_update: datetime | None = None
+    latest_people_update: datetime | None = None
+    sessions: list[LegislativeSession] = field(default_factory=list)
+    organizations: list[dict[str, Any]] = field(default_factory=list)
+
+    def get_current_session(self) -> LegislativeSession | None:
+        """Get the currently active session, preferring primary sessions."""
+        # First try to find an active primary session
+        for session in self.sessions:
+            if session.is_current() and session.is_primary():
+                return session
+
+        # Fall back to any active session (including special)
+        for session in self.sessions:
+            if session.is_current():
+                return session
+
+        # If no active session, return the most recent primary session
+        primary_sessions = [s for s in self.sessions if s.is_primary()]
+        if primary_sessions:
+            # Sort by start_date descending
+            primary_sessions.sort(key=lambda s: s.start_date, reverse=True)
+            return primary_sessions[0]
+
+        return None
+
+    def get_session_by_identifier(self, identifier: str) -> LegislativeSession | None:
+        """Get a session by its identifier (e.g., '2026', '2025A')."""
+        for session in self.sessions:
+            if session.identifier == identifier:
+                return session
+        return None
+
+    def needs_bill_sync(self, last_sync: datetime | None) -> bool:
+        """Check if bills need to be synced based on OpenStates update time."""
+        if not last_sync or not self.latest_bill_update:
+            return True
+        return self.latest_bill_update > last_sync
+
+    def needs_people_sync(self, last_sync: datetime | None) -> bool:
+        """Check if legislators need to be synced based on OpenStates update time."""
+        if not last_sync or not self.latest_people_update:
+            return True
+        return self.latest_people_update > last_sync
 
 
 class OpenStatesSource:
@@ -74,6 +159,144 @@ class OpenStatesSource:
             jurisdiction_lower,
             f"{jurisdiction.upper()} Legislature" if jurisdiction else "State Legislature"
         )
+
+    async def fetch_jurisdiction(
+        self,
+        jurisdiction: str,
+        max_retries: int = 3,
+    ) -> JurisdictionInfo | None:
+        """
+        Fetch jurisdiction metadata from OpenStates API.
+
+        Includes legislative sessions, organizations (chambers/committees),
+        and data freshness timestamps.
+
+        Args:
+            jurisdiction: State abbreviation (e.g., 'fl', 'wa') or 'us' for federal
+            max_retries: Maximum retries for rate limit errors
+
+        Returns:
+            JurisdictionInfo or None if not found
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {
+                "accept": "application/json",
+                "X-API-Key": self.api_key,
+            }
+
+            # Include all available data
+            include_params = [
+                "organizations",
+                "legislative_sessions",
+                "latest_runs",
+            ]
+            params = [("include", p) for p in include_params]
+
+            url = f"{self.BASE_URL}/jurisdictions/{jurisdiction.lower()}"
+
+            logger.debug(
+                "Fetching jurisdiction from OpenStates",
+                jurisdiction=jurisdiction,
+            )
+
+            for attempt in range(max_retries):
+                try:
+                    response = await client.get(url, headers=headers, params=params)
+
+                    if response.status_code == 429:
+                        retry_after = int(response.headers.get("Retry-After", 2))
+                        logger.warning(
+                            f"Rate limited, waiting {retry_after}s (attempt {attempt + 1}/{max_retries})",
+                            jurisdiction=jurisdiction,
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
+
+                    if response.status_code == 404:
+                        logger.warning("Jurisdiction not found", jurisdiction=jurisdiction)
+                        return None
+
+                    response.raise_for_status()
+                    data = response.json()
+                    break
+
+                except httpx.HTTPStatusError as e:
+                    logger.error(
+                        "Failed to fetch jurisdiction",
+                        jurisdiction=jurisdiction,
+                        status_code=e.response.status_code,
+                    )
+                    return None
+                except Exception as e:
+                    logger.error(
+                        "Failed to fetch jurisdiction",
+                        jurisdiction=jurisdiction,
+                        error=str(e),
+                    )
+                    return None
+            else:
+                logger.error("Exhausted retries fetching jurisdiction", jurisdiction=jurisdiction)
+                return None
+
+            # Parse sessions
+            sessions = []
+            for session_data in data.get("legislative_sessions", []):
+                sessions.append(
+                    LegislativeSession(
+                        identifier=session_data.get("identifier", ""),
+                        name=session_data.get("name", ""),
+                        classification=session_data.get("classification", ""),
+                        start_date=session_data.get("start_date", ""),
+                        end_date=session_data.get("end_date", ""),
+                    )
+                )
+
+            # Parse timestamps
+            latest_bill_update = None
+            if data.get("latest_bill_update"):
+                try:
+                    latest_bill_update = datetime.fromisoformat(
+                        data["latest_bill_update"].replace("Z", "+00:00")
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+            latest_people_update = None
+            if data.get("latest_people_update"):
+                try:
+                    latest_people_update = datetime.fromisoformat(
+                        data["latest_people_update"].replace("Z", "+00:00")
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+            return JurisdictionInfo(
+                id=data.get("id", ""),
+                name=data.get("name", ""),
+                classification=data.get("classification", ""),
+                url=data.get("url", ""),
+                latest_bill_update=latest_bill_update,
+                latest_people_update=latest_people_update,
+                sessions=sessions,
+                organizations=data.get("organizations", []),
+            )
+
+    async def get_current_session_identifier(self, jurisdiction: str) -> str | None:
+        """
+        Get the current session identifier for a jurisdiction.
+
+        Args:
+            jurisdiction: State abbreviation (e.g., 'fl', 'wa')
+
+        Returns:
+            Session identifier (e.g., '2026', '119') or None
+        """
+        info = await self.fetch_jurisdiction(jurisdiction)
+        if info:
+            session = info.get_current_session()
+            if session:
+                return session.identifier
+        return None
 
     async def _build_legislator_mapping(self) -> None:
         """

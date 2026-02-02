@@ -14,6 +14,7 @@ import yaml
 from votebot.config import Settings, get_settings
 from votebot.ingestion.metadata import DocumentMetadata
 from votebot.ingestion.pipeline import DocumentSource, IngestionPipeline
+from votebot.ingestion.sources.openstates import JurisdictionInfo, OpenStatesSource
 from votebot.utils.legislative_calendar import StateLegislativeCalendar
 
 logger = structlog.get_logger()
@@ -125,6 +126,10 @@ class BillSyncService:
         self._last_request_time: float = 0
         # Cache for legislator lookups (openstates_id -> {name, slug})
         self._legislator_cache: dict[str, dict] = {}
+        # Cache for jurisdiction info (jurisdiction -> JurisdictionInfo)
+        self._jurisdiction_cache: dict[str, JurisdictionInfo] = {}
+        # OpenStates source for jurisdiction lookups
+        self._openstates_source = OpenStatesSource(self.settings)
 
     def _load_rate_limit_config(self) -> RateLimitConfig:
         """Load rate limit configuration from YAML file."""
@@ -773,6 +778,72 @@ class BillSyncService:
                 error=str(e),
             )
 
+    async def get_jurisdiction_info(self, jurisdiction: str) -> JurisdictionInfo | None:
+        """
+        Get jurisdiction info from OpenStates API (cached).
+
+        Args:
+            jurisdiction: State code (e.g., "FL", "US")
+
+        Returns:
+            JurisdictionInfo or None if not available
+        """
+        jurisdiction_lower = jurisdiction.lower()
+
+        # Check cache first
+        if jurisdiction_lower in self._jurisdiction_cache:
+            return self._jurisdiction_cache[jurisdiction_lower]
+
+        # Fetch from API
+        info = await self._openstates_source.fetch_jurisdiction(jurisdiction_lower)
+        if info:
+            self._jurisdiction_cache[jurisdiction_lower] = info
+            logger.info(
+                "Cached jurisdiction info",
+                jurisdiction=jurisdiction,
+                current_session=info.get_current_session().identifier if info.get_current_session() else None,
+                latest_bill_update=str(info.latest_bill_update) if info.latest_bill_update else None,
+            )
+
+        return info
+
+    async def is_current_session_async(
+        self,
+        session_year: str | None,
+        session_code: str | None,
+        jurisdiction: str,
+    ) -> bool:
+        """
+        Determine if a bill is from the current legislative session (async version).
+
+        Uses OpenStates API for accurate session detection when available.
+
+        Args:
+            session_year: Session year from Webflow (e.g., "2025", "2025-2026")
+            session_code: Session code from Webflow (e.g., "2025", "119")
+            jurisdiction: State code (e.g., "FL", "US")
+
+        Returns:
+            True if this is a current session bill
+        """
+        # Try to get accurate session info from OpenStates API
+        info = await self.get_jurisdiction_info(jurisdiction)
+        if info:
+            current_session = info.get_current_session()
+            if current_session:
+                # Check if the bill's session matches the current session
+                if session_code and session_code == current_session.identifier:
+                    return True
+                # Also check if session_year matches (some use year format)
+                if session_year and session_year == current_session.identifier:
+                    return True
+                # Check if the session identifier is in the session_year string
+                if session_year and current_session.identifier in session_year:
+                    return True
+
+        # Fall back to heuristic-based detection
+        return self.is_current_session(session_year, session_code, jurisdiction)
+
     def is_current_session(
         self,
         session_year: str | None,
@@ -781,6 +852,9 @@ class BillSyncService:
     ) -> bool:
         """
         Determine if a bill is from the current legislative session.
+
+        Uses year-based heuristics. For more accurate detection, use
+        is_current_session_async() which queries the OpenStates API.
 
         Args:
             session_year: Session year from Webflow (e.g., "2025", "2025-2026")
