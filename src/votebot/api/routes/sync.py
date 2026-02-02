@@ -175,8 +175,8 @@ async def sync_bill(
             }
             await webflow._build_organization_mapping(client, headers)
 
-        # Process the bill item to get CMS content
-        async for doc in webflow._process_bill_item(item, include_pdfs=False):
+        # Process the bill item to get CMS content and PDF legislative text
+        async for doc in webflow._process_bill_item(item, include_pdfs=True):
             cms_result = await pipeline.ingest_document(
                 content=doc.content,
                 metadata=doc.metadata,
