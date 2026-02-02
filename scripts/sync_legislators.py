@@ -2,6 +2,10 @@
 """
 Legislator sync script for VoteBot.
 
+DEPRECATED: This script is deprecated. Use the unified sync tool instead:
+    python scripts/sync.py legislator --batch
+    python scripts/sync.py legislator --slug <slug>
+
 This script:
 1. Fetches legislators from Webflow CMS (DDP-curated with scores)
 2. Enriches with OpenStates data (current role, contact, committees)
@@ -18,6 +22,13 @@ Options:
     --dry-run          Print what would be done without ingesting
     --log-level LEVEL  Logging level (default: INFO)
 """
+import warnings
+
+warnings.warn(
+    "sync_legislators.py is deprecated. Use 'python scripts/sync.py legislator' instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import argparse
 import asyncio

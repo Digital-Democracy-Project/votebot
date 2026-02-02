@@ -2,6 +2,10 @@
 """
 Bill sync script for VoteBot.
 
+DEPRECATED: This script is deprecated. Use the unified sync tool instead:
+    python scripts/sync.py bill --batch
+    python scripts/sync.py bill --slug <slug>
+
 This script:
 1. Fetches bills from Webflow CMS
 2. Builds organization mapping for bill enrichment
@@ -18,6 +22,13 @@ Options:
     --dry-run          Print what would be done without ingesting
     --log-level LEVEL  Logging level (default: INFO)
 """
+import warnings
+
+warnings.warn(
+    "sync_bills.py is deprecated. Use 'python scripts/sync.py bill' instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import argparse
 import asyncio

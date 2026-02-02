@@ -1,0 +1,310 @@
+"""Unified sync endpoint for all content types."""
+
+import time
+from typing import Annotated
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field, model_validator
+
+from votebot.api.middleware.auth import api_key_auth
+from votebot.config import Settings, get_settings
+from votebot.sync import (
+    ContentType,
+    SyncIdentifier,
+    SyncMode,
+    SyncOptions,
+    UnifiedSyncService,
+)
+
+router = APIRouter(prefix="/sync", tags=["sync"])
+logger = structlog.get_logger()
+
+
+class UnifiedSyncRequest(BaseModel):
+    """Request schema for unified sync endpoint."""
+
+    content_type: str = Field(
+        ...,
+        description="Content type to sync: bill, legislator, organization, webpage, training",
+    )
+    mode: str = Field(
+        default="single",
+        description="Sync mode: single or batch",
+    )
+
+    # Identifiers (at least one required for single mode)
+    webflow_id: str | None = Field(
+        None,
+        description="Webflow CMS item ID",
+    )
+    slug: str | None = Field(
+        None,
+        description="Item slug in Webflow",
+    )
+    openstates_id: str | None = Field(
+        None,
+        description="OpenStates ID (for bills/legislators)",
+    )
+    url: str | None = Field(
+        None,
+        description="URL (for webpages)",
+    )
+    file_path: str | None = Field(
+        None,
+        description="File path (for training documents)",
+    )
+
+    # Options
+    include_pdfs: bool = Field(
+        default=True,
+        description="Include PDF processing for bills",
+    )
+    include_openstates: bool = Field(
+        default=True,
+        description="Include OpenStates data for bills",
+    )
+    include_sponsored_bills: bool = Field(
+        default=True,
+        description="Include sponsored bills for legislators",
+    )
+    jurisdiction: str | None = Field(
+        None,
+        description="Filter by jurisdiction (e.g., FL, US)",
+    )
+    limit: int = Field(
+        default=0,
+        ge=0,
+        description="Maximum items to process (0 = unlimited)",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Preview without ingesting",
+    )
+
+    @model_validator(mode="after")
+    def validate_identifier_for_single_mode(self) -> "UnifiedSyncRequest":
+        """Validate that an identifier is provided for single mode."""
+        if self.mode == "single":
+            has_identifier = any([
+                self.webflow_id,
+                self.slug,
+                self.openstates_id,
+                self.url,
+                self.file_path,
+            ])
+            if not has_identifier:
+                raise ValueError(
+                    "At least one identifier (webflow_id, slug, openstates_id, url, or file_path) "
+                    "is required for single mode"
+                )
+        return self
+
+
+class UnifiedSyncResponse(BaseModel):
+    """Response schema for unified sync endpoint."""
+
+    success: bool = Field(..., description="Whether the sync operation succeeded")
+    content_type: str = Field(..., description="Content type that was synced")
+    mode: str = Field(..., description="Sync mode used")
+    items_processed: int = Field(default=0, description="Number of items processed")
+    items_successful: int = Field(default=0, description="Number of items successfully synced")
+    items_failed: int = Field(default=0, description="Number of items that failed")
+    chunks_created: int = Field(default=0, description="Number of chunks created in vector store")
+    duration_ms: int = Field(default=0, description="Duration of sync operation in milliseconds")
+    errors: list[str] = Field(default_factory=list, description="List of error messages")
+    document_ids: list[str] = Field(default_factory=list, description="IDs of documents created")
+
+
+@router.post(
+    "/unified",
+    response_model=UnifiedSyncResponse,
+    summary="Unified sync endpoint for all content types",
+    description="Sync bills, legislators, organizations, webpages, or training documents.",
+)
+async def sync_unified(
+    request: UnifiedSyncRequest,
+    api_key: Annotated[str, Depends(api_key_auth)],
+    settings: Settings = Depends(get_settings),
+) -> UnifiedSyncResponse:
+    """
+    Unified sync endpoint for all content types.
+
+    Supports:
+    - Bills: Single by webflow_id/slug, batch with optional PDF/OpenStates
+    - Legislators: Single by webflow_id/slug, batch with optional sponsored bills
+    - Organizations: Single by webflow_id/slug, batch
+    - Webpages: Single by URL only (no batch support)
+    - Training: Single by file_path only (no batch support via API)
+    """
+    start_time = time.perf_counter()
+
+    logger.info(
+        "Unified sync request",
+        content_type=request.content_type,
+        mode=request.mode,
+        dry_run=request.dry_run,
+    )
+
+    try:
+        # Parse content type
+        try:
+            content_type = ContentType(request.content_type.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid content type: {request.content_type}. "
+                f"Valid types: {', '.join(ct.value for ct in ContentType)}",
+            )
+
+        # Parse sync mode
+        try:
+            mode = SyncMode(request.mode.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid mode: {request.mode}. Valid modes: single, batch",
+            )
+
+        # Build identifier for single mode
+        identifier = None
+        if mode == SyncMode.SINGLE:
+            try:
+                identifier = SyncIdentifier(
+                    webflow_id=request.webflow_id,
+                    slug=request.slug,
+                    openstates_id=request.openstates_id,
+                    url=request.url,
+                    file_path=request.file_path,
+                )
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(e),
+                )
+
+        # Build options
+        options = SyncOptions(
+            include_pdfs=request.include_pdfs,
+            include_openstates=request.include_openstates,
+            include_sponsored_bills=request.include_sponsored_bills,
+            jurisdiction=request.jurisdiction,
+            limit=request.limit,
+            dry_run=request.dry_run,
+        )
+
+        # Execute sync
+        service = UnifiedSyncService(settings)
+        result = await service.sync(
+            content_type=content_type,
+            mode=mode,
+            identifier=identifier,
+            options=options,
+        )
+
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+        logger.info(
+            "Unified sync complete",
+            content_type=content_type.value,
+            mode=mode.value,
+            success=result.success,
+            items_processed=result.items_processed,
+            chunks_created=result.chunks_created,
+            duration_ms=duration_ms,
+        )
+
+        return UnifiedSyncResponse(
+            success=result.success,
+            content_type=result.content_type.value,
+            mode=result.mode.value,
+            items_processed=result.items_processed,
+            items_successful=result.items_successful,
+            items_failed=result.items_failed,
+            chunks_created=result.chunks_created,
+            duration_ms=duration_ms,
+            errors=result.errors,
+            document_ids=result.document_ids,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unified sync failed", error=str(e))
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        return UnifiedSyncResponse(
+            success=False,
+            content_type=request.content_type,
+            mode=request.mode,
+            duration_ms=duration_ms,
+            errors=[str(e)],
+        )
+
+
+@router.post(
+    "/unified/all",
+    response_model=dict[str, UnifiedSyncResponse],
+    summary="Sync all content types in batch mode",
+    description="Run batch sync for bills, legislators, and organizations.",
+)
+async def sync_all(
+    api_key: Annotated[str, Depends(api_key_auth)],
+    settings: Settings = Depends(get_settings),
+    include_pdfs: bool = True,
+    include_openstates: bool = True,
+    include_sponsored_bills: bool = True,
+    limit: int = 0,
+    dry_run: bool = False,
+) -> dict[str, UnifiedSyncResponse]:
+    """
+    Sync all content types in batch mode.
+
+    Syncs bills, legislators, and organizations from Webflow to Pinecone.
+    """
+    start_time = time.perf_counter()
+
+    logger.info(
+        "Sync all request",
+        include_pdfs=include_pdfs,
+        include_openstates=include_openstates,
+        include_sponsored_bills=include_sponsored_bills,
+        limit=limit,
+        dry_run=dry_run,
+    )
+
+    options = SyncOptions(
+        include_pdfs=include_pdfs,
+        include_openstates=include_openstates,
+        include_sponsored_bills=include_sponsored_bills,
+        limit=limit,
+        dry_run=dry_run,
+    )
+
+    service = UnifiedSyncService(settings)
+    results = await service.sync_all(options)
+
+    duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+    # Convert to response format
+    response = {}
+    for content_type, result in results.items():
+        response[content_type.value] = UnifiedSyncResponse(
+            success=result.success,
+            content_type=result.content_type.value,
+            mode=result.mode.value,
+            items_processed=result.items_processed,
+            items_successful=result.items_successful,
+            items_failed=result.items_failed,
+            chunks_created=result.chunks_created,
+            duration_ms=int(result.duration_seconds * 1000),
+            errors=result.errors,
+            document_ids=result.document_ids,
+        )
+
+    logger.info(
+        "Sync all complete",
+        total_duration_ms=duration_ms,
+        results={k: v.success for k, v in response.items()},
+    )
+
+    return response

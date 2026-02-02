@@ -2,6 +2,10 @@
 """
 Organization sync script for VoteBot.
 
+DEPRECATED: This script is deprecated. Use the unified sync tool instead:
+    python scripts/sync.py organization --batch
+    python scripts/sync.py organization --slug <slug>
+
 This script:
 1. Fetches member organizations from Webflow CMS
 2. Resolves bill references to bill names
@@ -15,6 +19,13 @@ Options:
     --dry-run          Print what would be done without ingesting
     --log-level LEVEL  Logging level (default: INFO)
 """
+import warnings
+
+warnings.warn(
+    "sync_organizations.py is deprecated. Use 'python scripts/sync.py organization' instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import argparse
 import asyncio
