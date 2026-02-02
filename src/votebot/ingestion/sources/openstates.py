@@ -337,12 +337,23 @@ class OpenStatesSource:
             DocumentSource objects for each legislator
         """
         async with httpx.AsyncClient(timeout=30.0) as client:
-            headers = {"X-API-Key": self.api_key}
-
-            params = {
-                "jurisdiction": jurisdiction,
-                "per_page": min(limit, 50),
+            headers = {
+                "accept": "application/json",
+                "X-API-Key": self.api_key,
             }
+
+            # Include all available data for legislators
+            include_params = [
+                "other_names",
+                "other_identifiers",
+                "links",
+                "sources",
+                "offices",
+            ]
+            params = [
+                ("jurisdiction", jurisdiction),
+                ("per_page", min(limit, 50)),
+            ] + [("include", p) for p in include_params]
 
             logger.info(
                 "Fetching legislators from OpenStates",
@@ -414,9 +425,22 @@ class OpenStatesSource:
             DocumentSource or None if not found
         """
         async with httpx.AsyncClient(timeout=30.0) as client:
-            headers = {"X-API-Key": self.api_key}
+            headers = {
+                "accept": "application/json",
+                "X-API-Key": self.api_key,
+            }
             # OpenStates v3 API uses query param, not path param
             url = f"{self.BASE_URL}/people"
+
+            # Include all available data for legislators
+            include_params = [
+                "other_names",
+                "other_identifiers",
+                "links",
+                "sources",
+                "offices",
+            ]
+            params = [("id", person_id)] + [("include", p) for p in include_params]
 
             logger.debug(
                 "Fetching legislator from OpenStates",
@@ -429,7 +453,7 @@ class OpenStatesSource:
                     response = await client.get(
                         url,
                         headers=headers,
-                        params={"id": person_id},
+                        params=params,
                     )
 
                     # Handle rate limiting with retry

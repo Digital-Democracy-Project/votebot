@@ -259,11 +259,23 @@ class LegislatorSyncService:
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                headers = {"x-api-key": self.api_key}
+                headers = {
+                    "accept": "application/json",
+                    "x-api-key": self.api_key,
+                }
+                # Include all available data for legislators
+                include_params = [
+                    "other_names",
+                    "other_identifiers",
+                    "links",
+                    "sources",
+                    "offices",
+                ]
+                params = [("id", person_id)] + [("include", p) for p in include_params]
                 response = await client.get(
                     f"{self.OPENSTATES_API_BASE}/people",
                     headers=headers,
-                    params={"id": person_id},
+                    params=params,
                 )
 
                 if response.status_code == 200:
