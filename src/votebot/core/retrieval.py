@@ -1,5 +1,6 @@
 """RAG retrieval orchestration service."""
 
+import re
 from dataclasses import dataclass, field
 
 import structlog
@@ -9,6 +10,44 @@ from votebot.config import Settings, get_settings
 from votebot.services.vector_store import SearchResult, VectorStoreService
 
 logger = structlog.get_logger()
+
+
+# Mapping of state names/abbreviations to jurisdiction codes
+STATE_MAPPINGS = {
+    "florida": "fl", "fl": "fl",
+    "virginia": "va", "va": "va",
+    "washington": "wa", "wa": "wa",
+    "california": "ca", "ca": "ca",
+    "texas": "tx", "tx": "tx",
+    "new york": "ny", "ny": "ny",
+    "arizona": "az", "az": "az",
+    "michigan": "mi", "mi": "mi",
+    "utah": "ut", "ut": "ut",
+    "alabama": "al", "al": "al",
+    "massachusetts": "ma", "ma": "ma",
+    "federal": "us", "us": "us", "congress": "us",
+}
+
+
+@dataclass
+class ExtractedBillInfo:
+    """Bill information extracted from query text."""
+    bill_prefix: str  # HB, SB, HR, S, etc.
+    bill_number: str  # 363, 429, etc.
+    jurisdiction: str | None = None  # fl, va, us, etc.
+
+    @property
+    def bill_id(self) -> str:
+        """Return normalized bill ID like HB363."""
+        return f"{self.bill_prefix}{self.bill_number}"
+
+    @property
+    def slug_pattern(self) -> str:
+        """Return pattern to match in slug like hb363 or hb-363."""
+        prefix = self.bill_prefix.lower()
+        num = self.bill_number
+        # Match patterns like: hb363, hb-363, hb 363
+        return f"{prefix}[-]?{num}"
 
 
 @dataclass
@@ -68,6 +107,9 @@ class RetrievalService:
         For bill queries, prioritizes actual legislative text (document_type="bill-text")
         over CMS summaries (document_type="bill").
 
+        For general queries, attempts to extract bill identifiers from the query text
+        and use them for filtering.
+
         Args:
             query: The user's query
             page_context: Context about the current page
@@ -78,23 +120,49 @@ class RetrievalService:
         """
         max_chunks = max_chunks or self.config.max_chunks
 
-        # Build filters based on page context
-        filters = self._build_filters(page_context)
+        # For general queries, try to extract bill info from query and upgrade context
+        effective_context = page_context
+        if page_context.type == "general":
+            bill_info = self._extract_bill_from_query(query)
+            if bill_info:
+                logger.info(
+                    "Extracted bill from query",
+                    bill_id=bill_info.bill_id,
+                    jurisdiction=bill_info.jurisdiction,
+                )
+                # Look up the actual slug for this bill
+                slug = await self._lookup_bill_slug(bill_info)
+                if slug:
+                    # Upgrade to bill context with the found slug
+                    effective_context = PageContext(
+                        type="bill",
+                        slug=slug,
+                        title=f"{bill_info.bill_prefix} {bill_info.bill_number}",
+                        jurisdiction=bill_info.jurisdiction.upper() if bill_info.jurisdiction else None,
+                    )
+                    logger.info(
+                        "Upgraded to bill context from query extraction",
+                        slug=slug,
+                        original_context="general",
+                    )
+
+        # Build filters based on effective context
+        filters = self._build_filters(effective_context, query)
 
         logger.info(
             "Starting retrieval",
             query_length=len(query),
-            page_type=page_context.type,
+            page_type=effective_context.type,
             filters=filters,
         )
 
         # For bill queries, use multi-phase retrieval to prioritize legislative text
-        if page_context.type == "bill":
+        if effective_context.type == "bill":
             final_results = await self._retrieve_bill_with_text_priority(
                 query=query,
                 filters=filters,
                 max_chunks=max_chunks,
-                page_context=page_context,
+                page_context=effective_context,
             )
         else:
             # Standard retrieval for non-bill queries
@@ -118,7 +186,7 @@ class RetrievalService:
         logger.info(
             "Retrieval completed",
             final_count=len(final_results),
-            page_type=page_context.type,
+            page_type=effective_context.type,
         )
 
         return RetrievalResult(
@@ -315,12 +383,162 @@ class RetrievalService:
         )
         return await self.retrieve(query, page_context)
 
-    def _build_filters(self, page_context: PageContext) -> dict:
+    def _extract_bill_from_query(self, query: str) -> ExtractedBillInfo | None:
         """
-        Build Pinecone filters from page context.
+        Extract bill identifier from query text.
+
+        Handles patterns like:
+        - "HB 363", "HB363", "H.B. 363"
+        - "Florida HB 363", "FL HB 363"
+        - "HR 1004", "H.R. 1004"
+        - "Senate Bill 123", "SB 123"
+
+        Args:
+            query: The user's query text
+
+        Returns:
+            ExtractedBillInfo if a bill identifier is found, None otherwise
+        """
+        query_lower = query.lower()
+
+        # Extract jurisdiction from query
+        jurisdiction = None
+        for name, code in STATE_MAPPINGS.items():
+            if name in query_lower:
+                jurisdiction = code
+                break
+
+        # Patterns to match bill identifiers
+        # Pattern 1: Standard bill format (HB 363, SB 123, HR 1004, S 302)
+        pattern1 = r'\b(H\.?B\.?|S\.?B\.?|H\.?R\.?|S\.?|H\.?J\.?|S\.?J\.?)\s*(\d+)\b'
+
+        # Pattern 2: Full names (House Bill 363, Senate Bill 123)
+        pattern2 = r'\b(house|senate)\s+(?:bill|resolution|joint\s+resolution)\s*(\d+)\b'
+
+        match = re.search(pattern1, query, re.IGNORECASE)
+        if match:
+            prefix = match.group(1).replace(".", "").upper()
+            number = match.group(2)
+            return ExtractedBillInfo(
+                bill_prefix=prefix,
+                bill_number=number,
+                jurisdiction=jurisdiction,
+            )
+
+        match = re.search(pattern2, query, re.IGNORECASE)
+        if match:
+            chamber = match.group(1).lower()
+            number = match.group(2)
+            prefix = "HB" if chamber == "house" else "SB"
+            return ExtractedBillInfo(
+                bill_prefix=prefix,
+                bill_number=number,
+                jurisdiction=jurisdiction,
+            )
+
+        return None
+
+    async def _lookup_bill_slug(self, bill_info: ExtractedBillInfo) -> str | None:
+        """
+        Look up the actual slug for a bill in Pinecone.
+
+        Uses a two-phase approach:
+        1. Try filtering by bill_id metadata with common year patterns
+        2. Fall back to semantic search with slug pattern matching
+
+        Args:
+            bill_info: Extracted bill information
+
+        Returns:
+            The bill's slug if found, None otherwise
+        """
+        # Phase 1: Try direct bill_id filter with common years
+        # Bill IDs are stored as "HB-363-2026" format
+        current_year = 2026  # TODO: Make dynamic
+        years_to_try = [current_year, current_year - 1, current_year - 2]
+
+        for year in years_to_try:
+            bill_id_pattern = f"{bill_info.bill_prefix}-{bill_info.bill_number}-{year}"
+            try:
+                results = await self.vector_store.query(
+                    query=f"{bill_info.bill_prefix} {bill_info.bill_number}",
+                    top_k=3,
+                    filter={"document_type": "bill", "bill_id": bill_id_pattern},
+                )
+                if results:
+                    slug = results[0].metadata.get("slug")
+                    if slug:
+                        logger.info(
+                            "Found bill slug from bill_id filter",
+                            extracted_bill=bill_info.bill_id,
+                            bill_id_pattern=bill_id_pattern,
+                            matched_slug=slug,
+                        )
+                        return slug
+            except Exception as e:
+                logger.debug(f"Bill ID filter failed: {e}")
+
+        # Phase 2: Semantic search with slug pattern matching
+        # Build search query with jurisdiction name for better semantic matching
+        jurisdiction_name = ""
+        if bill_info.jurisdiction:
+            # Map code back to full name for better semantic search
+            code_to_name = {v: k for k, v in STATE_MAPPINGS.items() if len(k) > 2}
+            jurisdiction_name = code_to_name.get(bill_info.jurisdiction, bill_info.jurisdiction)
+
+        search_query = f"{jurisdiction_name} {bill_info.bill_prefix} {bill_info.bill_number}".strip()
+
+        # Search for the bill in Pinecone
+        filters = {"document_type": "bill"}
+
+        results = await self.vector_store.query(
+            query=search_query,
+            top_k=10,
+            filter=filters,
+        )
+
+        # Look for a result that matches our bill pattern
+        slug_pattern = bill_info.slug_pattern
+        for result in results:
+            slug = result.metadata.get("slug", "")
+            bill_id = result.metadata.get("bill_id", "")
+
+            # Check if the slug contains our bill pattern
+            if re.search(slug_pattern, slug, re.IGNORECASE):
+                logger.info(
+                    "Found bill slug from semantic search",
+                    extracted_bill=bill_info.bill_id,
+                    matched_slug=slug,
+                )
+                return slug
+
+            # Also check bill_id metadata (normalize for comparison)
+            if bill_id:
+                normalized_bill_id = bill_id.lower().replace("-", "").replace(" ", "")
+                if bill_info.bill_id.lower() in normalized_bill_id:
+                    slug = result.metadata.get("slug")
+                    if slug:
+                        logger.info(
+                            "Found bill slug from bill_id match",
+                            extracted_bill=bill_info.bill_id,
+                            matched_slug=slug,
+                        )
+                        return slug
+
+        logger.debug(
+            "Could not find slug for extracted bill",
+            bill_info=bill_info.bill_id,
+            jurisdiction=bill_info.jurisdiction,
+        )
+        return None
+
+    def _build_filters(self, page_context: PageContext, query: str | None = None) -> dict:
+        """
+        Build Pinecone filters from page context and query analysis.
 
         Args:
             page_context: The current page context
+            query: Optional query text for bill extraction (used when page_context is general)
 
         Returns:
             Filter dictionary for Pinecone query

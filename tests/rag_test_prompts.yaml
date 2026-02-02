@@ -1,0 +1,296 @@
+# VoteBot RAG Test Prompts
+# Used to diagnose missing data and validate retrieval quality
+#
+# Each test case includes:
+#   - prompt: The question to ask VoteBot
+#   - expected_data: What the response MUST contain (case-insensitive)
+#   - data_source: Where this data should come from
+#   - category: Type of information being tested
+#
+# Run with: python scripts/test_rag_quality.py --dry-run
+#           python scripts/test_rag_quality.py --verbose
+
+# =============================================================================
+# FLORIDA BILL TESTS - HB 363 Dental Therapy
+# =============================================================================
+fl_hb363_tests:
+  - id: fl_hb363_summary
+    prompt: "What is Florida HB 363 about?"
+    expected_data:
+      - "dental"
+      - "therapy"
+    data_source: webflow_cms
+    category: bill_summary
+
+  - id: fl_hb363_status
+    prompt: "What is the current status of Florida HB 363?"
+    expected_data:
+      - "2026"
+    data_source: openstates
+    category: bill_status
+
+  - id: fl_hb363_sponsor
+    prompt: "Who sponsored Florida HB 363 Dental Therapy?"
+    expected_data:
+      - "sponsor"
+    data_source: openstates
+    category: bill_sponsor
+
+  - id: fl_hb363_history
+    prompt: "What is the legislative history of Florida HB 363?"
+    expected_data:
+      - "filed"
+    data_source: openstates
+    category: legislative_history
+
+  - id: fl_hb363_text
+    prompt: "What does the bill text of Florida HB 363 say about licensing?"
+    expected_data:
+      - "dental"
+    data_source: pdf_text
+    category: bill_text
+
+# =============================================================================
+# FLORIDA BILL TESTS - HB 429 Criminal Gang Membership
+# =============================================================================
+fl_hb429_tests:
+  - id: fl_hb429_summary
+    prompt: "What is Florida HB 429 about?"
+    expected_data:
+      - "gang"
+      - "membership"
+    data_source: webflow_cms
+    category: bill_summary
+
+  - id: fl_hb429_sponsor
+    prompt: "Who is the primary sponsor of Florida HB 429?"
+    expected_data:
+      - "sponsor"
+    data_source: openstates
+    category: bill_sponsor
+    notes: "Known issue - sponsor data may be missing"
+
+  - id: fl_hb429_criteria
+    prompt: "What criteria does FL HB 429 use to determine gang membership?"
+    expected_data:
+      - "criteria"
+    data_source: webflow_cms
+    category: bill_summary
+
+# =============================================================================
+# FEDERAL BILL TESTS - HR 1004 Love Lives On Act
+# =============================================================================
+federal_hr1004_tests:
+  - id: hr1004_summary
+    prompt: "What is HR 1004 the Love Lives On Act about?"
+    expected_data:
+      - "love lives on"
+    data_source: webflow_cms
+    category: bill_summary
+
+  - id: hr1004_sponsor
+    prompt: "Who sponsored HR 1004?"
+    expected_data:
+      - "sponsor"
+    data_source: openstates
+    category: bill_sponsor
+
+  - id: hr1004_status
+    prompt: "What is the status of HR 1004 in Congress?"
+    expected_data:
+      - "congress"
+    data_source: openstates
+    category: bill_status
+
+# =============================================================================
+# FEDERAL BILL WITH ORG POSITIONS - HR 3492 Protect Childrens Innocence Act
+# =============================================================================
+federal_hr3492_tests:
+  - id: hr3492_summary
+    prompt: "What is HR 3492 the Protect Childrens Innocence Act about?"
+    expected_data:
+      - "protect"
+      - "children"
+    data_source: webflow_cms
+    category: bill_summary
+
+  - id: hr3492_opposition
+    prompt: "Which organizations oppose HR 3492?"
+    expected_data:
+      - "oppose"
+    data_source: webflow_cms
+    category: org_positions
+    notes: "This bill has 120 organizations opposing it"
+
+# =============================================================================
+# FLORIDA LEGISLATOR TESTS
+# =============================================================================
+fl_legislator_tests:
+  - id: brian_hodgers_info
+    prompt: "Tell me about Florida Representative Brian Hodgers"
+    expected_data:
+      - "brian hodgers"
+      - "florida"
+    data_source: webflow_cms
+    category: legislator_profile
+
+  - id: brian_hodgers_district
+    prompt: "What district does Brian Hodgers represent?"
+    expected_data:
+      - "32"
+    data_source: webflow_cms
+    category: legislator_profile
+
+  - id: nathan_boyles_info
+    prompt: "Tell me about Florida Representative Nathan Boyles"
+    expected_data:
+      - "nathan boyles"
+    data_source: webflow_cms
+    category: legislator_profile
+
+  - id: ashley_moody_info
+    prompt: "Tell me about US Senator Ashley Moody from Florida"
+    expected_data:
+      - "ashley moody"
+    data_source: webflow_cms
+    category: legislator_profile
+
+  - id: legislator_sponsored_bills
+    prompt: "What bills has Brian Hodgers sponsored?"
+    expected_data:
+      - "bill"
+    data_source: openstates
+    category: sponsored_bills
+
+# =============================================================================
+# ORGANIZATION TESTS
+# =============================================================================
+organization_tests:
+  - id: bond_health_center_info
+    prompt: "Tell me about Bond Community Health Center"
+    expected_data:
+      - "bond"
+      - "health"
+    data_source: webflow_cms
+    category: org_profile
+
+  - id: bond_health_center_positions
+    prompt: "What bills does Bond Community Health Center support?"
+    expected_data:
+      - "support"
+    data_source: webflow_cms
+    category: org_positions
+
+  - id: baptist_health_fl_info
+    prompt: "Tell me about Baptist Health Florida"
+    expected_data:
+      - "baptist"
+      - "health"
+    data_source: webflow_cms
+    category: org_profile
+
+  - id: arizona_advocacy_network
+    prompt: "Tell me about Arizona Advocacy Network"
+    expected_data:
+      - "arizona"
+      - "advocacy"
+    data_source: webflow_cms
+    category: org_profile
+
+  - id: virginia_farm_bureau
+    prompt: "What is the Virginia Farm Bureau's position on bills?"
+    expected_data:
+      - "virginia farm bureau"
+    data_source: webflow_cms
+    category: org_positions
+
+# =============================================================================
+# CROSS-ENTITY / TOPIC SEARCH TESTS
+# =============================================================================
+topic_search_tests:
+  - id: immigration_bills
+    prompt: "What bills are related to immigration?"
+    expected_data:
+      - "immigration"
+    data_source: webflow_cms
+    category: topic_search
+
+  - id: healthcare_bills
+    prompt: "What healthcare bills are being considered in Florida?"
+    expected_data:
+      - "health"
+    data_source: webflow_cms
+    category: topic_search
+
+  - id: education_bills
+    prompt: "Tell me about education bills in Florida"
+    expected_data:
+      - "education"
+    data_source: webflow_cms
+    category: topic_search
+
+  - id: voting_rights_bills
+    prompt: "What bills relate to voting rights?"
+    expected_data:
+      - "vot"
+    data_source: webflow_cms
+    category: topic_search
+
+# =============================================================================
+# EDGE CASES / ERROR HANDLING
+# =============================================================================
+edge_case_tests:
+  - id: nonexistent_bill
+    prompt: "Tell me about Florida HB 99999"
+    expected_data:
+      - "don't have"
+    data_source: none
+    category: error_handling
+    notes: "Should gracefully handle non-existent bills"
+
+  - id: ambiguous_bill_number
+    prompt: "Tell me about HB 123"
+    expected_data:
+      - "state"
+    data_source: none
+    category: disambiguation
+    notes: "Should ask which state or list multiple options"
+
+  - id: general_ddp_question
+    prompt: "What is Digital Democracy Project?"
+    expected_data:
+      - "digital democracy"
+    data_source: training_docs
+    category: general_info
+
+# =============================================================================
+# WASHINGTON STATE BILL TESTS
+# =============================================================================
+wa_bill_tests:
+  - id: wa_hb1750_summary
+    prompt: "What is Washington HB 1750 about?"
+    expected_data:
+      - "washington"
+      - "voting"
+    data_source: webflow_cms
+    category: bill_summary
+    notes: "Washington voting rights act guidelines bill"
+
+# =============================================================================
+# VIRGINIA BILL TESTS
+# =============================================================================
+va_bill_tests:
+  - id: va_hb153_summary
+    prompt: "What is Virginia HB 153 about?"
+    expected_data:
+      - "data center"
+    data_source: webflow_cms
+    category: bill_summary
+
+  - id: va_hb895_summary
+    prompt: "What is Virginia HB 895 about?"
+    expected_data:
+      - "energy"
+      - "storage"
+    data_source: webflow_cms
+    category: bill_summary
