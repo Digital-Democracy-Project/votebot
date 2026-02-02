@@ -380,9 +380,22 @@ class BillSyncService:
 
             try:
                 async with httpx.AsyncClient(timeout=30.0, http2=False) as client:
-                    # OpenStates v3 API accepts apikey as query param
-                    # Build full URL with params to match curl behavior
-                    full_url = f"{url}?apikey={self.api_key}"
+                    # OpenStates v3 API requires include params to get detailed data
+                    # Without these, only basic bill info is returned (no sponsors, actions, votes)
+                    include_params = [
+                        "sponsorships",
+                        "abstracts",
+                        "other_titles",
+                        "other_identifiers",
+                        "actions",
+                        "sources",
+                        "documents",
+                        "versions",
+                        "votes",
+                        "related_bills",
+                    ]
+                    include_str = "&".join(f"include={p}" for p in include_params)
+                    full_url = f"{url}?apikey={self.api_key}&{include_str}"
                     response = await client.get(full_url)
 
                     # Log the response for debugging
