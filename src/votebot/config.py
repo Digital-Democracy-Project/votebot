@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     chunk_size: int = 750
     chunk_overlap: int = 150
     max_retrieval_chunks: int = 10
-    similarity_threshold: float = 0.4
+    similarity_threshold: float = 0.1
 
     # Performance
     request_timeout_seconds: int = 30
