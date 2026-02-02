@@ -24,6 +24,12 @@ Usage:
     python scripts/sync.py legislator --batch --jurisdiction FL
     python scripts/sync.py all --dry-run
 
+    # Full refresh (clear namespace and resync everything)
+    python scripts/sync.py all --clear-namespace
+
+    # Clear namespace only (DESTRUCTIVE)
+    python scripts/sync.py clear --confirm
+
     # Common options
     --dry-run          Preview without ingesting
     --limit N          Maximum items (batch mode)
@@ -180,6 +186,27 @@ def create_parser() -> argparse.ArgumentParser:
         "--no-sponsored-bills",
         action="store_true",
         help="Skip OpenStates sponsored bills sync for legislators",
+    )
+    all_parser.add_argument(
+        "--clear-namespace",
+        action="store_true",
+        help="Delete all data from Pinecone namespace before syncing (DESTRUCTIVE)",
+    )
+
+    # Clear subcommand (delete namespace data)
+    clear_parser = subparsers.add_parser(
+        "clear",
+        help="Clear all data from Pinecone namespace (DESTRUCTIVE)",
+    )
+    clear_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm deletion (required)",
+    )
+    clear_parser.add_argument(
+        "--namespace",
+        type=str,
+        help="Namespace to clear (default: configured namespace)",
     )
 
     return parser
@@ -368,6 +395,41 @@ async def sync_training(args) -> int:
     return 0 if result.success else 1
 
 
+async def clear_namespace(args) -> int:
+    """Handle clear namespace command."""
+    from votebot.services.vector_store import VectorStoreService
+
+    settings = get_settings()
+    namespace = args.namespace or settings.pinecone_namespace
+
+    if not args.confirm:
+        print("=" * 60)
+        print("WARNING: DESTRUCTIVE OPERATION")
+        print("=" * 60)
+        print(f"  This will DELETE ALL DATA from namespace: {namespace}")
+        print(f"  To proceed, run with --confirm flag:")
+        print(f"")
+        print(f"    python scripts/sync.py clear --confirm")
+        print("=" * 60)
+        return 1
+
+    print("=" * 60)
+    print("CLEARING PINECONE NAMESPACE")
+    print("=" * 60)
+    print(f"  Namespace: {namespace}")
+
+    try:
+        vector_store = VectorStoreService(settings)
+        await vector_store.delete(delete_all=True)
+        print("  Status: SUCCESS - All data deleted")
+        print("=" * 60)
+        return 0
+    except Exception as e:
+        print(f"  Status: FAILED - {e}")
+        print("=" * 60)
+        return 1
+
+
 async def sync_all(args) -> int:
     """Handle sync all command."""
     service = UnifiedSyncService()
@@ -387,7 +449,22 @@ async def sync_all(args) -> int:
     print(f"  Include PDFs: {not args.no_pdfs}")
     print(f"  Include OpenStates: {not args.no_openstates}")
     print(f"  Include sponsored bills: {not args.no_sponsored_bills}")
+    print(f"  Clear namespace first: {getattr(args, 'clear_namespace', False)}")
     print("=" * 60)
+
+    # Clear namespace if requested
+    if getattr(args, "clear_namespace", False):
+        from votebot.services.vector_store import VectorStoreService
+
+        settings = get_settings()
+        print("\n[0/4] Clearing Pinecone namespace...")
+        try:
+            vector_store = VectorStoreService(settings)
+            await vector_store.delete(delete_all=True)
+            print("       Namespace cleared successfully")
+        except Exception as e:
+            print(f"       ERROR: Failed to clear namespace: {e}")
+            return 1
 
     results = await service.sync_all(options)
 
@@ -439,6 +516,8 @@ async def main() -> int:
             return await sync_training(args)
         elif args.content_type == "all":
             return await sync_all(args)
+        elif args.content_type == "clear":
+            return await clear_namespace(args)
         else:
             print(f"Unknown content type: {args.content_type}")
             return 1
