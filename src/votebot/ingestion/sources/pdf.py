@@ -188,7 +188,7 @@ class PDFSource:
 
         import httpx
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
             try:
                 response = await client.get(url)
                 response.raise_for_status()
