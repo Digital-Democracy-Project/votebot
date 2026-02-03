@@ -236,18 +236,28 @@ class SlackService:
     async def _get_user_name(self, user_id: str) -> str:
         """Get display name for a user."""
         if not self._web_client:
+            logger.warning("No Slack web client available for user lookup")
             return "Agent"
 
         try:
             result = await self._web_client.users_info(user=user_id)
             user = result.get("user", {})
             profile = user.get("profile", {})
-            return (
-                profile.get("display_name")
-                or profile.get("real_name")
-                or user.get("name")
-                or "Agent"
+
+            display_name = profile.get("display_name")
+            real_name = profile.get("real_name")
+            username = user.get("name")
+
+            logger.info(
+                "Slack user info retrieved",
+                user_id=user_id,
+                display_name=display_name,
+                real_name=real_name,
+                username=username,
             )
+
+            name = display_name or real_name or username or "Agent"
+            return name
         except Exception as e:
             logger.error("Failed to get user name", user_id=user_id, error=str(e))
             return "Agent"

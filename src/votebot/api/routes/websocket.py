@@ -168,6 +168,13 @@ class ConnectionManager:
 
         Called by SlackService when an agent replies in a thread.
         """
+        logger.info(
+            "Handling agent message callback",
+            thread_ts=thread_ts,
+            agent_name=agent_name,
+            message_preview=message[:50] if message else "",
+        )
+
         session_id = thread_to_session.get(thread_ts)
         if not session_id:
             logger.warning("No session found for thread", thread_ts=thread_ts)
@@ -177,6 +184,11 @@ class ConnectionManager:
         self.add_message(session_id, "agent", message)
 
         # Send to user via WebSocket
+        logger.info(
+            "Sending agent_message to WebSocket",
+            session_id=session_id,
+            agent_name=agent_name,
+        )
         await self.send_json(session_id, {
             "type": "agent_message",
             "payload": {
