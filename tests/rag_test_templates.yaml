@@ -48,6 +48,30 @@ bill_templates:
     ground_truth_field: status
     min_matches: 1
 
+  - id: "{slug}_latest_action"
+    prompt: "What is the latest action on {jurisdiction_name} {bill_id}?"
+    category: bill_actions
+    condition: has_actions
+    validation: contains_any
+    ground_truth_field: latest_action_keywords
+    min_matches: 1
+
+  - id: "{slug}_cosponsors"
+    prompt: "Who are the co-sponsors of {jurisdiction_name} {bill_id}?"
+    category: bill_sponsor
+    condition: has_cosponsors
+    validation: contains_any
+    ground_truth_field: cosponsor_names
+    min_matches: 1
+
+  - id: "{slug}_vote_result"
+    prompt: "What was the vote result for {jurisdiction_name} {bill_id}?"
+    category: bill_votes
+    condition: has_votes
+    validation: contains_any
+    ground_truth_field: vote_keywords
+    min_matches: 1
+
   - id: "{slug}_support_orgs"
     prompt: "Which organizations support {jurisdiction_name} {bill_id}?"
     category: org_positions

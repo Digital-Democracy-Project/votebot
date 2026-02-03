@@ -38,8 +38,11 @@ class BillGroundTruth:
     oppose_org_names: list[str] = field(default_factory=list)
     # OpenStates enrichment
     sponsors: list[str] = field(default_factory=list)
+    cosponsors: list[str] = field(default_factory=list)
     latest_action: str = ""
     action_date: str = ""
+    actions: list[str] = field(default_factory=list)
+    votes: list[dict] = field(default_factory=list)
 
     def description_keywords(self, min_length: int = 4) -> list[str]:
         """Extract significant keywords from description."""
@@ -95,6 +98,52 @@ class BillGroundTruth:
     @property
     def has_oppose_text(self) -> bool:
         return bool(self.oppose_text and len(self.oppose_text) > 20)
+
+    @property
+    def has_actions(self) -> bool:
+        return bool(self.latest_action) or len(self.actions) > 0
+
+    @property
+    def has_cosponsors(self) -> bool:
+        return len(self.cosponsors) > 0
+
+    @property
+    def has_votes(self) -> bool:
+        return len(self.votes) > 0
+
+    @property
+    def cosponsor_names(self) -> list[str]:
+        """Return list of co-sponsor names."""
+        return self.cosponsors
+
+    def latest_action_keywords(self) -> list[str]:
+        """Extract keywords from latest action."""
+        if not self.latest_action:
+            return []
+        # Common action keywords that should be preserved
+        action_terms = ["calendar", "filed", "referred", "passed", "failed",
+                        "committee", "reading", "engrossed", "enrolled",
+                        "signed", "vetoed", "amended", "tabled", "withdrawn"]
+        text_lower = self.latest_action.lower()
+        found = [term for term in action_terms if term in text_lower]
+        return found if found else self._extract_keywords(self.latest_action, 4)[:5]
+
+    def vote_keywords(self) -> list[str]:
+        """Extract keywords from vote results."""
+        keywords = []
+        for vote in self.votes:
+            result = vote.get("result", "").lower()
+            if "pass" in result:
+                keywords.append("pass")
+            if "fail" in result:
+                keywords.append("fail")
+            yes_count = vote.get("yes_count")
+            no_count = vote.get("no_count")
+            if yes_count is not None:
+                keywords.append(str(yes_count))
+            if no_count is not None:
+                keywords.append(str(no_count))
+        return list(set(keywords)) if keywords else ["vote"]
 
 
 @dataclass
@@ -408,12 +457,15 @@ class GroundTruthFetcher:
         client: httpx.AsyncClient,
         headers: dict,
     ) -> None:
-        """Fetch sponsor and status from OpenStates."""
-        # Search for the bill
-        params = {
-            "jurisdiction": bill.jurisdiction.lower(),
-            "identifier": f"{bill.bill_prefix} {bill.bill_number}",
-        }
+        """Fetch sponsor, actions, and votes from OpenStates."""
+        # Search for the bill with all include params
+        params = [
+            ("jurisdiction", bill.jurisdiction.lower()),
+            ("identifier", f"{bill.bill_prefix} {bill.bill_number}"),
+            ("include", "sponsorships"),
+            ("include", "actions"),
+            ("include", "votes"),
+        ]
         response = await client.get(
             f"{self.OPENSTATES_BASE_URL}/bills",
             headers=headers,
@@ -430,19 +482,41 @@ class GroundTruthFetcher:
         # Get the first (most recent) match
         bill_data = results[0]
 
-        # Extract sponsors
+        # Extract sponsors and cosponsors
         sponsorships = bill_data.get("sponsorships", [])
         bill.sponsors = [
             s.get("name", "") for s in sponsorships
-            if s.get("name")
+            if s.get("name") and s.get("primary", False)
+        ]
+        bill.cosponsors = [
+            s.get("name", "") for s in sponsorships
+            if s.get("name") and not s.get("primary", False)
         ]
 
-        # Extract latest action
+        # Extract actions
         actions = bill_data.get("actions", [])
         if actions:
             latest = actions[-1]
             bill.latest_action = latest.get("description", "")
             bill.action_date = latest.get("date", "")
+            # Store recent actions (last 5)
+            bill.actions = [
+                a.get("description", "") for a in actions[-5:]
+                if a.get("description")
+            ]
+
+        # Extract votes
+        votes = bill_data.get("votes", [])
+        if votes:
+            bill.votes = []
+            for vote in votes[:3]:  # Store up to 3 most recent votes
+                vote_info = {
+                    "motion": vote.get("motion_text", ""),
+                    "result": vote.get("result", ""),
+                    "yes_count": sum(c.get("value", 0) for c in vote.get("counts", []) if c.get("option") == "yes"),
+                    "no_count": sum(c.get("value", 0) for c in vote.get("counts", []) if c.get("option") == "no"),
+                }
+                bill.votes.append(vote_info)
 
     async def _enrich_legislator_from_openstates(
         self,
