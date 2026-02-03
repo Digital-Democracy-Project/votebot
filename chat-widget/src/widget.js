@@ -228,25 +228,25 @@
             case 'bill':
                 if (title && id && !titleContainsId(title, id)) {
                     // Only append ID if title doesn't already contain it
-                    return 'Welcome! I can answer detailed questions about **' + title + ' (' + id + ')**. You can also ask me about other bills, legislators, or Digital Democracy Project in general.';
+                    return 'Welcome! I can answer detailed questions about **' + title + ' (' + id + ')**.';
                 } else if (title) {
-                    return 'Welcome! I can answer detailed questions about **' + title + '**. You can also ask me about other bills, legislators, or Digital Democracy Project in general.';
+                    return 'Welcome! I can answer detailed questions about **' + title + '**.';
                 } else if (id) {
-                    return 'Welcome! I can answer detailed questions about **' + id + '**. You can also ask me about other bills, legislators, or Digital Democracy Project in general.';
+                    return 'Welcome! I can answer detailed questions about **' + id + '**.';
                 }
-                return 'Welcome! I can answer detailed questions about this bill. You can also ask me about other legislation, legislators, or Digital Democracy Project in general.';
+                return 'Welcome! I can answer detailed questions about this bill.';
 
             case 'legislator':
                 if (title) {
-                    return 'Welcome! I can answer questions about **' + title + '**, including their voting record, sponsored bills, and positions. You can also ask me about other legislators or legislation.';
+                    return 'Welcome! I can answer questions about **' + title + '**.';
                 }
-                return 'Welcome! I can answer questions about this legislator, including their voting record, sponsored bills, and positions. You can also ask me about other legislators or legislation.';
+                return 'Welcome! I can answer questions about this legislator.';
 
             case 'organization':
                 if (title) {
-                    return 'Welcome! I can provide information about **' + title + '**, including their legislative positions and supported bills. You can also ask me about legislators or legislation.';
+                    return 'Welcome! I can provide information about **' + title + '**.';
                 }
-                return 'Welcome! I can provide information about this organization, including their legislative positions and supported bills. You can also ask me about legislators or legislation.';
+                return 'Welcome! I can provide information about this organization.';
 
             default:
                 return 'Welcome! Ask me anything about legislation, legislators, or civic engagement.';
