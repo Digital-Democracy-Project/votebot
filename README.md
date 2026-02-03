@@ -21,7 +21,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 
 - **Framework**: FastAPI (Python 3.11+)
 - **Vector Database**: Pinecone
-- **LLM**: OpenAI GPT-4
+- **LLM**: OpenAI GPT-4.1 (via Responses API with web search)
 - **Embeddings**: OpenAI text-embedding-3-large
 - **Caching**: Redis
 - **Database**: PostgreSQL (optional)
@@ -74,16 +74,22 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 |----------|-------------|----------|
 | `OPENAI_API_KEY` | OpenAI API key | Yes |
 | `PINECONE_API_KEY` | Pinecone API key | Yes |
-| `PINECONE_ENVIRONMENT` | Pinecone environment | Yes |
-| `PINECONE_INDEX_NAME` | Pinecone index name | Yes |
-| `CONGRESS_API_KEY` | Congress.gov API key | For ingestion |
-| `OPENSTATES_API_KEY` | OpenStates API key | For ingestion |
-| `REDIS_URL` | Redis connection URL | Optional |
+| `PINECONE_ENVIRONMENT` | Pinecone environment (default: us-east-1) | Yes |
+| `PINECONE_INDEX_NAME` | Pinecone index name (default: votebot-large) | Yes |
+| `PINECONE_NAMESPACE` | Pinecone namespace (default: default) | No |
 | `API_KEY` | API key for authentication | Yes |
+| `WEBFLOW_API_KEY` | Webflow CMS API key | For sync |
+| `WEBFLOW_BILLS_COLLECTION_ID` | Webflow bills collection | For sync |
+| `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection | For sync |
+| `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection | For sync |
+| `CONGRESS_API_KEY` | Congress.gov API key | For federal bills |
+| `OPENSTATES_API_KEY` | OpenStates API key | For state bills |
 | `TAVILY_API_KEY` | Tavily API key for web search fallback | For web search |
+| `REDIS_URL` | Redis connection URL | Optional |
 | `SLACK_BOT_TOKEN` | Slack Bot Token (xoxb-...) | For handoff |
 | `SLACK_APP_TOKEN` | Slack App Token (xapp-...) | For handoff |
 | `SLACK_SUPPORT_CHANNEL` | Slack channel for support | For handoff |
+| `SIMILARITY_THRESHOLD` | RAG similarity threshold (default: 0.1) | No |
 
 ## API Endpoints
 
@@ -166,6 +172,60 @@ curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=htt
   "url": "https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025",
   "slug": "one-big-beautiful-bill-act-hr1-2025"
 }
+```
+
+### Unified Sync API
+
+```
+POST /votebot/v1/sync/unified
+```
+
+Sync content to the vector store. Supports bills, legislators, organizations, webpages, and training documents.
+
+**Request Body (single item):**
+```json
+{
+  "content_type": "bill",
+  "mode": "single",
+  "slug": "fl-hb-123-2025",
+  "include_pdfs": true,
+  "include_openstates": true
+}
+```
+
+**Request Body (batch):**
+```json
+{
+  "content_type": "bill",
+  "mode": "batch",
+  "jurisdiction": "FL",
+  "limit": 100,
+  "include_pdfs": true
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "content_type": "bill",
+  "mode": "batch",
+  "status": "accepted",
+  "task_id": "abc-123-def",
+  "items_processed": 0,
+  "chunks_created": 0
+}
+```
+
+For batch operations, the sync runs in the background. Check status with:
+
+```
+GET /votebot/v1/sync/unified/status/{task_id}
+```
+
+**Sync all content types:**
+```
+POST /votebot/v1/sync/unified/all
 ```
 
 ## Chat Widget
@@ -260,22 +320,56 @@ Recent Conversation:
 
 ## Data Ingestion
 
-### Manual Ingestion
+VoteBot uses a unified sync service for all content types. The primary data sources are:
+- **Webflow CMS** - Bills, legislators, and organizations managed in Webflow
+- **OpenStates** - Legislative history, votes, actions, and sponsored bills
+- **Congress.gov** - Federal bill text and amendments
+- **PDFs** - Bill text from legislative websites and Google Drive
+
+### Unified Sync CLI
 
 ```bash
-# Ingest from Congress.gov
-python scripts/ingest.py congress --congress 118 --limit 100
+# Single item sync
+python scripts/sync.py bill --slug fl-hb-123-2025
+python scripts/sync.py bill --webflow-id 6512abc123
+python scripts/sync.py legislator --slug rick-scott
+python scripts/sync.py organization --slug aclu
 
-# Ingest from OpenStates
-python scripts/ingest.py openstates --jurisdiction ca --limit 100
+# Batch sync (all items of a type)
+python scripts/sync.py bill --batch
+python scripts/sync.py bill --batch --jurisdiction FL --limit 100
+python scripts/sync.py legislator --batch --no-sponsored-bills
+python scripts/sync.py organization --batch
 
-# Ingest PDFs
-python scripts/ingest.py pdf /path/to/pdfs --recursive
+# Sync all content types
+python scripts/sync.py all
+python scripts/sync.py all --dry-run --limit 50
+
+# Full refresh (clear and resync)
+python scripts/sync.py all --clear-namespace
+
+# Clear namespace only (DESTRUCTIVE)
+python scripts/sync.py clear --confirm
 ```
 
-### Seed Development Data
+### Sync Options
+
+| Option | Description |
+|--------|-------------|
+| `--batch` | Sync all items (vs single item) |
+| `--dry-run` | Preview without ingesting |
+| `--limit N` | Maximum items to process |
+| `--jurisdiction` | Filter by jurisdiction (e.g., FL, US) |
+| `--no-pdfs` | Skip PDF processing for bills |
+| `--no-openstates` | Skip OpenStates data for bills |
+| `--no-sponsored-bills` | Skip sponsored bills for legislators |
+| `--clear-namespace` | Delete all data before syncing |
+| `--log-level` | DEBUG, INFO, WARNING, ERROR |
+
+### Legacy Scripts
 
 ```bash
+# Seed development data
 python scripts/seed_data.py
 ```
 
@@ -316,6 +410,11 @@ votebot/
 │   ├── config.py            # Configuration
 │   ├── api/                  # API layer
 │   │   ├── routes/          # Endpoint handlers
+│   │   │   ├── chat.py      # POST /chat endpoints
+│   │   │   ├── websocket.py # WebSocket /ws/chat
+│   │   │   ├── health.py    # Health checks
+│   │   │   ├── content.py   # Content resolution
+│   │   │   └── sync_unified.py  # Unified sync API
 │   │   ├── schemas/         # Request/response models
 │   │   └── middleware/      # Auth, logging
 │   ├── core/                # Business logic
@@ -326,14 +425,31 @@ votebot/
 │   │   ├── llm.py           # OpenAI client
 │   │   ├── embeddings.py    # Embedding generation
 │   │   ├── vector_store.py  # Pinecone operations
+│   │   ├── web_search.py    # Tavily web search
 │   │   └── slack.py         # Slack human handoff
-│   ├── ingestion/           # Data ingestion
+│   ├── sync/                # Unified sync service
+│   │   ├── service.py       # UnifiedSyncService
+│   │   ├── types.py         # ContentType, SyncMode, etc.
+│   │   └── handlers/        # Content-specific handlers
+│   │       ├── bill.py      # Bill sync (Webflow + OpenStates + PDFs)
+│   │       ├── legislator.py    # Legislator sync
+│   │       ├── organization.py  # Organization sync
+│   │       ├── webpage.py   # Webpage sync
+│   │       └── training.py  # Training document sync
+│   ├── ingestion/           # Data ingestion pipeline
 │   │   ├── pipeline.py      # Main orchestrator
 │   │   ├── sources/         # Data source connectors
+│   │   │   ├── congress.py  # Congress.gov API
+│   │   │   ├── openstates.py    # OpenStates API
+│   │   │   ├── webflow.py   # Webflow CMS
+│   │   │   └── pdf.py       # PDF extraction
 │   │   └── chunking.py      # Text chunking
 │   └── updates/             # Real-time updates
-│       ├── scheduler.py     # Hourly polling
+│       ├── scheduler.py     # Scheduled polling
 │       └── change_detection.py
+├── scripts/
+│   ├── sync.py              # Unified sync CLI
+│   └── seed_data.py         # Development data seeding
 ├── tests/
 │   ├── unit/
 │   ├── integration/
