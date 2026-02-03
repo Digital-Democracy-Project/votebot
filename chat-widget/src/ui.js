@@ -104,13 +104,19 @@ const DDPUI = (function() {
         const botName = config.botName || 'VoteBot';
         const avatar = config.avatar || '\uD83D\uDDF3\uFE0F';
 
+        // Render avatar as image if it's a URL, otherwise as text (emoji)
+        const isImageUrl = avatar.startsWith('data:') || avatar.startsWith('http');
+        const avatarHtml = isImageUrl
+            ? `<img src="${avatar}" alt="${botName}" class="ddp-avatar-img">`
+            : avatar;
+
         return `
             <button class="ddp-chat-button" aria-label="Open chat">
-                ${avatar}
+                ${avatarHtml}
             </button>
             <div class="ddp-chat-popup">
                 <div class="ddp-chat-header">
-                    <div class="ddp-chat-header-avatar">${avatar}</div>
+                    <div class="ddp-chat-header-avatar">${avatarHtml}</div>
                     <div class="ddp-chat-header-info">
                         <h2>${botName}</h2>
                         <div class="ddp-status">
