@@ -118,12 +118,11 @@ const DDPChat = (function() {
                     onUIUpdateCallback({ type: 'input_enable' });
                 }
 
-                // Check for human handoff
+                // Check for human handoff - show confirmation first
                 if (data.payload.requires_human) {
-                    handoffActive = true;
                     if (onUIUpdateCallback) {
                         onUIUpdateCallback({
-                            type: 'handoff_requested',
+                            type: 'handoff_suggested',
                             payload: {}
                         });
                     }

@@ -457,6 +457,41 @@ const DDPUI = (function() {
     }
 
     /**
+     * Show handoff confirmation prompt with button.
+     */
+    function showHandoffConfirmation() {
+        hideTypingIndicator();
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'ddp-message system ddp-handoff-confirm';
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'ddp-message-content';
+        contentDiv.innerHTML = '<p>Would you like to speak with a human agent?</p>';
+
+        const button = document.createElement('button');
+        button.className = 'ddp-handoff-button';
+        button.textContent = 'Yes, connect me to a human';
+        button.addEventListener('click', function() {
+            // Remove the confirmation message
+            messageDiv.remove();
+            // Send confirmation to initiate handoff
+            DDPWebSocket.send({
+                type: 'confirm_handoff',
+                payload: {}
+            });
+            // Show connecting message
+            addSystemMessage('Connecting you with a human agent...');
+            showHandoffBanner('\uD83E\uDD1D Connecting you with a human agent...');
+        });
+
+        contentDiv.appendChild(button);
+        messageDiv.appendChild(contentDiv);
+        elements.messagesContainer.appendChild(messageDiv);
+        scrollToBottom();
+    }
+
+    /**
      * Scroll messages to bottom.
      */
     function scrollToBottom() {
@@ -499,6 +534,10 @@ const DDPUI = (function() {
 
             case 'input_disable':
                 disableInput();
+                break;
+
+            case 'handoff_suggested':
+                showHandoffConfirmation();
                 break;
 
             case 'handoff_requested':
@@ -556,6 +595,7 @@ const DDPUI = (function() {
         finalizeStreamingMessage: finalizeStreamingMessage,
         showHandoffBanner: showHandoffBanner,
         hideHandoffBanner: hideHandoffBanner,
+        showHandoffConfirmation: showHandoffConfirmation,
         scrollToBottom: scrollToBottom,
         handleUIUpdate: handleUIUpdate
     };

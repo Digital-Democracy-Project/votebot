@@ -261,6 +261,33 @@
     display: block;
 }
 
+/* Handoff confirmation button */
+.ddp-handoff-confirm .ddp-message-content {
+    background: #e0f2fe;
+    color: #0369a1;
+    text-align: left;
+}
+
+.ddp-handoff-button {
+    display: block;
+    width: 100%;
+    margin-top: 10px;
+    padding: 10px 16px;
+    background: linear-gradient(135deg, var(--ddp-primary) 0%, var(--ddp-primary-light) 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.ddp-handoff-button:hover {
+    transform: scale(1.02);
+    box-shadow: 0 2px 8px rgba(26, 95, 122, 0.3);
+}
+
 /* Chat messages area */
 .ddp-chat-messages {
     flex: 1;

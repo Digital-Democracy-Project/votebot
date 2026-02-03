@@ -303,10 +303,35 @@ async def handle_client_message(session_id: str, data: dict):
 
     if message_type == "user_message":
         await handle_user_message(session_id, payload)
+    elif message_type == "confirm_handoff":
+        await handle_confirm_handoff(session_id)
     elif message_type == "ping":
         await manager.send_json(session_id, {"type": "pong"})
     else:
         logger.warning("Unknown message type", type=message_type, session_id=session_id)
+
+
+async def handle_confirm_handoff(session_id: str):
+    """Handle user confirmation to initiate human handoff."""
+    session = manager.get_session(session_id)
+    if not session:
+        return
+
+    # Get the pending handoff context
+    pending_message = session.get("pending_handoff_message", "")
+    page_context = session.get("page_context", {"type": "general"})
+
+    # Initiate the handoff
+    await manager.initiate_handoff(
+        session_id=session_id,
+        message=pending_message,
+        page_context=page_context,
+    )
+
+    # Clear pending handoff
+    manager.update_session(session_id, pending_handoff_message=None)
+
+    logger.info("Handoff confirmed by user", session_id=session_id)
 
 
 async def handle_user_message(session_id: str, payload: dict):
@@ -426,12 +451,11 @@ async def handle_user_message(session_id: str, payload: dict):
                     }
                 })
 
-                # Initiate handoff if needed
+                # Store pending handoff for user confirmation
                 if requires_human:
-                    await manager.initiate_handoff(
-                        session_id=session_id,
-                        message=message,
-                        page_context=page_context_data,
+                    manager.update_session(
+                        session_id,
+                        pending_handoff_message=message,
                     )
             else:
                 # Stream chunk
