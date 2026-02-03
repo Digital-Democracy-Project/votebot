@@ -12,6 +12,9 @@ from votebot.sync.types import ContentType, SyncIdentifier, SyncMode, SyncOption
 
 logger = structlog.get_logger()
 
+# Default path to RAG training docs directory (relative to project root)
+DEFAULT_TRAINING_DOCS_DIR = Path(__file__).parent.parent.parent.parent.parent / "RAG training docs"
+
 
 class TrainingHandler:
     """
@@ -182,28 +185,39 @@ class TrainingHandler:
         options: SyncOptions,
     ) -> SyncResult:
         """
-        Batch sync training documents from a directory.
+        Batch sync all training documents from the default RAG training docs directory.
 
-        Note: Batch mode requires a directory path to be set via identifier
-        in the sync_single method. For true batch operations, use the
-        IngestionPipeline directly with ingest_from_source().
+        Reads all .txt and .md files (excluding website_pages.txt) and ingests them.
 
         Args:
-            options: Sync options (ignored)
+            options: Sync options
 
         Returns:
-            SyncResult indicating batch mode usage
+            SyncResult with aggregated stats
         """
-        return SyncResult(
-            success=False,
-            content_type=ContentType.TRAINING,
-            mode=SyncMode.BATCH,
-            errors=[
-                "Batch mode for training documents requires explicit file paths. "
-                "Use single mode with --path for each document, or use the "
-                "IngestionPipeline.ingest_from_source() method directly."
-            ],
-            duration_seconds=0.0,
+        start_time = time.perf_counter()
+
+        # Find the training docs directory
+        docs_dir = DEFAULT_TRAINING_DOCS_DIR
+        if not docs_dir.exists():
+            # Try alternate location (deployed server path)
+            alt_path = Path("/home/ubuntu/votebot/RAG training docs")
+            if alt_path.exists():
+                docs_dir = alt_path
+            else:
+                return SyncResult(
+                    success=False,
+                    content_type=ContentType.TRAINING,
+                    mode=SyncMode.BATCH,
+                    errors=[f"Training docs directory not found: {docs_dir}"],
+                    duration_seconds=time.perf_counter() - start_time,
+                )
+
+        # Use the existing sync_directory method
+        return await self.sync_directory(
+            directory=docs_dir,
+            options=options,
+            pattern="*.txt",  # Will also check for .md files
         )
 
     async def sync_directory(
@@ -246,8 +260,13 @@ class TrainingHandler:
             pattern=pattern,
         )
 
-        # Find all matching files
-        files = list(dir_path.glob(pattern))
+        # Find all matching files (both .txt and .md, excluding website_pages.txt)
+        files = []
+        for ext in ["*.txt", "*.md"]:
+            for f in dir_path.glob(ext):
+                # Exclude website_pages.txt as it's a config file, not training content
+                if f.name != "website_pages.txt":
+                    files.append(f)
 
         if options.limit > 0:
             files = files[: options.limit]

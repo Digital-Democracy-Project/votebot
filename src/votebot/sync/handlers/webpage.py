@@ -1,6 +1,7 @@
 """Webpage content handler for unified sync service."""
 
 import time
+from pathlib import Path
 
 import structlog
 
@@ -10,6 +11,9 @@ from votebot.ingestion.sources.webflow import WebflowSource
 from votebot.sync.types import ContentType, SyncIdentifier, SyncMode, SyncOptions, SyncResult
 
 logger = structlog.get_logger()
+
+# Default path to website pages file (relative to project root)
+DEFAULT_WEBSITE_PAGES_FILE = Path(__file__).parent.parent.parent.parent.parent / "RAG training docs" / "website_pages.txt"
 
 
 class WebpageHandler:
@@ -159,20 +163,133 @@ class WebpageHandler:
         options: SyncOptions,
     ) -> SyncResult:
         """
-        Batch sync is not supported for webpages.
+        Batch sync all webpages from the website_pages.txt file.
 
-        Webpages must be synced individually by URL.
+        Reads URLs from the default website_pages.txt file and ingests each one.
 
         Args:
-            options: Sync options (ignored)
+            options: Sync options
 
         Returns:
-            SyncResult indicating batch mode is not supported
+            SyncResult with aggregated stats
         """
+        start_time = time.perf_counter()
+        errors: list[str] = []
+        total_processed = 0
+        total_successful = 0
+        total_chunks = 0
+        document_ids: list[str] = []
+
+        # Find the website pages file
+        pages_file = DEFAULT_WEBSITE_PAGES_FILE
+        if not pages_file.exists():
+            # Try alternate location (deployed server path)
+            alt_path = Path("/home/ubuntu/votebot/RAG training docs/website_pages.txt")
+            if alt_path.exists():
+                pages_file = alt_path
+            else:
+                return SyncResult(
+                    success=False,
+                    content_type=ContentType.WEBPAGE,
+                    mode=SyncMode.BATCH,
+                    errors=[f"Website pages file not found: {pages_file}"],
+                    duration_seconds=time.perf_counter() - start_time,
+                )
+
+        # Read URLs from file
+        urls = []
+        try:
+            with open(pages_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip empty lines and comments
+                    if line and not line.startswith("#"):
+                        urls.append(line)
+        except Exception as e:
+            return SyncResult(
+                success=False,
+                content_type=ContentType.WEBPAGE,
+                mode=SyncMode.BATCH,
+                errors=[f"Failed to read website pages file: {e}"],
+                duration_seconds=time.perf_counter() - start_time,
+            )
+
+        if not urls:
+            return SyncResult(
+                success=False,
+                content_type=ContentType.WEBPAGE,
+                mode=SyncMode.BATCH,
+                errors=["No URLs found in website pages file"],
+                duration_seconds=time.perf_counter() - start_time,
+            )
+
+        # Apply limit if specified
+        if options.limit > 0:
+            urls = urls[:options.limit]
+
+        logger.info(
+            "Starting webpage batch sync",
+            pages_file=str(pages_file),
+            url_count=len(urls),
+        )
+
+        if options.dry_run:
+            return SyncResult(
+                success=True,
+                content_type=ContentType.WEBPAGE,
+                mode=SyncMode.BATCH,
+                items_processed=len(urls),
+                items_successful=len(urls),
+                duration_seconds=time.perf_counter() - start_time,
+            )
+
+        # Process each URL
+        for url in urls:
+            total_processed += 1
+            try:
+                doc = await self.webflow.fetch_page(url)
+                if not doc:
+                    errors.append(f"Failed to fetch: {url}")
+                    continue
+
+                result = await self.pipeline.ingest_document(
+                    content=doc.content,
+                    metadata=doc.metadata,
+                    skip_duplicates=False,
+                )
+
+                if result.chunks_created > 0:
+                    total_successful += 1
+                    total_chunks += result.chunks_created
+                    document_ids.append(doc.metadata.document_id)
+                    logger.debug(f"Synced webpage: {url} ({result.chunks_created} chunks)")
+                else:
+                    errors.append(f"No chunks created for: {url}")
+
+            except Exception as e:
+                errors.append(f"Error processing {url}: {str(e)}")
+                logger.warning(f"Failed to sync webpage: {url}", error=str(e))
+
+        duration = time.perf_counter() - start_time
+        success = total_successful > 0
+
+        logger.info(
+            "Webpage batch sync complete",
+            processed=total_processed,
+            successful=total_successful,
+            chunks_created=total_chunks,
+            duration_seconds=round(duration, 2),
+        )
+
         return SyncResult(
-            success=False,
+            success=success,
             content_type=ContentType.WEBPAGE,
             mode=SyncMode.BATCH,
-            errors=["Batch mode is not supported for webpages. Use single mode with a URL."],
-            duration_seconds=0.0,
+            items_processed=total_processed,
+            items_successful=total_successful,
+            items_failed=total_processed - total_successful,
+            chunks_created=total_chunks,
+            duration_seconds=duration,
+            errors=errors,
+            document_ids=document_ids,
         )
