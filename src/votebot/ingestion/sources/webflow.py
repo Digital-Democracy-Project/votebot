@@ -1170,22 +1170,20 @@ class WebflowSource:
             )
 
         # Process PDF if gov-url is available
-        # Check for .pdf extension or /PDF path (case-insensitive)
+        # Check for PDF URLs by extension, path patterns, or content-type
         gov_url = fields.get("gov-url")
-        is_pdf_url = False
-        if gov_url:
-            url_lower = gov_url.lower()
-            is_pdf_url = url_lower.endswith(".pdf") or url_lower.endswith("/pdf")
-        logger.info(
-            "PDF processing check",
-            include_pdfs=include_pdfs,
-            gov_url=gov_url,
-            is_pdf_url=is_pdf_url,
-        )
-        if include_pdfs and gov_url and is_pdf_url:
-            pdf_doc = await self._process_bill_pdf(gov_url, fields, item_id)
-            if pdf_doc:
-                yield pdf_doc
+        if include_pdfs and gov_url:
+            is_pdf_url = await self._is_pdf_url(gov_url)
+            logger.info(
+                "PDF processing check",
+                include_pdfs=include_pdfs,
+                gov_url=gov_url,
+                is_pdf_url=is_pdf_url,
+            )
+            if is_pdf_url:
+                pdf_doc = await self._process_bill_pdf(gov_url, fields, item_id)
+                if pdf_doc:
+                    yield pdf_doc
 
     def _get_source_from_url(self, url: str) -> str:
         """
@@ -1237,6 +1235,53 @@ class WebflowSource:
 
         except Exception:
             return "Government Source"
+
+    async def _is_pdf_url(self, url: str) -> bool:
+        """
+        Check if a URL points to a PDF document.
+
+        Checks:
+        1. URL extension patterns (.pdf, /pdf)
+        2. Known legislative bill text URL patterns
+        3. Content-Type header via HEAD request
+
+        Args:
+            url: The URL to check
+
+        Returns:
+            True if the URL likely points to a PDF
+        """
+        url_lower = url.lower()
+
+        # Check URL extension patterns
+        if url_lower.endswith(".pdf") or url_lower.endswith("/pdf"):
+            return True
+
+        # Check known legislative text URL patterns that serve PDFs
+        pdf_path_patterns = [
+            "/text/",        # Virginia: /bill-details/20261/SB1/text/SB1
+            "/billtext/",    # Florida: /Session/Bill/2026/363/BillText/Filed/PDF
+            "/bill/text",    # Generic pattern
+            "/fulltext",     # Some states
+            "/document/",    # Document endpoints often serve PDFs
+        ]
+        for pattern in pdf_path_patterns:
+            if pattern in url_lower:
+                logger.debug(f"URL matches PDF path pattern: {pattern}")
+                return True
+
+        # Fall back to HEAD request to check Content-Type
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                response = await client.head(url)
+                content_type = response.headers.get("content-type", "").lower()
+                if "application/pdf" in content_type:
+                    logger.debug(f"URL returns PDF content-type: {content_type}")
+                    return True
+        except Exception as e:
+            logger.debug(f"HEAD request failed for PDF check: {e}")
+
+        return False
 
     async def _process_bill_pdf(
         self,
