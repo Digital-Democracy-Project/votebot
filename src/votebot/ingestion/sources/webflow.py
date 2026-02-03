@@ -1245,13 +1245,14 @@ class WebflowSource:
 
         Checks:
         1. URL extension patterns (.pdf, /pdf) - assumed to be PDF
-        2. All other URLs - check via HEAD request Content-Type
+        2. HEAD request Content-Type header
+        3. Fall back to GET request and inspect content if HEAD fails
 
         Args:
             url: The URL to check
 
         Returns:
-            "pdf", "html", or None if unknown/error
+            "pdf", "html", or None if unknown/error/unsupported
         """
         url_lower = url.lower()
 
@@ -1259,22 +1260,49 @@ class WebflowSource:
         if url_lower.endswith(".pdf") or url_lower.endswith("/pdf"):
             return "pdf"
 
-        # For all other URLs, check Content-Type via HEAD request
         try:
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                # Try HEAD request first
                 response = await client.head(url)
                 content_type = response.headers.get("content-type", "").lower()
+
                 if "application/pdf" in content_type:
                     logger.info(f"URL confirmed as PDF via content-type: {content_type}")
                     return "pdf"
                 elif "text/html" in content_type:
                     logger.info(f"URL is HTML page: {content_type}")
                     return "html"
-                else:
+                elif content_type:
                     logger.debug(f"URL has unsupported content-type: {content_type}")
                     return None
+
+                # No content-type from HEAD - fetch content and inspect
+                logger.debug("No content-type from HEAD, fetching content to inspect")
+                response = await client.get(url)
+                content_start = response.content[:1024].lower()
+
+                # Check for PDF magic bytes
+                if content_start.startswith(b"%pdf"):
+                    logger.info("URL confirmed as PDF via content inspection")
+                    return "pdf"
+
+                # Check for HTML
+                if b"<!doctype html" in content_start or b"<html" in content_start:
+                    # Check if it's a JS-rendered SPA (minimal HTML with script bundles)
+                    if b'<div id="root"></div>' in content_start or b"<div id='root'></div>" in content_start:
+                        logger.warning(
+                            "URL is a JavaScript SPA - cannot extract bill text without browser rendering",
+                            url=url,
+                        )
+                        return None
+                    logger.info("URL is HTML page (detected via content)")
+                    return "html"
+
+                logger.debug(f"Could not determine content type for URL: {url}")
+                return None
+
         except Exception as e:
-            logger.debug(f"HEAD request failed for content-type check: {e}")
+            logger.warning(f"Failed to determine content type: {e}", url=url)
             return None
 
     async def _process_bill_pdf(
