@@ -346,6 +346,24 @@
     border-bottom-left-radius: 4px;
 }
 
+/* Human agent label */
+.ddp-agent-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--ddp-agent-text);
+    margin-bottom: 4px;
+    padding-left: 2px;
+}
+
+.ddp-agent-label span {
+    background: var(--ddp-agent-bg);
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
 .ddp-message.system .ddp-message-content {
     background: var(--ddp-system-bg);
     color: var(--ddp-system-text);

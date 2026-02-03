@@ -273,6 +273,14 @@ const DDPUI = (function() {
         const messageDiv = document.createElement('div');
         messageDiv.className = 'ddp-message ' + type;
 
+        // Add agent label for human agent messages
+        if (type === 'agent') {
+            const labelDiv = document.createElement('div');
+            labelDiv.className = 'ddp-agent-label';
+            labelDiv.innerHTML = '\uD83D\uDC64 <span>' + (meta.agentName || 'Human Agent') + '</span>';
+            messageDiv.appendChild(labelDiv);
+        }
+
         const contentDiv = document.createElement('div');
         contentDiv.className = 'ddp-message-content';
 
@@ -291,9 +299,7 @@ const DDPUI = (function() {
             metaDiv.className = 'ddp-message-meta';
 
             const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            metaDiv.textContent = type === 'agent' && meta.agentName
-                ? meta.agentName + ' \u2022 ' + time
-                : time;
+            metaDiv.textContent = time;
 
             messageDiv.appendChild(metaDiv);
         }
