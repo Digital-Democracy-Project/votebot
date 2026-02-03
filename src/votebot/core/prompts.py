@@ -202,10 +202,9 @@ def build_system_prompt(
     if include_rag_context and retrieved_context:
         prompt_parts.append(RAG_CONTEXT_TEMPLATE.format(retrieved_context=retrieved_context))
 
-    # Add citation and scoring instructions
+    # Add citation and handoff instructions
     prompt_parts.append(CITATION_INSTRUCTION)
     prompt_parts.append(HUMAN_HANDOFF_PROMPT)
-    prompt_parts.append(CONFIDENCE_SCORING_PROMPT)
 
     return "\n\n".join(prompt_parts)
 
