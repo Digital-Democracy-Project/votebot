@@ -1241,43 +1241,31 @@ class WebflowSource:
         Check if a URL points to a PDF document.
 
         Checks:
-        1. URL extension patterns (.pdf, /pdf)
-        2. Known legislative bill text URL patterns
-        3. Content-Type header via HEAD request
+        1. URL extension patterns (.pdf, /pdf) - assumed to be PDF
+        2. All other URLs - verify via HEAD request Content-Type
 
         Args:
             url: The URL to check
 
         Returns:
-            True if the URL likely points to a PDF
+            True if the URL points to a PDF
         """
         url_lower = url.lower()
 
-        # Check URL extension patterns
+        # URLs ending in .pdf or /pdf are assumed to be PDFs
         if url_lower.endswith(".pdf") or url_lower.endswith("/pdf"):
             return True
 
-        # Check known legislative text URL patterns that serve PDFs
-        pdf_path_patterns = [
-            "/text/",        # Virginia: /bill-details/20261/SB1/text/SB1
-            "/billtext/",    # Florida: /Session/Bill/2026/363/BillText/Filed/PDF
-            "/bill/text",    # Generic pattern
-            "/fulltext",     # Some states
-            "/document/",    # Document endpoints often serve PDFs
-        ]
-        for pattern in pdf_path_patterns:
-            if pattern in url_lower:
-                logger.debug(f"URL matches PDF path pattern: {pattern}")
-                return True
-
-        # Fall back to HEAD request to check Content-Type
+        # For all other URLs, verify Content-Type via HEAD request
         try:
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                 response = await client.head(url)
                 content_type = response.headers.get("content-type", "").lower()
                 if "application/pdf" in content_type:
-                    logger.debug(f"URL returns PDF content-type: {content_type}")
+                    logger.info(f"URL confirmed as PDF via content-type: {content_type}")
                     return True
+                else:
+                    logger.debug(f"URL is not a PDF, content-type: {content_type}")
         except Exception as e:
             logger.debug(f"HEAD request failed for PDF check: {e}")
 
