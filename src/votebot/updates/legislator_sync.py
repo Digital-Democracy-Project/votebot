@@ -1,7 +1,7 @@
-"""Legislator bills sync service for fetching sponsored bills from OpenStates."""
+"""Legislator sync service for fetching sponsored bills and voting records from OpenStates."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -22,24 +22,42 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config" / "s
 
 @dataclass
 class RateLimitConfig:
-    """Rate limiting configuration."""
+    """Rate limiting configuration for OpenStates API.
 
-    requests_per_minute: int = 60
-    delay_between_requests_ms: int = 100
+    Defaults aligned with upgraded API tier: 30,000 calls/day, 2 calls/second.
+    """
+
+    requests_per_minute: int = 120  # 2 calls/second
+    delay_between_requests_ms: int = 500  # 500ms minimum between requests
     max_retry_attempts: int = 3
     retry_backoff_seconds: int = 5
 
 
 @dataclass
 class LegislatorSyncResult:
-    """Result of syncing a single legislator's sponsored bills."""
+    """Result of syncing a single legislator's sponsored bills and votes."""
 
     legislator_id: str
     legislator_name: str
     success: bool
     bills_found: int = 0
+    votes_found: int = 0
     chunks_created: int = 0
     error: str | None = None
+
+
+@dataclass
+class LegislatorVote:
+    """A single vote cast by a legislator."""
+
+    bill_identifier: str
+    bill_title: str
+    vote_option: str  # "yes", "no", "not voting", "excused", etc.
+    vote_date: str
+    motion_text: str
+    vote_result: str  # "pass", "fail"
+    chamber: str  # "upper", "lower"
+    bill_ddp_url: str | None = None
 
 
 @dataclass
@@ -50,17 +68,23 @@ class SyncBatchResult:
     successful: int
     failed: int
     total_bills_found: int
+    total_votes_found: int
     chunks_created: int
-    errors: list[str]
+    errors: list[str] = field(default_factory=list)
 
 
 class LegislatorSyncService:
     """
-    Service for syncing legislator sponsored bills from OpenStates API v3.
+    Service for syncing legislator data from OpenStates API v3.
 
-    Creates separate `legislator-bills` documents to enable queries like
-    "What bills has Rick Scott sponsored?" without overwriting
-    Webflow-sourced legislator content.
+    Creates separate documents for:
+    - `legislator-bills`: Bills sponsored by the legislator
+    - `legislator-votes`: Voting record (how they voted on bills)
+
+    This enables queries like:
+    - "What bills has Rick Scott sponsored?"
+    - "How did Senator Smith vote on healthcare bills?"
+    - "What is Representative Jones's voting record?"
     """
 
     OPENSTATES_API_BASE = "https://v3.openstates.org"
@@ -387,6 +411,401 @@ class LegislatorSyncService:
 
         return all_bills
 
+    async def fetch_legislator_votes(
+        self,
+        person_id: str,
+        jurisdiction: str,
+        session: str | None = None,
+        max_bills: int = 200,
+    ) -> list[LegislatorVote]:
+        """
+        Fetch voting record for a legislator from OpenStates.
+
+        Since OpenStates doesn't have a direct votes-by-person endpoint,
+        this fetches bills with votes and extracts the legislator's votes.
+
+        Args:
+            person_id: OpenStates person ID (e.g., "ocd-person/6a3fae94-...")
+            jurisdiction: Jurisdiction code (e.g., "fl", "us")
+            session: Optional session filter (e.g., "2026", "119")
+            max_bills: Maximum bills to fetch (to limit API calls)
+
+        Returns:
+            List of LegislatorVote objects
+        """
+        all_votes: list[LegislatorVote] = []
+        page = 1
+        bills_fetched = 0
+
+        logger.info(
+            "Fetching voting record",
+            person_id=person_id,
+            jurisdiction=jurisdiction,
+            session=session,
+            max_bills=max_bills,
+        )
+
+        while bills_fetched < max_bills:
+            await self._apply_rate_limit()
+
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    headers = {"x-api-key": self.api_key}
+                    params: dict[str, Any] = {
+                        "jurisdiction": jurisdiction,
+                        "per_page": 50,
+                        "page": page,
+                        "include": "votes",
+                    }
+                    if session:
+                        params["session"] = session
+
+                    response = await client.get(
+                        f"{self.OPENSTATES_API_BASE}/bills",
+                        headers=headers,
+                        params=params,
+                    )
+
+                    if response.status_code == 429:
+                        retry_after = int(response.headers.get("Retry-After", 5))
+                        logger.warning(f"Rate limited, waiting {retry_after}s")
+                        await asyncio.sleep(retry_after)
+                        continue
+
+                    response.raise_for_status()
+                    data = response.json()
+
+                    results = data.get("results", [])
+                    if not results:
+                        break
+
+                    # Extract votes for this legislator from each bill
+                    for bill in results:
+                        bills_fetched += 1
+                        bill_votes = self._extract_legislator_votes_from_bill(
+                            bill, person_id
+                        )
+                        all_votes.extend(bill_votes)
+
+                        if bills_fetched >= max_bills:
+                            break
+
+                    # Check pagination
+                    pagination = data.get("pagination", {})
+                    total_pages = pagination.get("max_page", 1)
+                    if page >= total_pages:
+                        break
+
+                    page += 1
+
+            except httpx.TimeoutException:
+                logger.warning(f"Timeout fetching votes for {person_id}, page {page}")
+                break
+            except Exception as e:
+                logger.error(f"Error fetching votes for {person_id}: {e}")
+                break
+
+        logger.info(
+            "Fetched voting record",
+            person_id=person_id,
+            bills_checked=bills_fetched,
+            votes_found=len(all_votes),
+        )
+
+        return all_votes
+
+    def _extract_legislator_votes_from_bill(
+        self,
+        bill: dict,
+        person_id: str,
+    ) -> list[LegislatorVote]:
+        """
+        Extract a legislator's votes from a bill's vote records.
+
+        Args:
+            bill: OpenStates bill dict with votes included
+            person_id: OpenStates person ID to filter for
+
+        Returns:
+            List of LegislatorVote objects for this legislator
+        """
+        votes_list: list[LegislatorVote] = []
+
+        bill_identifier = bill.get("identifier", "")
+        bill_title = bill.get("title", "Unknown Bill")
+
+        # Try to find DDP link for this bill
+        ddp_url, _ = self._find_bill_ddp_link(bill)
+
+        # Process each vote event on this bill
+        for vote_event in bill.get("votes", []):
+            motion_text = vote_event.get("motion_text", "")
+            vote_date = vote_event.get("start_date", "")
+            vote_result = vote_event.get("result", "")
+
+            # Get chamber from organization
+            org = vote_event.get("organization", {})
+            chamber = ""
+            if isinstance(org, dict):
+                org_classification = org.get("classification", "")
+                if org_classification in ("upper", "lower"):
+                    chamber = org_classification
+                else:
+                    # Try to infer from name
+                    org_name = org.get("name", "").lower()
+                    if "senate" in org_name:
+                        chamber = "upper"
+                    elif "house" in org_name or "assembly" in org_name:
+                        chamber = "lower"
+
+            # Check individual votes for this legislator
+            for individual_vote in vote_event.get("votes", []):
+                voter_id = individual_vote.get("voter_id", "")
+                if voter_id == person_id:
+                    vote_option = individual_vote.get("option", "").lower()
+
+                    votes_list.append(
+                        LegislatorVote(
+                            bill_identifier=bill_identifier,
+                            bill_title=bill_title,
+                            vote_option=vote_option,
+                            vote_date=vote_date,
+                            motion_text=motion_text,
+                            vote_result=vote_result,
+                            chamber=chamber,
+                            bill_ddp_url=ddp_url,
+                        )
+                    )
+
+        return votes_list
+
+    def format_legislator_votes_chunk(
+        self,
+        legislator: dict,
+        votes: list[LegislatorVote],
+    ) -> str:
+        """
+        Format a legislator's voting record for RAG.
+
+        Args:
+            legislator: Legislator dict with name, party, chamber, etc.
+            votes: List of LegislatorVote objects
+
+        Returns:
+            Formatted markdown text for embedding
+        """
+        parts = []
+
+        name = legislator.get("name", "Unknown")
+        slug = legislator.get("slug", "")
+        party = legislator.get("party", "")
+        chamber = legislator.get("chamber", "")
+        jurisdiction = legislator.get("jurisdiction", "")
+
+        # Header with DDP link
+        if slug:
+            ddp_url = f"https://digitaldemocracyproject.org/legislators/{slug}"
+            parts.append(f"## Voting Record for [{name}]({ddp_url})")
+        else:
+            parts.append(f"## Voting Record for {name}")
+
+        # Basic info line
+        info_parts = []
+        if party:
+            info_parts.append(f"**Party:** {party}")
+        if chamber:
+            chamber_display = "Senate" if chamber.lower() in ("upper", "senate") else "House"
+            info_parts.append(f"**Chamber:** {chamber_display}")
+        if jurisdiction:
+            info_parts.append(f"**State:** {jurisdiction.upper()}")
+        if info_parts:
+            parts.append(" | ".join(info_parts))
+
+        if not votes:
+            parts.append("\nNo recorded votes found in the current legislative session.")
+            return "\n".join(parts)
+
+        # Vote statistics
+        yes_votes = [v for v in votes if v.vote_option == "yes"]
+        no_votes = [v for v in votes if v.vote_option == "no"]
+        other_votes = [v for v in votes if v.vote_option not in ("yes", "no")]
+
+        parts.append(f"\n### Voting Summary")
+        parts.append(f"- **Total Votes Cast:** {len(votes)}")
+        parts.append(f"- **Yes Votes:** {len(yes_votes)}")
+        parts.append(f"- **No Votes:** {len(no_votes)}")
+        if other_votes:
+            parts.append(f"- **Other (abstain/excused/not voting):** {len(other_votes)}")
+
+        # Group votes by option for detailed listing
+        # Sort by date (most recent first)
+        sorted_votes = sorted(votes, key=lambda v: v.vote_date, reverse=True)
+
+        # Yes votes
+        if yes_votes:
+            parts.append(f"\n### Bills Voted YES ({len(yes_votes)})")
+            for vote in sorted_votes:
+                if vote.vote_option == "yes":
+                    formatted = self._format_vote_line(vote)
+                    parts.append(f"- {formatted}")
+                    if len([p for p in parts if p.startswith("- ")]) > 50:
+                        remaining = len([v for v in sorted_votes if v.vote_option == "yes"]) - 50
+                        if remaining > 0:
+                            parts.append(f"  ...and {remaining} more YES votes")
+                        break
+
+        # No votes
+        if no_votes:
+            parts.append(f"\n### Bills Voted NO ({len(no_votes)})")
+            count = 0
+            for vote in sorted_votes:
+                if vote.vote_option == "no":
+                    formatted = self._format_vote_line(vote)
+                    parts.append(f"- {formatted}")
+                    count += 1
+                    if count >= 50:
+                        remaining = len(no_votes) - 50
+                        if remaining > 0:
+                            parts.append(f"  ...and {remaining} more NO votes")
+                        break
+
+        # Other votes (limited)
+        if other_votes:
+            parts.append(f"\n### Other Votes ({len(other_votes)})")
+            count = 0
+            for vote in sorted_votes:
+                if vote.vote_option not in ("yes", "no"):
+                    formatted = self._format_vote_line(vote, include_option=True)
+                    parts.append(f"- {formatted}")
+                    count += 1
+                    if count >= 20:
+                        remaining = len(other_votes) - 20
+                        if remaining > 0:
+                            parts.append(f"  ...and {remaining} more")
+                        break
+
+        return "\n".join(parts)
+
+    def _format_vote_line(self, vote: LegislatorVote, include_option: bool = False) -> str:
+        """
+        Format a single vote as a line item.
+
+        Args:
+            vote: LegislatorVote object
+            include_option: Whether to include the vote option in output
+
+        Returns:
+            Formatted vote line
+        """
+        title = vote.bill_title
+        # Truncate long titles
+        if len(title) > 70:
+            title = title[:67] + "..."
+
+        if vote.bill_ddp_url:
+            line = f"[{title}]({vote.bill_ddp_url})"
+        else:
+            line = title
+
+        line += f" ({vote.bill_identifier})"
+
+        if vote.vote_date:
+            line += f" - {vote.vote_date}"
+
+        if include_option:
+            line += f" [{vote.vote_option}]"
+
+        return line
+
+    async def sync_legislator_votes(
+        self,
+        legislator: dict,
+        session: str | None = None,
+        max_bills: int = 200,
+    ) -> LegislatorSyncResult:
+        """
+        Sync a single legislator's voting record.
+
+        Args:
+            legislator: Legislator dict with openstates_id, name, slug, etc.
+            session: Optional session filter
+            max_bills: Maximum bills to check for votes
+
+        Returns:
+            LegislatorSyncResult with sync status
+        """
+        openstates_id = legislator.get("openstates_id", "")
+        name = legislator.get("name", "Unknown")
+        jurisdiction = legislator.get("jurisdiction", "us").lower()
+
+        if not openstates_id:
+            return LegislatorSyncResult(
+                legislator_id="",
+                legislator_name=name,
+                success=False,
+                error="No OpenStates ID",
+            )
+
+        # Fetch votes
+        votes = await self.fetch_legislator_votes(
+            person_id=openstates_id,
+            jurisdiction=jurisdiction,
+            session=session,
+            max_bills=max_bills,
+        )
+
+        # Format the content chunk
+        content = self.format_legislator_votes_chunk(legislator, votes)
+
+        # Create document metadata
+        source_name = self._get_source_name(jurisdiction)
+        metadata = DocumentMetadata(
+            document_id=f"legislator-votes-{openstates_id}",
+            document_type="legislator-votes",
+            source=source_name,
+            title=f"{name} - Voting Record",
+            jurisdiction=jurisdiction.upper(),
+            legislator_id=openstates_id,
+            extra={
+                "slug": legislator.get("slug", ""),
+                "party": legislator.get("party", ""),
+                "chamber": legislator.get("chamber", ""),
+                "votes_count": len(votes),
+                "yes_votes": len([v for v in votes if v.vote_option == "yes"]),
+                "no_votes": len([v for v in votes if v.vote_option == "no"]),
+                "last_synced": date.today().isoformat(),
+            },
+        )
+
+        # Ingest the document
+        try:
+            result = await self.pipeline.ingest_document(
+                content=content,
+                metadata=metadata,
+                skip_duplicates=False,  # Always update
+            )
+
+            return LegislatorSyncResult(
+                legislator_id=openstates_id,
+                legislator_name=name,
+                success=True,
+                votes_found=len(votes),
+                chunks_created=result.chunks_created,
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to ingest legislator votes",
+                legislator_id=openstates_id,
+                error=str(e),
+            )
+            return LegislatorSyncResult(
+                legislator_id=openstates_id,
+                legislator_name=name,
+                success=False,
+                error=str(e),
+            )
+
     def _find_bill_ddp_link(self, bill: dict) -> tuple[str | None, str | None]:
         """
         Find DDP link for a bill by matching identifier.
@@ -537,12 +956,18 @@ class LegislatorSyncService:
     async def sync_legislator(
         self,
         legislator: dict,
+        include_votes: bool = False,
+        vote_session: str | None = None,
+        max_vote_bills: int = 200,
     ) -> LegislatorSyncResult:
         """
-        Sync a single legislator's sponsored bills.
+        Sync a single legislator's sponsored bills and optionally voting record.
 
         Args:
             legislator: Legislator dict with openstates_id, name, slug, etc.
+            include_votes: Whether to also sync voting record
+            vote_session: Optional session filter for votes
+            max_vote_bills: Maximum bills to check for votes
 
         Returns:
             LegislatorSyncResult with sync status
@@ -559,7 +984,12 @@ class LegislatorSyncService:
                 error="No OpenStates ID",
             )
 
-        # Fetch sponsored bills
+        total_chunks = 0
+        bills_found = 0
+        votes_found = 0
+        errors: list[str] = []
+
+        # Fetch and sync sponsored bills
         bills = await self.fetch_sponsored_bills(
             person_id=openstates_id,
             jurisdiction=jurisdiction,
@@ -570,12 +1000,14 @@ class LegislatorSyncService:
             # Still create a document indicating no bills found
             # This is useful for RAG to know we checked
 
-        # Format the content chunk
-        content = self.format_legislator_bills_chunk(legislator, bills)
+        bills_found = len(bills)
 
-        # Create document metadata
+        # Format the bills content chunk
+        bills_content = self.format_legislator_bills_chunk(legislator, bills)
+
+        # Create bills document metadata
         source_name = self._get_source_name(jurisdiction)
-        metadata = DocumentMetadata(
+        bills_metadata = DocumentMetadata(
             document_id=f"legislator-bills-{openstates_id}",
             document_type="legislator-bills",
             source=source_name,
@@ -591,21 +1023,14 @@ class LegislatorSyncService:
             },
         )
 
-        # Ingest the document
+        # Ingest the bills document
         try:
             result = await self.pipeline.ingest_document(
-                content=content,
-                metadata=metadata,
+                content=bills_content,
+                metadata=bills_metadata,
                 skip_duplicates=False,  # Always update
             )
-
-            return LegislatorSyncResult(
-                legislator_id=openstates_id,
-                legislator_name=name,
-                success=True,
-                bills_found=len(bills),
-                chunks_created=result.chunks_created,
-            )
+            total_chunks += result.chunks_created
 
         except Exception as e:
             logger.error(
@@ -613,19 +1038,42 @@ class LegislatorSyncService:
                 legislator_id=openstates_id,
                 error=str(e),
             )
-            return LegislatorSyncResult(
-                legislator_id=openstates_id,
-                legislator_name=name,
-                success=False,
-                error=str(e),
+            errors.append(f"Bills sync failed: {e}")
+
+        # Sync voting record if requested
+        if include_votes:
+            votes_result = await self.sync_legislator_votes(
+                legislator=legislator,
+                session=vote_session,
+                max_bills=max_vote_bills,
             )
+            if votes_result.success:
+                total_chunks += votes_result.chunks_created
+                votes_found = votes_result.votes_found
+            else:
+                errors.append(f"Votes sync failed: {votes_result.error}")
+
+        success = len(errors) == 0 or total_chunks > 0
+
+        return LegislatorSyncResult(
+            legislator_id=openstates_id,
+            legislator_name=name,
+            success=success,
+            bills_found=bills_found,
+            votes_found=votes_found,
+            chunks_created=total_chunks,
+            error="; ".join(errors) if errors else None,
+        )
 
     async def sync_all_legislators(
         self,
         legislators: list[dict],
+        include_votes: bool = False,
+        vote_session: str | None = None,
+        max_vote_bills: int = 200,
     ) -> SyncBatchResult:
         """
-        Sync sponsored bills for all legislators.
+        Sync sponsored bills and optionally voting records for all legislators.
 
         Args:
             legislators: List of legislator dicts from Webflow with:
@@ -635,6 +1083,9 @@ class LegislatorSyncService:
                 - jurisdiction: State code
                 - party: Political party
                 - chamber: Legislative chamber
+            include_votes: Whether to also sync voting records
+            vote_session: Optional session filter for votes
+            max_vote_bills: Maximum bills to check for votes per legislator
 
         Returns:
             SyncBatchResult with aggregated results
@@ -648,24 +1099,33 @@ class LegislatorSyncService:
         successful = 0
         failed = 0
         total_bills = 0
+        total_votes = 0
         chunks_created = 0
-        errors = []
+        errors: list[str] = []
         start_time = time.time()
 
+        sync_type = "bills + votes" if include_votes else "bills only"
         logger.info(
-            "Starting legislator bills sync",
+            "Starting legislator sync",
             total_legislators=total,
+            sync_type=sync_type,
             rate_limit_rpm=self.rate_limit.requests_per_minute,
         )
 
         for i, legislator in enumerate(legislators):
             name = legislator.get("name", "Unknown")
 
-            result = await self.sync_legislator(legislator)
+            result = await self.sync_legislator(
+                legislator,
+                include_votes=include_votes,
+                vote_session=vote_session,
+                max_vote_bills=max_vote_bills,
+            )
 
             if result.success:
                 successful += 1
                 total_bills += result.bills_found
+                total_votes += result.votes_found
                 chunks_created += result.chunks_created
             else:
                 failed += 1
@@ -677,14 +1137,20 @@ class LegislatorSyncService:
             if processed > 0 and processed % 10 == 0:
                 elapsed = time.time() - start_time
                 rate = processed / elapsed if elapsed > 0 else 0
+                remaining = total - processed
+                eta_seconds = remaining / rate if rate > 0 else 0
+                eta_minutes = int(eta_seconds / 60)
+
                 logger.info(
-                    "Legislator bills sync progress",
+                    "Legislator sync progress",
                     processed=processed,
                     total=total,
                     successful=successful,
                     failed=failed,
                     total_bills=total_bills,
+                    total_votes=total_votes,
                     rate_per_second=round(rate, 2),
+                    eta_minutes=eta_minutes,
                 )
 
         # Final stats
@@ -693,11 +1159,12 @@ class LegislatorSyncService:
         elapsed_seconds = int(elapsed % 60)
 
         logger.info(
-            "Legislator bills sync complete",
+            "Legislator sync complete",
             total_time=f"{elapsed_minutes}m {elapsed_seconds}s",
             successful=successful,
             failed=failed,
             total_bills=total_bills,
+            total_votes=total_votes,
             chunks_created=chunks_created,
         )
 
@@ -706,6 +1173,7 @@ class LegislatorSyncService:
             successful=successful,
             failed=failed,
             total_bills_found=total_bills,
+            total_votes_found=total_votes,
             chunks_created=chunks_created,
             errors=errors,
         )

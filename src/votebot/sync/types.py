@@ -71,7 +71,7 @@ class SyncOptions:
 
     Different content types use different options:
     - Bills: include_pdfs, include_openstates
-    - Legislators: include_sponsored_bills
+    - Legislators: include_sponsored_bills, include_votes
     - All batch operations: limit, jurisdiction
     """
 
@@ -83,6 +83,9 @@ class SyncOptions:
 
     # Legislator-specific
     include_sponsored_bills: bool = True
+    include_votes: bool = False  # Sync voting records
+    vote_session: str | None = None  # Session filter for votes
+    max_vote_bills: int = 200  # Max bills to check for votes per legislator
 
     # Filtering
     jurisdiction: str | None = None

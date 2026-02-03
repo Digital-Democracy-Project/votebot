@@ -50,27 +50,45 @@ overrides:
   #   reason: "High volume, reduce API calls"
 
 # Rate Limiting
-# OpenStates has rate limits, so we stagger syncs if needed
+# OpenStates API Tier: 30,000 calls/day, 2 calls/second
+# 2 calls/sec = 120 requests/minute = 500ms minimum between requests
 rate_limit:
-  requests_per_minute: 60
-  delay_between_bills_ms: 100
+  requests_per_minute: 120
+  delay_between_bills_ms: 500
 
 # Retry Configuration
 retry:
   max_attempts: 3
   backoff_seconds: 5
 
-# Legislator Bills Sync Configuration
-# Syncs sponsored bills for each legislator from OpenStates
+# Legislator Sync Configuration
+# Syncs sponsored bills and voting records for each legislator from OpenStates
 # Runs separately from bill sync to spread API usage
-legislator_bills:
+legislator_sync:
   enabled: true
   sync_time_utc: "06:00"  # 6 AM UTC = 1 AM EST (2 hours after main sync)
-  frequency: weekly       # Run weekly to avoid API exhaustion
-  sync_day: sunday        # Run on Sundays when API usage is typically lower
-  # Rate limiting (more conservative than bill sync)
-  delay_between_legislators_ms: 2000  # 2 seconds between legislators
-  max_legislators_per_run: 50         # Process in batches to avoid timeouts
+  frequency: daily        # Run daily with upgraded API tier (30k calls/day)
+  sync_day: sunday        # Only used if frequency is weekly
+  # Rate limiting (aligned with API tier: 2 calls/second)
+  delay_between_legislators_ms: 500   # 500ms between legislators (2 calls/sec)
+  max_legislators_per_run: 200        # Process more per run with upgraded API
+
+  # Sponsored bills sync
+  sync_sponsored_bills: true
+
+  # Voting record sync
+  sync_votes: true
+  max_vote_bills_per_legislator: 200  # Max bills to check for votes per legislator
+  vote_session: null                   # null = current session, or specify e.g. "2026"
+
+# Legacy alias (deprecated, use legislator_sync instead)
+legislator_bills:
+  enabled: true
+  sync_time_utc: "06:00"
+  frequency: daily
+  sync_day: sunday
+  delay_between_legislators_ms: 500
+  max_legislators_per_run: 200
 
 # Notification Settings (future use)
 notifications:

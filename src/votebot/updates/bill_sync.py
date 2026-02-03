@@ -25,10 +25,13 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config" / "s
 
 @dataclass
 class RateLimitConfig:
-    """Rate limiting configuration."""
+    """Rate limiting configuration for OpenStates API.
 
-    requests_per_minute: int = 60
-    delay_between_bills_ms: int = 100
+    Defaults aligned with upgraded API tier: 30,000 calls/day, 2 calls/second.
+    """
+
+    requests_per_minute: int = 120  # 2 calls/second
+    delay_between_bills_ms: int = 500  # 500ms minimum between requests
     max_retry_attempts: int = 3
     retry_backoff_seconds: int = 5
 

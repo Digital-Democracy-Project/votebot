@@ -779,14 +779,14 @@ class OpenStatesSource:
     async def fetch_legislators_batch(
         self,
         person_ids: list[str],
-        rate_limit: float = 0.5,
+        rate_limit: float = 0.5,  # 500ms = 2 calls/sec (OpenStates API tier limit)
     ) -> AsyncIterator[DocumentSource]:
         """
         Batch fetch legislators with rate limiting.
 
         Args:
             person_ids: List of OpenStates person IDs to fetch
-            rate_limit: Seconds to wait between requests
+            rate_limit: Seconds to wait between requests (default 0.5s for 2 calls/sec)
 
         Yields:
             DocumentSource objects for each successfully fetched legislator

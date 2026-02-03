@@ -105,37 +105,57 @@ class UpdateScheduler:
             replace_existing=True,
         )
 
-        # Add weekly legislator bills sync job
+        # Add legislator bills sync job (daily or weekly based on config)
         leg_bills_config = self._sync_config.get("legislator_bills", {})
         if leg_bills_config.get("enabled", False):
             leg_sync_time = leg_bills_config.get("sync_time_utc", "06:00")
             leg_hour, leg_minute = map(int, leg_sync_time.split(":"))
-            sync_day = leg_bills_config.get("sync_day", "sunday")
+            frequency = leg_bills_config.get("frequency", "weekly")
 
-            # Map day name to cron day_of_week (0=Monday, 6=Sunday)
-            day_map = {
-                "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-                "friday": 4, "saturday": 5, "sunday": 6
-            }
-            day_of_week = day_map.get(sync_day.lower(), 6)
+            if frequency == "daily":
+                # Daily sync - runs every day at the specified time
+                self.scheduler.add_job(
+                    self._run_legislator_bills_sync,
+                    trigger=CronTrigger(
+                        hour=leg_hour,
+                        minute=leg_minute,
+                    ),
+                    id="daily_legislator_bills_sync",
+                    name="Daily Legislator Bills Sync",
+                    replace_existing=True,
+                )
+                logger.info(
+                    "Legislator bills sync scheduled (daily)",
+                    sync_time=leg_sync_time,
+                    frequency=frequency,
+                )
+            else:
+                # Weekly sync - runs on specified day
+                sync_day = leg_bills_config.get("sync_day", "sunday")
 
-            self.scheduler.add_job(
-                self._run_legislator_bills_sync,
-                trigger=CronTrigger(
-                    day_of_week=day_of_week,
-                    hour=leg_hour,
-                    minute=leg_minute,
-                ),
-                id="weekly_legislator_bills_sync",
-                name="Weekly Legislator Bills Sync",
-                replace_existing=True,
-            )
+                # Map day name to cron day_of_week (0=Monday, 6=Sunday)
+                day_map = {
+                    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                    "friday": 4, "saturday": 5, "sunday": 6
+                }
+                day_of_week = day_map.get(sync_day.lower(), 6)
 
-            logger.info(
-                "Legislator bills sync scheduled",
-                sync_time=leg_sync_time,
-                sync_day=sync_day,
-            )
+                self.scheduler.add_job(
+                    self._run_legislator_bills_sync,
+                    trigger=CronTrigger(
+                        day_of_week=day_of_week,
+                        hour=leg_hour,
+                        minute=leg_minute,
+                    ),
+                    id="weekly_legislator_bills_sync",
+                    name="Weekly Legislator Bills Sync",
+                    replace_existing=True,
+                )
+                logger.info(
+                    "Legislator bills sync scheduled (weekly)",
+                    sync_time=leg_sync_time,
+                    sync_day=sync_day,
+                )
 
         self.scheduler.start()
         self._is_running = True
@@ -460,10 +480,10 @@ class UpdateScheduler:
 
     async def _run_legislator_bills_sync(self) -> dict[str, Any]:
         """
-        Run the weekly legislator bills sync.
+        Run the legislator sync (bills and optionally votes).
 
-        Fetches sponsored bills for each legislator from OpenStates
-        and creates legislator-bills documents for RAG.
+        Fetches sponsored bills and voting records for each legislator
+        from OpenStates and creates documents for RAG.
 
         Returns:
             Dict with sync results
@@ -473,13 +493,27 @@ class UpdateScheduler:
         from votebot.updates.legislator_sync import LegislatorSyncService
 
         start_time = datetime.utcnow()
-        logger.info("Starting weekly legislator bills sync")
 
         try:
-            # Get config
-            leg_bills_config = self._sync_config.get("legislator_bills", {})
-            delay_ms = leg_bills_config.get("delay_between_legislators_ms", 2000)
-            max_per_run = leg_bills_config.get("max_legislators_per_run", 50)
+            # Get config - prefer new legislator_sync, fall back to legacy legislator_bills
+            leg_config = self._sync_config.get("legislator_sync", {})
+            if not leg_config:
+                leg_config = self._sync_config.get("legislator_bills", {})
+
+            delay_ms = leg_config.get("delay_between_legislators_ms", 500)
+            max_per_run = leg_config.get("max_legislators_per_run", 200)
+
+            # Vote sync settings
+            sync_votes = leg_config.get("sync_votes", False)
+            max_vote_bills = leg_config.get("max_vote_bills_per_legislator", 200)
+            vote_session = leg_config.get("vote_session")  # None = current session
+
+            sync_type = "bills + votes" if sync_votes else "bills only"
+            logger.info(
+                "Starting legislator sync",
+                sync_type=sync_type,
+                max_per_run=max_per_run,
+            )
 
             # Initialize services
             sync_service = LegislatorSyncService(self.settings)
@@ -516,18 +550,25 @@ class UpdateScheduler:
             # Override rate limit for paced sync
             sync_service.rate_limit.delay_between_requests_ms = delay_ms
 
-            # Run sync
-            result = await sync_service.sync_all_legislators(legislators)
+            # Run sync with votes if enabled
+            result = await sync_service.sync_all_legislators(
+                legislators,
+                include_votes=sync_votes,
+                vote_session=vote_session,
+                max_vote_bills=max_vote_bills,
+            )
 
             duration = (datetime.utcnow() - start_time).total_seconds()
 
             logger.info(
-                "Weekly legislator bills sync completed",
+                "Legislator sync completed",
+                sync_type=sync_type,
                 duration_seconds=duration,
                 total_legislators=result.total_legislators,
                 successful=result.successful,
                 failed=result.failed,
                 total_bills=result.total_bills_found,
+                total_votes=result.total_votes_found,
                 chunks_created=result.chunks_created,
             )
 
@@ -535,25 +576,27 @@ class UpdateScheduler:
             for callback in self._update_callbacks:
                 try:
                     if asyncio.iscoroutinefunction(callback):
-                        await callback({"legislator_bills_sync": result})
+                        await callback({"legislator_sync": result})
                     else:
-                        callback({"legislator_bills_sync": result})
+                        callback({"legislator_sync": result})
                 except Exception as e:
                     logger.error("Sync callback failed", error=str(e))
 
             return {
                 "success": True,
+                "sync_type": sync_type,
                 "duration_seconds": duration,
                 "total_legislators": result.total_legislators,
                 "successful": result.successful,
                 "failed": result.failed,
                 "total_bills": result.total_bills_found,
+                "total_votes": result.total_votes_found,
                 "chunks_created": result.chunks_created,
                 "errors": result.errors[:10] if result.errors else [],
             }
 
         except Exception as e:
-            logger.exception("Legislator bills sync failed", error=str(e))
+            logger.exception("Legislator sync failed", error=str(e))
             return {
                 "success": False,
                 "error": str(e),
@@ -563,13 +606,19 @@ class UpdateScheduler:
         self,
         limit: int = 0,
         jurisdiction: str | None = None,
+        include_votes: bool | None = None,
+        vote_session: str | None = None,
+        max_vote_bills: int | None = None,
     ) -> dict[str, Any]:
         """
-        Manually trigger a legislator bills sync.
+        Manually trigger a legislator sync (bills and optionally votes).
 
         Args:
             limit: Maximum legislators to process (0 = use config default)
             jurisdiction: Filter by jurisdiction code (e.g., 'fl', 'us')
+            include_votes: Whether to sync votes (None = use config default)
+            vote_session: Session filter for votes (None = use config default)
+            max_vote_bills: Max bills to check for votes per legislator
 
         Returns:
             Dict with sync results
@@ -578,19 +627,33 @@ class UpdateScheduler:
         from votebot.ingestion.metadata import MetadataExtractor
         from votebot.updates.legislator_sync import LegislatorSyncService
 
+        # Get config
+        leg_config = self._sync_config.get("legislator_sync", {})
+        if not leg_config:
+            leg_config = self._sync_config.get("legislator_bills", {})
+
+        delay_ms = leg_config.get("delay_between_legislators_ms", 500)
+
+        # Use config defaults if not specified
+        if include_votes is None:
+            include_votes = leg_config.get("sync_votes", False)
+        if vote_session is None:
+            vote_session = leg_config.get("vote_session")
+        if max_vote_bills is None:
+            max_vote_bills = leg_config.get("max_vote_bills_per_legislator", 200)
+
+        sync_type = "bills + votes" if include_votes else "bills only"
+
         logger.info(
-            "Manual legislator bills sync triggered",
+            "Manual legislator sync triggered",
             limit=limit,
             jurisdiction=jurisdiction,
+            sync_type=sync_type,
         )
 
         start_time = datetime.utcnow()
 
         try:
-            # Get config
-            leg_bills_config = self._sync_config.get("legislator_bills", {})
-            delay_ms = leg_bills_config.get("delay_between_legislators_ms", 2000)
-
             # Initialize services
             sync_service = LegislatorSyncService(self.settings)
             webflow = WebflowSource(self.settings, MetadataExtractor())
@@ -628,25 +691,32 @@ class UpdateScheduler:
             # Override rate limit for paced sync
             sync_service.rate_limit.delay_between_requests_ms = delay_ms
 
-            # Run sync
-            result = await sync_service.sync_all_legislators(legislators)
+            # Run sync with votes if enabled
+            result = await sync_service.sync_all_legislators(
+                legislators,
+                include_votes=include_votes,
+                vote_session=vote_session,
+                max_vote_bills=max_vote_bills,
+            )
 
             duration = (datetime.utcnow() - start_time).total_seconds()
 
             return {
                 "success": True,
                 "mode": "manual",
+                "sync_type": sync_type,
                 "duration_seconds": duration,
                 "total_legislators": result.total_legislators,
                 "successful": result.successful,
                 "failed": result.failed,
                 "total_bills": result.total_bills_found,
+                "total_votes": result.total_votes_found,
                 "chunks_created": result.chunks_created,
                 "errors": result.errors[:10] if result.errors else [],
             }
 
         except Exception as e:
-            logger.exception("Manual legislator bills sync failed", error=str(e))
+            logger.exception("Manual legislator sync failed", error=str(e))
             return {
                 "success": False,
                 "error": str(e),
