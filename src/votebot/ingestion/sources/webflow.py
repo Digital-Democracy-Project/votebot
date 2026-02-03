@@ -1169,24 +1169,36 @@ class WebflowSource:
                 metadata=metadata,
             )
 
-        # Process bill text from gov-url (PDF or HTML)
-        gov_url = fields.get("gov-url")
-        if include_pdfs and gov_url:
-            content_type = await self._get_url_content_type(gov_url)
-            logger.info(
-                "Bill text processing check",
-                include_pdfs=include_pdfs,
-                gov_url=gov_url,
-                content_type=content_type,
-            )
-            if content_type == "pdf":
-                pdf_doc = await self._process_bill_pdf(gov_url, fields, item_id)
-                if pdf_doc:
-                    yield pdf_doc
-            elif content_type == "html":
-                html_doc = await self._process_bill_html(gov_url, fields, item_id)
-                if html_doc:
-                    yield html_doc
+        # Process bill text from gov-url (PDF or HTML) or google-drive fallback
+        if include_pdfs:
+            bill_text_doc = None
+            gov_url = fields.get("gov-url")
+            google_drive_url = fields.get("google-drive")
+
+            # Try gov-url first
+            if gov_url:
+                content_type = await self._get_url_content_type(gov_url)
+                logger.info(
+                    "Bill text processing check (gov-url)",
+                    gov_url=gov_url,
+                    content_type=content_type,
+                )
+                if content_type == "pdf":
+                    bill_text_doc = await self._process_bill_pdf(gov_url, fields, item_id)
+                elif content_type == "html":
+                    bill_text_doc = await self._process_bill_html(gov_url, fields, item_id)
+
+            # Fall back to google-drive if gov-url didn't produce a document
+            if not bill_text_doc and google_drive_url:
+                logger.info(
+                    "Trying google-drive fallback for bill text",
+                    google_drive_url=google_drive_url,
+                )
+                # Google Drive URLs should be direct PDF links
+                bill_text_doc = await self._process_bill_pdf(google_drive_url, fields, item_id)
+
+            if bill_text_doc:
+                yield bill_text_doc
 
     def _get_source_from_url(self, url: str) -> str:
         """
