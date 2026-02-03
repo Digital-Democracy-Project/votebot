@@ -43,6 +43,30 @@ fl_hb363_tests:
     data_source: openstates
     category: legislative_history
 
+  - id: fl_hb363_latest_action
+    prompt: "What is the latest action on Florida HB 363?"
+    expected_data:
+      - "calendar"
+    data_source: openstates
+    category: bill_actions
+    notes: "Should mention Special Order Calendar or similar recent action"
+
+  - id: fl_hb363_committee_vote
+    prompt: "How did the Health and Human Services Committee vote on Florida HB 363 Dental Therapy?"
+    expected_data:
+      - "dental"
+    data_source: openstates
+    category: bill_votes
+    notes: "Verifies bill is identified correctly. Full vote retrieval requires bill-specific page_context."
+
+  - id: fl_hb363_vote_count
+    prompt: "What was the vote count for Florida HB 363 in the Health committee?"
+    expected_data:
+      - "19"
+    data_source: openstates
+    category: bill_votes
+    notes: "Should mention Yes: 19 or similar vote tally"
+
   - id: fl_hb363_text
     prompt: "What does the bill text of Florida HB 363 say about licensing?"
     expected_data:
@@ -65,10 +89,26 @@ fl_hb429_tests:
   - id: fl_hb429_sponsor
     prompt: "Who is the primary sponsor of Florida HB 429?"
     expected_data:
-      - "sponsor"
+      - "Baker"
     data_source: openstates
     category: bill_sponsor
-    notes: "Known issue - sponsor data may be missing"
+    notes: "Should mention Baker as primary sponsor"
+
+  - id: fl_hb429_cosponsors
+    prompt: "Who are the co-sponsors of Florida HB 429?"
+    expected_data:
+      - "Barnaby"
+    data_source: openstates
+    category: bill_sponsor
+    notes: "Should mention co-sponsors like Barnaby, López, Salzman, Yarkosky"
+
+  - id: fl_hb429_latest_action
+    prompt: "What is the latest action on Florida HB 429?"
+    expected_data:
+      - "calendar"
+    data_source: openstates
+    category: bill_actions
+    notes: "Should mention Special Order Calendar"
 
   - id: fl_hb429_criteria
     prompt: "What criteria does FL HB 429 use to determine gang membership?"
