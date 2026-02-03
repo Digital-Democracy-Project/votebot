@@ -353,6 +353,9 @@ class VoteBotAgent:
         """
         Extract citations from the response and match to retrieved chunks.
 
+        Only includes citations that the LLM explicitly referenced in the response.
+        This prevents showing irrelevant sources for simple conversational queries.
+
         Args:
             response: The LLM response
             retrieved_chunks: Chunks that were retrieved
@@ -397,18 +400,9 @@ class VoteBotAgent:
                     )
                     break
 
-        # Also add top retrieved chunks as implicit citations
-        if not citations and retrieved_chunks:
-            for chunk in retrieved_chunks[:3]:
-                citations.append(
-                    Citation(
-                        source=chunk.metadata.get("source", "Knowledge Base"),
-                        document_id=chunk.id,
-                        excerpt=chunk.content[:200],
-                        url=chunk.metadata.get("url"),
-                        relevance_score=chunk.score,
-                    )
-                )
+        # Only show citations that were explicitly referenced by the LLM
+        # Do NOT add implicit citations from retrieved chunks as they may be
+        # irrelevant to the actual response (especially for conversational queries)
 
         # Deduplicate
         seen_ids = set()
