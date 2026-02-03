@@ -48,7 +48,8 @@
         avatar: '\uD83D\uDDF3\uFE0F',
         welcomeMessage: null,  // null = auto-generate based on context
         pageContext: null,     // null = use autoDetect or default to general
-        autoDetect: false      // true = detect context from page
+        autoDetect: false,     // true = detect context from page
+        autoOpen: false        // true = open chat popup automatically on load
     };
 
     // Merge user config with defaults
@@ -419,6 +420,11 @@
         // Show welcome message
         if (welcomeMessage) {
             DDPUI.addSystemMessage(welcomeMessage);
+        }
+
+        // Auto-open popup if configured
+        if (config.autoOpen) {
+            DDPUI.openPopup();
         }
 
         console.log('[DDPChat] Widget initialized with context:', pageContext);

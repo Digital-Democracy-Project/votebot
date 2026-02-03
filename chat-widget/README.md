@@ -155,6 +155,7 @@ Basic embedding (no context):
 | `welcomeMessage` | string | `null` | Custom welcome message (null = auto-generate) |
 | `pageContext` | object | `null` | Explicit page context (null = use autoDetect) |
 | `autoDetect` | boolean | `false` | Auto-detect context from page |
+| `autoOpen` | boolean | `false` | Automatically open the chat popup on page load |
 
 ### Page Context
 
