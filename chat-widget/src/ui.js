@@ -410,7 +410,18 @@ const DDPUI = (function() {
             payload.citations.slice(0, 3).forEach(function(citation) {
                 const citationDiv = document.createElement('div');
                 citationDiv.className = 'ddp-citation';
-                citationDiv.textContent = citation.source || citation.document_id;
+
+                if (citation.url) {
+                    const link = document.createElement('a');
+                    link.href = citation.url;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.textContent = citation.source || citation.document_id;
+                    citationDiv.appendChild(link);
+                } else {
+                    citationDiv.textContent = citation.source || citation.document_id;
+                }
+
                 citationsDiv.appendChild(citationDiv);
             });
 
