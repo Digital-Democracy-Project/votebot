@@ -240,21 +240,85 @@ class BillHandler:
         logger.info(
             "Starting bill batch sync",
             limit=options.limit if options.limit > 0 else "unlimited",
+            jurisdiction=options.jurisdiction or "all",
             include_pdfs=options.include_pdfs,
             include_openstates=options.include_openstates,
         )
 
         try:
-            # Fetch all bills from Webflow
-            bills = []
-            async for doc in self.webflow.fetch(
-                collection_id=self.settings.webflow_bills_collection_id,
-                limit=options.limit,
-                include_pdfs=options.include_pdfs,
-            ):
-                bills.append(doc)
+            # Fetch raw items first to enable jurisdiction filtering
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                headers = {
+                    "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
+                    "accept": "application/json",
+                }
 
-            logger.info(f"Fetched {len(bills)} bills from Webflow")
+                # Build organization mapping
+                await self.webflow._build_organization_mapping(client, headers)
+
+                offset = 0
+                page_size = 100
+                raw_items = []
+
+                while True:
+                    params = {"limit": page_size, "offset": offset}
+                    response = await client.get(
+                        f"https://api.webflow.com/v2/collections/{self.settings.webflow_bills_collection_id}/items",
+                        headers=headers,
+                        params=params,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    items = data.get("items", [])
+
+                    if not items:
+                        break
+
+                    raw_items.extend(items)
+
+                    pagination = data.get("pagination", {})
+                    if offset + len(items) >= pagination.get("total", 0):
+                        break
+
+                    offset += page_size
+
+            logger.info(f"Fetched {len(raw_items)} total bills from Webflow")
+
+            # Filter by jurisdiction if specified
+            if options.jurisdiction:
+                jurisdiction_upper = options.jurisdiction.upper()
+                # Build reverse map from jurisdiction_id to code
+                jurisdiction_id_to_code = {v: k for k, v in self.bill_sync.JURISDICTION_MAP.items()}
+                # Find matching jurisdiction IDs
+                matching_ids = [
+                    jid for jid, code in self.bill_sync.JURISDICTION_MAP.items()
+                    if code.upper() == jurisdiction_upper
+                ]
+
+                filtered_items = []
+                for item in raw_items:
+                    item_jurisdiction = item.get("fieldData", {}).get("jurisdiction", "")
+                    if item_jurisdiction in matching_ids:
+                        filtered_items.append(item)
+
+                logger.info(
+                    f"Filtered to {len(filtered_items)} bills for jurisdiction {jurisdiction_upper}"
+                )
+                raw_items = filtered_items
+
+            # Apply limit after filtering
+            if options.limit > 0:
+                raw_items = raw_items[:options.limit]
+
+            # Process bills through webflow source
+            bills = []
+            for item in raw_items:
+                async for doc in self.webflow._process_bill_item(
+                    item, include_pdfs=options.include_pdfs
+                ):
+                    bills.append(doc)
+
+            logger.info(f"Processed {len(bills)} bill documents")
 
             if options.dry_run:
                 return SyncResult(
@@ -275,45 +339,8 @@ class BillHandler:
             errors.extend(result.errors)
 
             # Also sync OpenStates history for bills if enabled
-            if options.include_openstates:
-                # Fetch raw items for OpenStates sync
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    headers = {
-                        "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
-                        "accept": "application/json",
-                    }
-
-                    offset = 0
-                    page_size = 100
-                    raw_items = []
-
-                    while True:
-                        params = {"limit": page_size, "offset": offset}
-                        response = await client.get(
-                            f"https://api.webflow.com/v2/collections/{self.settings.webflow_bills_collection_id}/items",
-                            headers=headers,
-                            params=params,
-                        )
-                        response.raise_for_status()
-                        data = response.json()
-                        items = data.get("items", [])
-
-                        if not items:
-                            break
-
-                        raw_items.extend(items)
-
-                        if options.limit > 0 and len(raw_items) >= options.limit:
-                            raw_items = raw_items[: options.limit]
-                            break
-
-                        pagination = data.get("pagination", {})
-                        if offset + len(items) >= pagination.get("total", 0):
-                            break
-
-                        offset += page_size
-
-                # Sync current session bills through OpenStates
+            # Use the already-filtered raw_items from above
+            if options.include_openstates and raw_items:
                 os_result = await self.bill_sync.sync_current_session_bills(raw_items)
                 total_chunks += os_result.chunks_created
                 errors.extend(os_result.errors)

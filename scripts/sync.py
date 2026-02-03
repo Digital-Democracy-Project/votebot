@@ -95,6 +95,11 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip OpenStates legislative history sync",
     )
+    bill_parser.add_argument(
+        "--jurisdiction",
+        type=str,
+        help="Filter by jurisdiction (e.g., VA, FL) in batch mode",
+    )
 
     # Legislator subcommand
     legislator_parser = subparsers.add_parser("legislator", help="Sync legislator content")
@@ -278,6 +283,7 @@ async def sync_bill(args) -> int:
         options = SyncOptions(
             include_pdfs=not args.no_pdfs,
             include_openstates=not args.no_openstates,
+            jurisdiction=getattr(args, "jurisdiction", None),
             limit=args.limit,
             dry_run=args.dry_run,
         )
