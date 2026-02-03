@@ -1,10 +1,12 @@
 """Unified sync endpoint for all content types."""
 
+import asyncio
 import time
+import uuid
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field, model_validator
 
 from votebot.api.middleware.auth import api_key_auth
@@ -16,6 +18,9 @@ from votebot.sync import (
     SyncOptions,
     UnifiedSyncService,
 )
+
+# Store for tracking background sync tasks
+_background_tasks: dict[str, dict] = {}
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 logger = structlog.get_logger()
@@ -114,6 +119,65 @@ class UnifiedSyncResponse(BaseModel):
     duration_ms: int = Field(default=0, description="Duration of sync operation in milliseconds")
     errors: list[str] = Field(default_factory=list, description="List of error messages")
     document_ids: list[str] = Field(default_factory=list, description="IDs of documents created")
+    # For async batch operations
+    task_id: str | None = Field(default=None, description="Background task ID (for batch operations)")
+    status: str = Field(default="completed", description="Task status: accepted, running, completed, failed")
+
+
+async def _run_batch_sync_background(
+    task_id: str,
+    content_type: ContentType,
+    options: SyncOptions,
+    settings: Settings,
+) -> None:
+    """Run batch sync in the background and update task status."""
+    _background_tasks[task_id]["status"] = "running"
+    start_time = time.perf_counter()
+
+    try:
+        service = UnifiedSyncService(settings)
+        result = await service.sync(
+            content_type=content_type,
+            mode=SyncMode.BATCH,
+            identifier=None,
+            options=options,
+        )
+
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+        _background_tasks[task_id].update({
+            "status": "completed" if result.success else "failed",
+            "result": {
+                "success": result.success,
+                "items_processed": result.items_processed,
+                "items_successful": result.items_successful,
+                "items_failed": result.items_failed,
+                "chunks_created": result.chunks_created,
+                "duration_ms": duration_ms,
+                "errors": result.errors,
+                "document_ids": result.document_ids,
+            },
+        })
+
+        logger.info(
+            "Background batch sync complete",
+            task_id=task_id,
+            content_type=content_type.value,
+            success=result.success,
+            items_processed=result.items_processed,
+            chunks_created=result.chunks_created,
+            duration_ms=duration_ms,
+        )
+
+    except Exception as e:
+        logger.exception("Background batch sync failed", task_id=task_id, error=str(e))
+        _background_tasks[task_id].update({
+            "status": "failed",
+            "result": {
+                "success": False,
+                "errors": [str(e)],
+            },
+        })
 
 
 @router.post(
@@ -136,6 +200,9 @@ async def sync_unified(
     - Organizations: Single by webflow_id/slug, batch
     - Webpages: Single by URL only (no batch support)
     - Training: Single by file_path only (no batch support via API)
+
+    For batch mode, the sync runs in the background and returns immediately
+    with a task_id. Use GET /sync/unified/status/{task_id} to check progress.
     """
     start_time = time.perf_counter()
 
@@ -193,7 +260,44 @@ async def sync_unified(
             dry_run=request.dry_run,
         )
 
-        # Execute sync
+        # For batch mode, run in background and return immediately
+        if mode == SyncMode.BATCH:
+            task_id = str(uuid.uuid4())
+            _background_tasks[task_id] = {
+                "status": "accepted",
+                "content_type": content_type.value,
+                "mode": "batch",
+                "started_at": time.time(),
+                "options": {
+                    "include_pdfs": options.include_pdfs,
+                    "include_openstates": options.include_openstates,
+                    "jurisdiction": options.jurisdiction,
+                    "limit": options.limit,
+                    "dry_run": options.dry_run,
+                },
+            }
+
+            # Start background task
+            asyncio.create_task(
+                _run_batch_sync_background(task_id, content_type, options, settings)
+            )
+
+            logger.info(
+                "Batch sync started in background",
+                task_id=task_id,
+                content_type=content_type.value,
+            )
+
+            return UnifiedSyncResponse(
+                success=True,
+                content_type=content_type.value,
+                mode=mode.value,
+                status="accepted",
+                task_id=task_id,
+                duration_ms=int((time.perf_counter() - start_time) * 1000),
+            )
+
+        # Execute sync synchronously for single mode
         service = UnifiedSyncService(settings)
         result = await service.sync(
             content_type=content_type,
@@ -225,6 +329,7 @@ async def sync_unified(
             duration_ms=duration_ms,
             errors=result.errors,
             document_ids=result.document_ids,
+            status="completed",
         )
 
     except HTTPException:
@@ -238,7 +343,48 @@ async def sync_unified(
             mode=request.mode,
             duration_ms=duration_ms,
             errors=[str(e)],
+            status="failed",
         )
+
+
+@router.get(
+    "/unified/status/{task_id}",
+    response_model=UnifiedSyncResponse,
+    summary="Get status of a background sync task",
+    description="Check the status of a batch sync operation started in the background.",
+)
+async def get_sync_status(
+    task_id: str,
+    api_key: Annotated[str, Depends(api_key_auth)],
+) -> UnifiedSyncResponse:
+    """
+    Get the status of a background sync task.
+
+    Returns the current status and results (if completed) of a batch sync operation.
+    """
+    if task_id not in _background_tasks:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task not found: {task_id}",
+        )
+
+    task = _background_tasks[task_id]
+    result = task.get("result", {})
+
+    return UnifiedSyncResponse(
+        success=result.get("success", task["status"] == "completed"),
+        content_type=task["content_type"],
+        mode=task["mode"],
+        status=task["status"],
+        task_id=task_id,
+        items_processed=result.get("items_processed", 0),
+        items_successful=result.get("items_successful", 0),
+        items_failed=result.get("items_failed", 0),
+        chunks_created=result.get("chunks_created", 0),
+        duration_ms=result.get("duration_ms", 0),
+        errors=result.get("errors", []),
+        document_ids=result.get("document_ids", []),
+    )
 
 
 @router.post(
