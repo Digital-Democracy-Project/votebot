@@ -451,19 +451,21 @@ class LegislatorSyncService:
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     headers = {"x-api-key": self.api_key}
-                    params: dict[str, Any] = {
+
+                    # First, get list of bills (votes not included in list endpoint)
+                    # Note: OpenStates API limits per_page to 20
+                    list_params: dict[str, Any] = {
                         "jurisdiction": jurisdiction,
-                        "per_page": 50,
+                        "per_page": 20,
                         "page": page,
-                        "include": "votes",
                     }
                     if session:
-                        params["session"] = session
+                        list_params["session"] = session
 
                     response = await client.get(
                         f"{self.OPENSTATES_API_BASE}/bills",
                         headers=headers,
-                        params=params,
+                        params=list_params,
                     )
 
                     if response.status_code == 429:
@@ -479,9 +481,30 @@ class LegislatorSyncService:
                     if not results:
                         break
 
-                    # Extract votes for this legislator from each bill
-                    for bill in results:
+                    # Fetch each bill individually to get votes
+                    for bill_summary in results:
+                        if bills_fetched >= max_bills:
+                            break
+
                         bills_fetched += 1
+                        bill_id = bill_summary.get("id")
+                        if not bill_id:
+                            continue
+
+                        # Rate limit between individual bill fetches
+                        await self._apply_rate_limit()
+
+                        # Fetch full bill with votes
+                        bill_response = await client.get(
+                            f"{self.OPENSTATES_API_BASE}/bills/{bill_id}",
+                            headers=headers,
+                            params=[("include", "votes")],
+                        )
+
+                        if bill_response.status_code != 200:
+                            continue
+
+                        bill = bill_response.json()
                         bill_votes = self._extract_legislator_votes_from_bill(
                             bill, person_id
                         )
@@ -560,7 +583,10 @@ class LegislatorSyncService:
 
             # Check individual votes for this legislator
             for individual_vote in vote_event.get("votes", []):
-                voter_id = individual_vote.get("voter_id", "")
+                # voter.id contains the OpenStates person ID
+                voter = individual_vote.get("voter", {})
+                voter_id = voter.get("id", "") if isinstance(voter, dict) else ""
+
                 if voter_id == person_id:
                     vote_option = individual_vote.get("option", "").lower()
 
