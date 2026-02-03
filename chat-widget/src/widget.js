@@ -198,6 +198,20 @@
     }
 
     /**
+     * Check if a title already contains the identifier (bill number).
+     * Handles variations like "HR1" vs "HR 1" by normalizing whitespace.
+     * @param {string} title - The title to check
+     * @param {string} id - The identifier to look for
+     * @returns {boolean} True if title contains the id
+     */
+    function titleContainsId(title, id) {
+        if (!title || !id) return false;
+        var normalizedTitle = title.toLowerCase().replace(/\s+/g, '');
+        var normalizedId = id.toLowerCase().replace(/\s+/g, '');
+        return normalizedTitle.indexOf(normalizedId) !== -1;
+    }
+
+    /**
      * Generate a personalized welcome message based on page context.
      * @param {Object} context - Page context
      * @returns {string} Welcome message
@@ -212,7 +226,8 @@
 
         switch (context.type) {
             case 'bill':
-                if (title && id) {
+                if (title && id && !titleContainsId(title, id)) {
+                    // Only append ID if title doesn't already contain it
                     return 'Welcome! I can answer detailed questions about **' + title + ' (' + id + ')**. You can also ask me about other bills, legislators, or Digital Democracy Project in general.';
                 } else if (title) {
                     return 'Welcome! I can answer detailed questions about **' + title + '**. You can also ask me about other bills, legislators, or Digital Democracy Project in general.';
