@@ -397,15 +397,6 @@ const DDPUI = (function() {
         // Final markdown render
         currentStreamingMessage.innerHTML = markdownParser.parse(currentStreamingText);
 
-        // Add confidence badge
-        if (payload.confidence !== undefined) {
-            const badge = document.createElement('span');
-            const level = payload.confidence >= 0.7 ? 'high' : (payload.confidence >= 0.4 ? 'medium' : 'low');
-            badge.className = 'ddp-confidence-badge ' + level;
-            badge.textContent = Math.round(payload.confidence * 100) + '% confident';
-            currentStreamingMessage.appendChild(badge);
-        }
-
         // Add citations
         if (payload.citations && payload.citations.length > 0) {
             const citationsDiv = document.createElement('div');
