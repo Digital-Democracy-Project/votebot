@@ -1169,21 +1169,24 @@ class WebflowSource:
                 metadata=metadata,
             )
 
-        # Process PDF if gov-url is available
-        # Check for PDF URLs by extension, path patterns, or content-type
+        # Process bill text from gov-url (PDF or HTML)
         gov_url = fields.get("gov-url")
         if include_pdfs and gov_url:
-            is_pdf_url = await self._is_pdf_url(gov_url)
+            content_type = await self._get_url_content_type(gov_url)
             logger.info(
-                "PDF processing check",
+                "Bill text processing check",
                 include_pdfs=include_pdfs,
                 gov_url=gov_url,
-                is_pdf_url=is_pdf_url,
+                content_type=content_type,
             )
-            if is_pdf_url:
+            if content_type == "pdf":
                 pdf_doc = await self._process_bill_pdf(gov_url, fields, item_id)
                 if pdf_doc:
                     yield pdf_doc
+            elif content_type == "html":
+                html_doc = await self._process_bill_html(gov_url, fields, item_id)
+                if html_doc:
+                    yield html_doc
 
     def _get_source_from_url(self, url: str) -> str:
         """
@@ -1236,40 +1239,43 @@ class WebflowSource:
         except Exception:
             return "Government Source"
 
-    async def _is_pdf_url(self, url: str) -> bool:
+    async def _get_url_content_type(self, url: str) -> str | None:
         """
-        Check if a URL points to a PDF document.
+        Determine the content type of a URL (pdf, html, or None).
 
         Checks:
         1. URL extension patterns (.pdf, /pdf) - assumed to be PDF
-        2. All other URLs - verify via HEAD request Content-Type
+        2. All other URLs - check via HEAD request Content-Type
 
         Args:
             url: The URL to check
 
         Returns:
-            True if the URL points to a PDF
+            "pdf", "html", or None if unknown/error
         """
         url_lower = url.lower()
 
         # URLs ending in .pdf or /pdf are assumed to be PDFs
         if url_lower.endswith(".pdf") or url_lower.endswith("/pdf"):
-            return True
+            return "pdf"
 
-        # For all other URLs, verify Content-Type via HEAD request
+        # For all other URLs, check Content-Type via HEAD request
         try:
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                 response = await client.head(url)
                 content_type = response.headers.get("content-type", "").lower()
                 if "application/pdf" in content_type:
                     logger.info(f"URL confirmed as PDF via content-type: {content_type}")
-                    return True
+                    return "pdf"
+                elif "text/html" in content_type:
+                    logger.info(f"URL is HTML page: {content_type}")
+                    return "html"
                 else:
-                    logger.debug(f"URL is not a PDF, content-type: {content_type}")
+                    logger.debug(f"URL has unsupported content-type: {content_type}")
+                    return None
         except Exception as e:
-            logger.debug(f"HEAD request failed for PDF check: {e}")
-
-        return False
+            logger.debug(f"HEAD request failed for content-type check: {e}")
+            return None
 
     async def _process_bill_pdf(
         self,
@@ -1347,6 +1353,141 @@ class WebflowSource:
             logger.warning(
                 "Failed to process bill PDF",
                 url=pdf_url,
+                error=str(e),
+            )
+            return None
+
+    async def _process_bill_html(
+        self,
+        html_url: str,
+        fields: dict,
+        item_id: str,
+    ) -> DocumentSource | None:
+        """
+        Download and extract bill text from an HTML page.
+
+        Args:
+            html_url: URL to the HTML bill text page
+            fields: CMS field data
+            item_id: Webflow item ID
+
+        Returns:
+            DocumentSource with extracted text content or None
+        """
+        logger.info(f"Extracting bill text from HTML: {html_url}")
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                response = await client.get(html_url)
+                response.raise_for_status()
+                html_content = response.text
+
+            # Parse HTML and extract text
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # Remove script and style elements
+            for element in soup(["script", "style", "nav", "header", "footer", "aside"]):
+                element.decompose()
+
+            # Try to find the main bill text content
+            # Look for common bill text containers
+            bill_text_selectors = [
+                "div.bill-text",
+                "div.legislation-text",
+                "div.bill-content",
+                "article.bill",
+                "main",
+                "div.content",
+                "div#content",
+                "div.document-content",
+                "pre",  # Some legislatures use <pre> for bill text
+            ]
+
+            text_content = None
+            for selector in bill_text_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    text_content = element.get_text(separator="\n", strip=True)
+                    if len(text_content) > 500:  # Minimum viable content
+                        logger.debug(f"Found bill text using selector: {selector}")
+                        break
+
+            # Fallback to body text if no specific container found
+            if not text_content or len(text_content) < 500:
+                body = soup.find("body")
+                if body:
+                    text_content = body.get_text(separator="\n", strip=True)
+
+            if not text_content or len(text_content) < 200:
+                logger.warning(
+                    "Insufficient text extracted from HTML",
+                    url=html_url,
+                    text_length=len(text_content) if text_content else 0,
+                )
+                return None
+
+            # Clean up the text
+            # Remove excessive whitespace and blank lines
+            lines = [line.strip() for line in text_content.split("\n")]
+            lines = [line for line in lines if line]  # Remove empty lines
+            cleaned_text = "\n".join(lines)
+
+            logger.info(
+                "HTML bill text extracted",
+                url=html_url,
+                text_length=len(cleaned_text),
+            )
+
+            # Create metadata
+            name = fields.get("name", "Unknown Bill")
+            slug = fields.get("slug", "")
+            bill_id = self._get_bill_id(fields)
+            source_name = self._get_source_from_url(html_url)
+
+            # Build DDP URL for the bill page
+            ddp_url = f"https://digitaldemocracyproject.org/bills/{slug}" if slug else None
+
+            # Prepend header with bill identification and DDP link
+            header_parts = []
+            if ddp_url:
+                header_parts.append(f"# [{name}]({ddp_url})")
+                header_parts.append(f"**Bill:** [{bill_id}]({ddp_url})")
+            else:
+                header_parts.append(f"# {name}")
+                header_parts.append(f"**Bill:** {bill_id}")
+            header_parts.append(f"**Source:** [Official Legislative Text]({html_url})")
+            header_parts.append("\n---\n")
+
+            # Combine header with extracted content
+            content_with_header = "\n".join(header_parts) + cleaned_text
+
+            metadata = DocumentMetadata(
+                document_id=f"bill-html-{item_id}",
+                document_type="bill-text",
+                source=source_name,
+                title=f"{name} - Full Text",
+                jurisdiction=self._get_jurisdiction(fields),
+                bill_id=bill_id,
+                url=html_url,
+                extra={
+                    "webflow_id": item_id,
+                    "slug": slug,
+                    "content_type": "html",
+                    "session": fields.get("bill-session"),
+                    "bill_prefix": fields.get("bill-prefix"),
+                    "bill_number": fields.get("bill-number"),
+                },
+            )
+
+            return DocumentSource(
+                content=content_with_header,
+                metadata=metadata,
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Failed to process bill HTML",
+                url=html_url,
                 error=str(e),
             )
             return None
