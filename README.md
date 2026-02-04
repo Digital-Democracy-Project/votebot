@@ -11,10 +11,13 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Context-Aware Responses**: Understands the page context (bill, legislator, general) to provide relevant answers
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
 - **Bill Text Prioritization**: For bill queries, prioritizes actual legislative text over CMS summaries
-- **Bill Votes Tool**: Real-time OpenStates lookups for voting records on bills not in the RAG system
-- **Web Search Fallback**: Automatically searches the web (via Tavily API) when RAG confidence is low
-- **Human Handoff**: Supports seamless handoff to human agents when needed
-- **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, and custom sources
+- **Bill Info Tool**: Real-time OpenStates lookups for full bill details (status, sponsors, votes) on bills not in the RAG system
+  - Automatic jurisdiction detection from message text ("Virginia HB 2724" → VA)
+  - Session year fallback (tries current year, then previous 2 years)
+  - Party affiliation enrichment for vote records
+- **Web Search Fallback**: Automatically searches the web (via OpenAI web search + Tavily) when RAG confidence is low
+- **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
+- **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
 - **Real-Time Updates**: Hourly polling for content changes
 - **High Performance**: Designed for 1000+ concurrent conversations
 
@@ -235,6 +238,16 @@ POST /votebot/v1/sync/unified/all
 
 An embeddable JavaScript widget is available in the `chat-widget/` directory. See [chat-widget/README.md](chat-widget/README.md) for embedding instructions.
 
+### Features
+
+- **Context-Aware**: Automatically detects page context from DDP URLs or manual configuration
+- **Streaming Responses**: Real-time token streaming with smooth auto-scroll
+- **Smart Auto-Scroll**: Auto-scrolling pauses when user scrolls up to read; "scroll to bottom" button appears to resume
+- **Auto-Open Modes**:
+  - **Explicit mode** (`?ddp_url=...`): Widget auto-opens when URL parameter is provided
+  - **Discovery mode**: Widget stays closed, auto-detects page context when opened
+- **Bill Info Pre-fetching**: Fetches bill details from OpenStates before streaming for bills not in RAG
+
 ### Hosted Version
 
 VoteBot is hosted at **https://votebot.digitaldemocracyproject.org/**
@@ -250,7 +263,9 @@ https://votebot.digitaldemocracyproject.org/?ddp_url=https://digitaldemocracypro
 <script>
     window.DDPChatConfig = {
         wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
-        pageContext: { type: 'bill', id: 'HR 1', title: 'My Bill' }
+        pageContext: { type: 'bill', id: 'HR 1', title: 'My Bill' },
+        autoOpen: false,  // Set to true to auto-open on page load
+        autoDetect: true  // Auto-detect DDP page context
     };
 </script>
 <script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>
@@ -321,45 +336,68 @@ Recent Conversation:
 💡 Reply in thread to respond | ✅ to resolve
 ```
 
-## Bill Votes Tool
+## Bill Info Tool
 
-VoteBot includes a real-time bill votes lookup tool that enables the LLM to fetch voting records for bills not in the RAG system. This uses OpenAI's function calling with the Responses API.
+VoteBot includes a real-time bill information lookup tool that enables fetching full bill details (status, sponsors, actions, votes) for bills not in the RAG system. This uses OpenAI's function calling with the Responses API, and also works with streaming responses through pre-fetching.
 
 ### How It Works
 
-1. **Hybrid Vote Strategy**: Bills in the system have votes synced during the normal sync process
-2. **Dynamic Lookup**: When users ask about votes for bills NOT in the system, the LLM can call the `get_bill_votes` function
-3. **OpenStates Integration**: The tool queries OpenStates API for voting records
-4. **Pinecone Caching**: Results are cached in Pinecone for future queries
+1. **Hybrid Lookup Strategy**: Bills in the system are retrieved via RAG; bills NOT in the system are fetched live from OpenStates
+2. **Automatic Bill Detection**: When a user mentions a bill identifier (e.g., "Virginia HB 2724"), the tool is automatically triggered
+3. **Jurisdiction Extraction**: State names in the message are automatically mapped to state codes (e.g., "Virginia" → "VA")
+4. **Session Year Fallback**: If a bill isn't found in the current year, the tool automatically tries previous years (2026 → 2025 → 2024)
+5. **Party Affiliation Lookup**: Vote records are enriched with legislator party information from the OpenStates people endpoint
+6. **Streaming Support**: For streaming responses (chat widget), bill info is pre-fetched before the stream starts
 
 ### Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `BILL_VOTES_TOOL_ENABLED` | Enable the bill votes tool | `true` |
+| `BILL_VOTES_TOOL_ENABLED` | Enable the bill info tool | `true` |
 | `BILL_VOTES_RAG_CONFIDENCE_THRESHOLD` | RAG confidence below which tool is enabled | `0.4` |
 
 ### Function Schema
 
 ```json
 {
-  "name": "get_bill_votes",
-  "description": "Get voting records for a specific bill from OpenStates",
+  "name": "get_bill_info",
+  "description": "Get full bill information including status, sponsors, actions, and votes from OpenStates",
   "parameters": {
-    "jurisdiction": "Two-letter state code (e.g., 'fl', 'ca') or 'us' for federal",
+    "jurisdiction": "Two-letter state code (e.g., 'va', 'fl') or 'us' for federal",
     "session": "Legislative session (e.g., '2025', '2024')",
-    "bill_identifier": "Bill identifier (e.g., 'HB1', 'SB 123')"
+    "bill_identifier": "Bill identifier (e.g., 'HB 2724', 'SB 648')"
   }
 }
 ```
 
 ### Example Usage
 
-When a user asks "How did legislators vote on California SB 1047?", VoteBot:
-1. Checks if the bill is in the RAG system
-2. If not found with high confidence, enables the bill votes tool
-3. LLM calls `get_bill_votes(jurisdiction="ca", session="2024", bill_identifier="SB1047")`
-4. Results are formatted and returned to the user
+**Example 1: Bill not in Pinecone**
+
+When a user asks "Tell me about Virginia HB 2724", VoteBot:
+1. Extracts jurisdiction "VA" from "Virginia" in the message
+2. Detects bill identifier "HB 2724"
+3. Fetches from OpenStates: tries 2026, then 2025 (where the bill is found)
+4. Returns full bill info including title, sponsors, status, actions, and votes
+
+**Example 2: Vote breakdown by party**
+
+When a user asks "How did Democrats vote on this bill?", VoteBot:
+1. Uses the bill info already fetched (or fetches it)
+2. Returns party breakdown: "Democratic: 35 Yes, 2 No" with individual legislator names
+3. Party info is looked up from OpenStates people endpoint and cached per jurisdiction
+
+### Data Returned
+
+The bill info tool returns:
+- **Bill metadata**: Title, description, session, jurisdiction
+- **Sponsors**: Primary sponsor and co-sponsors
+- **Status**: Latest action description
+- **Actions**: Recent legislative actions with dates
+- **Votes**: All recorded votes with:
+  - Vote totals (Yes/No/Other)
+  - Party breakdown (Democratic/Republican counts)
+  - Individual legislator names grouped by party and vote
 
 ## Data Ingestion
 
