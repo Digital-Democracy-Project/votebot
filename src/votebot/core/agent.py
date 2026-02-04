@@ -824,10 +824,12 @@ class VoteBotAgent:
 
         # Check if query is about current/recent events (force web search)
         current_events_trigger = False
+        dispute_trigger = False
         if message:
             current_events_trigger = self._is_current_events_query(message)
+            dispute_trigger = self._is_dispute_or_correction(message)
 
-        should_search = confidence_trigger or current_events_trigger
+        should_search = confidence_trigger or current_events_trigger or dispute_trigger
 
         if should_search:
             logger.info(
@@ -836,6 +838,7 @@ class VoteBotAgent:
                 threshold=threshold,
                 confidence_trigger=confidence_trigger,
                 current_events_trigger=current_events_trigger,
+                dispute_trigger=dispute_trigger,
                 page_context_type=page_context_type,
             )
 
@@ -877,6 +880,54 @@ class VoteBotAgent:
 
         for phrase in recent_action_keywords:
             if phrase in message_lower:
+                return True
+
+        return False
+
+    def _is_dispute_or_correction(self, message: str) -> bool:
+        """
+        Detect if the user is disputing or correcting previous information.
+
+        When users say things like "that's wrong" or "she is a senator",
+        they're indicating our information is outdated. Trigger web search
+        to get current information.
+
+        Args:
+            message: The user's message
+
+        Returns:
+            True if the user appears to be correcting information
+        """
+        message_lower = message.lower()
+
+        # Explicit dispute phrases
+        dispute_phrases = [
+            "that's wrong", "that is wrong", "this is wrong",
+            "that's incorrect", "that is incorrect", "this is incorrect",
+            "that's not true", "that is not true", "this is not true",
+            "that's not right", "that is not right", "you're wrong",
+            "actually,", "actually she", "actually he",
+            "no,", "wrong.", "incorrect.",
+        ]
+
+        # Correction phrases (user stating what they believe is true)
+        correction_phrases = [
+            "she is a", "he is a", "they are a",
+            "she's a", "he's a", "they're a",
+            "is now a", "is currently a", "is the",
+            "was appointed", "was elected", "became",
+            "check again", "try again", "look again",
+            "search for", "look up",
+        ]
+
+        for phrase in dispute_phrases:
+            if phrase in message_lower:
+                logger.info("Dispute detected, triggering web search", phrase=phrase)
+                return True
+
+        for phrase in correction_phrases:
+            if phrase in message_lower:
+                logger.info("Correction detected, triggering web search", phrase=phrase)
                 return True
 
         return False
