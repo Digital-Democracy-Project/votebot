@@ -103,15 +103,16 @@ class LLMService:
             tools.append(web_search_tool)
 
         if self.settings.bill_votes_tool_enabled and enable_bill_votes:
-            bill_votes_tool = {
+            bill_info_tool = {
                 "type": "function",
-                "name": "get_bill_votes",
+                "name": "get_bill_info",
                 "description": (
-                    "Retrieve voting records for a specific bill. Supports both state bills (via OpenStates) "
-                    "and federal bills (via Congress.gov). ALWAYS use this tool when the user asks about: "
-                    "how a legislator voted, vote counts, roll call votes, who supported/opposed a bill, "
-                    "or if a bill passed/failed. Use this even if general bill information is in the context, "
-                    "as detailed voting records require a separate lookup."
+                    "Look up information about a specific bill from OpenStates. Use this tool when: "
+                    "1) The user asks about a bill that is NOT in your provided context, "
+                    "2) The user asks about votes, sponsors, status, or actions for any bill, "
+                    "3) You cannot find the bill in your knowledge base. "
+                    "This returns title, sponsors, status, recent actions, and voting records. "
+                    "Supports all US state bills and federal legislation."
                 ),
                 "parameters": {
                     "type": "object",
@@ -119,29 +120,29 @@ class LLMService:
                         "jurisdiction": {
                             "type": "string",
                             "description": (
-                                "Two-letter state code (e.g., 'fl' for Florida, 'ca' for California, "
-                                "'tx' for Texas) or 'us' for federal legislation."
+                                "Two-letter state code (e.g., 'va' for Virginia, 'fl' for Florida, "
+                                "'ca' for California) or 'us' for federal legislation."
                             ),
                         },
                         "session": {
                             "type": "string",
                             "description": (
                                 "Legislative session identifier. For states, this is usually the year "
-                                "(e.g., '2024', '2025'). For federal, use Congress number (e.g., '118', '119')."
+                                "(e.g., '2024', '2025', '2026'). For federal, use Congress number (e.g., '118', '119')."
                             ),
                         },
                         "bill_identifier": {
                             "type": "string",
                             "description": (
-                                "The bill number without spaces (e.g., 'HB1234', 'SB567', 'HR2'). "
-                                "Include the bill type prefix (HB, SB, HR, S, etc.)."
+                                "The bill number (e.g., 'HB2724', 'SB567', 'HR2'). "
+                                "Include the bill type prefix (HB, SB, HR, S, HJ, SJ, etc.)."
                             ),
                         },
                     },
                     "required": ["jurisdiction", "session", "bill_identifier"],
                 },
             }
-            tools.append(bill_votes_tool)
+            tools.append(bill_info_tool)
 
         return tools if tools else None
 
@@ -197,47 +198,48 @@ class LLMService:
             logger.debug(f"Error extracting function calls: {e}")
         return function_calls
 
-    async def _execute_bill_votes_tool(
+    async def _execute_bill_info_tool(
         self,
         arguments: dict,
         bill_votes_service: BillVotesService,
     ) -> tuple[str, BillVotesToolResult]:
-        """Execute the bill votes tool and return the result."""
+        """Execute the bill info tool and return the result."""
         jurisdiction = arguments.get("jurisdiction", "").lower()
         session = arguments.get("session", "")
         bill_identifier = arguments.get("bill_identifier", "")
 
         logger.info(
-            "Executing bill votes tool",
+            "Executing bill info tool",
             jurisdiction=jurisdiction,
             session=session,
             bill_identifier=bill_identifier,
         )
 
         try:
-            result = await bill_votes_service.get_bill_votes(
+            # Use the new get_bill_info method for full bill details
+            result = await bill_votes_service.get_bill_info(
                 jurisdiction=jurisdiction,
                 session=session,
                 bill_identifier=bill_identifier,
             )
 
-            if result and result.votes:
-                # Format the votes for the LLM
-                votes_text = bill_votes_service.format_votes_document(result)
+            if result and result.found:
+                # Format the full bill info for the LLM
+                info_text = bill_votes_service.format_bill_info_document(result)
                 tool_result = BillVotesToolResult(
                     jurisdiction=jurisdiction,
                     session=session,
-                    bill_identifier=bill_identifier,
+                    bill_identifier=result.bill_identifier,
                     found=True,
-                    votes_summary=votes_text,
-                    cached=result.cached,
+                    votes_summary=info_text,
+                    cached=False,
                 )
-                return votes_text, tool_result
+                return info_text, tool_result
             else:
-                no_votes_msg = (
-                    f"No voting records found for {bill_identifier} in {jurisdiction.upper()} "
-                    f"session {session}. The bill may not have been voted on yet, or the "
-                    "bill identifier may be incorrect."
+                not_found_msg = (
+                    f"Bill {bill_identifier} was not found in OpenStates for {jurisdiction.upper()} "
+                    f"session {session}. The bill may not exist, or the identifier may be incorrect. "
+                    "Try checking the bill number format (e.g., HB2724 vs HB 2724) or session year."
                 )
                 tool_result = BillVotesToolResult(
                     jurisdiction=jurisdiction,
@@ -245,11 +247,11 @@ class LLMService:
                     bill_identifier=bill_identifier,
                     found=False,
                 )
-                return no_votes_msg, tool_result
+                return not_found_msg, tool_result
 
         except Exception as e:
-            logger.error("Bill votes tool execution failed", error=str(e))
-            error_msg = f"Error retrieving vote data: {str(e)}"
+            logger.error("Bill info tool execution failed", error=str(e))
+            error_msg = f"Error retrieving bill data: {str(e)}"
             tool_result = BillVotesToolResult(
                 jurisdiction=jurisdiction,
                 session=session,
@@ -375,13 +377,14 @@ class LLMService:
             # Process function calls
             function_results = []
             for fc in function_calls:
-                if fc["name"] == "get_bill_votes" and bill_votes_service:
+                # Handle both old (get_bill_votes) and new (get_bill_info) tool names
+                if fc["name"] in ("get_bill_info", "get_bill_votes") and bill_votes_service:
                     try:
                         args = json.loads(fc["arguments"])
                     except json.JSONDecodeError:
                         args = {}
 
-                    result_text, tool_result = await self._execute_bill_votes_tool(
+                    result_text, tool_result = await self._execute_bill_info_tool(
                         args, bill_votes_service
                     )
                     bill_votes_tool_used = True

@@ -141,8 +141,14 @@ class VoteBotAgent:
         # Step 7: Determine if web search should be enabled
         enable_web_search = self._should_use_web_search(rag_confidence, page_context.type, message)
 
-        # Step 7b: Determine if bill votes tool should be enabled
+        # Step 7b: Determine if bill info tool should be enabled
         enable_bill_votes = self._should_use_bill_votes_tool(rag_confidence, message)
+
+        # Step 7c: Enable web search as fallback when bill info tool is enabled
+        # This allows hybrid lookup: OpenStates first, then web search if not found
+        if enable_bill_votes and not enable_web_search:
+            enable_web_search = True
+            logger.info("Enabling web search as fallback for bill info tool")
 
         # Step 8: Generate response (with tools if enabled)
         llm_response = await self.llm.complete(
@@ -602,6 +608,8 @@ class VoteBotAgent:
         if not self.settings.bill_votes_tool_enabled:
             return False
 
+        message_lower = message.lower()
+
         # Check if the query is about votes
         vote_keywords = [
             "vote", "voted", "voting", "votes",
@@ -613,28 +621,47 @@ class VoteBotAgent:
             "roll call", "floor vote",
             "how did", "did it pass",
         ]
-
-        message_lower = message.lower()
         is_vote_query = any(keyword in message_lower for keyword in vote_keywords)
 
-        if not is_vote_query:
-            logger.debug(
-                "Bill votes tool not enabled - not a vote query",
-                message_preview=message[:50],
-            )
-            return False
+        # Check if the query mentions a specific bill identifier (HB, SB, HR, etc.)
+        bill_pattern = r'\b(hb|sb|hr|s|hj|sj|hcr|scr|hjr|sjr)\s*\d+'
+        has_bill_identifier = bool(re.search(bill_pattern, message_lower))
 
-        # Enable tool if RAG confidence is low (vote info may not be in context)
-        # or if the query explicitly asks about votes
+        # Check for general bill inquiry keywords
+        bill_inquiry_keywords = [
+            "tell me about", "what is", "what does", "explain",
+            "summary", "sponsor", "status", "action",
+        ]
+        is_bill_inquiry = has_bill_identifier and any(kw in message_lower for kw in bill_inquiry_keywords)
+
+        # Enable tool if:
+        # 1. It's a vote query (always enable for vote questions)
+        # 2. Query mentions a specific bill identifier (HB 2724, etc.) - these often aren't in RAG
+        # 3. RAG confidence is very low AND it's a bill inquiry
         threshold = self.settings.bill_votes_rag_confidence_threshold
-        should_enable = rag_confidence < threshold or is_vote_query
+        very_low_threshold = 0.5  # Higher threshold for specific bill lookups
+
+        should_enable = (
+            is_vote_query or  # Always for vote queries
+            has_bill_identifier or  # Always when a specific bill number is mentioned
+            (rag_confidence < very_low_threshold and is_bill_inquiry)  # Low confidence + bill inquiry
+        )
 
         if should_enable:
             logger.info(
-                "Bill votes tool enabled",
+                "Bill info tool enabled",
                 rag_confidence=rag_confidence,
                 threshold=threshold,
                 is_vote_query=is_vote_query,
+                has_bill_identifier=has_bill_identifier,
+                is_bill_inquiry=is_bill_inquiry,
+            )
+        else:
+            logger.debug(
+                "Bill info tool not enabled",
+                rag_confidence=rag_confidence,
+                has_bill_identifier=has_bill_identifier,
+                message_preview=message[:50],
             )
 
         return should_enable

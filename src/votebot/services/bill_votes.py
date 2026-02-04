@@ -57,6 +57,25 @@ class BillVotesResult:
     openstates_id: str | None = None
 
 
+@dataclass
+class BillInfoResult:
+    """Full bill information from OpenStates."""
+
+    bill_id: str
+    bill_identifier: str  # e.g., "HB 1234"
+    jurisdiction: str
+    title: str | None
+    description: str | None
+    session: str
+    status: str | None
+    chamber: str | None  # house, senate
+    sponsors: list[str]
+    actions: list[dict]  # Recent actions/history
+    votes: list[BillVote]
+    openstates_url: str | None = None
+    found: bool = True
+
+
 class BillVotesService:
     """
     Service for fetching and caching bill votes.
@@ -132,6 +151,162 @@ class BillVotesService:
             )
 
         return result
+
+    async def get_bill_info(
+        self,
+        jurisdiction: str,
+        session: str,
+        bill_identifier: str,
+    ) -> BillInfoResult | None:
+        """
+        Get full bill information from OpenStates.
+
+        Args:
+            jurisdiction: State code (e.g., 'va', 'fl', 'us')
+            session: Session identifier (e.g., '2025', '119')
+            bill_identifier: Bill identifier (e.g., 'HB 2724')
+
+        Returns:
+            BillInfoResult with full bill details or None if not found
+        """
+        clean_bill_id = bill_identifier.replace(" ", "")
+        url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction.lower()}/{session}/{clean_bill_id}"
+
+        logger.info(
+            "Looking up bill info from OpenStates",
+            jurisdiction=jurisdiction,
+            session=session,
+            bill_identifier=bill_identifier,
+            url=url,
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                headers = {
+                    "accept": "application/json",
+                    "x-api-key": self.api_key,
+                }
+                # Include votes, sponsorships, and actions
+                params = [
+                    ("include", "votes"),
+                    ("include", "sponsorships"),
+                    ("include", "actions"),
+                ]
+                response = await client.get(url, headers=headers, params=params)
+
+                if response.status_code == 404:
+                    logger.warning(
+                        "Bill not found in OpenStates",
+                        jurisdiction=jurisdiction,
+                        session=session,
+                        bill_identifier=bill_identifier,
+                    )
+                    return BillInfoResult(
+                        bill_id=f"{jurisdiction}-{session}-{clean_bill_id}",
+                        bill_identifier=bill_identifier,
+                        jurisdiction=jurisdiction.upper(),
+                        title=None,
+                        description=None,
+                        session=session,
+                        status=None,
+                        chamber=None,
+                        sponsors=[],
+                        actions=[],
+                        votes=[],
+                        found=False,
+                    )
+
+                response.raise_for_status()
+                data = response.json()
+
+                # Parse sponsors
+                sponsors = []
+                for sp in data.get("sponsorships", []):
+                    name = sp.get("name") or sp.get("person", {}).get("name", "")
+                    if name:
+                        classification = sp.get("classification", "")
+                        if classification == "primary":
+                            sponsors.insert(0, f"{name} (Primary)")
+                        else:
+                            sponsors.append(name)
+
+                # Parse recent actions (last 10)
+                actions = []
+                for action in data.get("actions", [])[-10:]:
+                    actions.append({
+                        "date": action.get("date", ""),
+                        "description": action.get("description", ""),
+                        "chamber": action.get("organization", {}).get("classification", ""),
+                    })
+
+                # Parse votes
+                votes = self._parse_votes(data.get("votes", []))
+
+                # Get latest action for status
+                latest_action = data.get("latest_action_description", "")
+
+                # Get chamber from organization
+                from_org = data.get("from_organization", {})
+                chamber = from_org.get("classification", "") if isinstance(from_org, dict) else ""
+
+                return BillInfoResult(
+                    bill_id=f"{jurisdiction}-{session}-{clean_bill_id}",
+                    bill_identifier=data.get("identifier", bill_identifier),
+                    jurisdiction=jurisdiction.upper(),
+                    title=data.get("title"),
+                    description=data.get("abstract") or data.get("title"),
+                    session=session,
+                    status=latest_action,
+                    chamber=chamber,
+                    sponsors=sponsors,
+                    actions=actions,
+                    votes=votes,
+                    openstates_url=data.get("openstates_url"),
+                    found=True,
+                )
+
+        except httpx.TimeoutException:
+            logger.error("Timeout fetching bill info from OpenStates", bill_identifier=bill_identifier)
+            return None
+        except Exception as e:
+            logger.error("Error fetching bill info from OpenStates", error=str(e))
+            return None
+
+    def format_bill_info_document(self, result: BillInfoResult) -> str:
+        """Format full bill info into a readable document."""
+        if not result.found:
+            return f"Bill {result.bill_identifier} was not found in OpenStates for {result.jurisdiction} session {result.session}."
+
+        parts = []
+        parts.append(f"## {result.bill_identifier}: {result.title or 'Unknown Title'}")
+        parts.append(f"**Jurisdiction:** {result.jurisdiction}")
+        parts.append(f"**Session:** {result.session}")
+
+        if result.status:
+            parts.append(f"**Status:** {result.status}")
+
+        if result.chamber:
+            parts.append(f"**Chamber:** {result.chamber.title()}")
+
+        if result.sponsors:
+            parts.append(f"**Sponsors:** {', '.join(result.sponsors[:5])}")
+            if len(result.sponsors) > 5:
+                parts.append(f"  ...and {len(result.sponsors) - 5} more")
+
+        if result.actions:
+            parts.append("\n**Recent Actions:**")
+            for action in result.actions[-5:]:
+                parts.append(f"- {action['date']}: {action['description']}")
+
+        if result.votes:
+            parts.append(f"\n**Votes:** {len(result.votes)} recorded vote(s)")
+            for vote in result.votes[:3]:
+                parts.append(f"- {vote.date} ({vote.chamber}): {vote.result.upper()} - {vote.motion_text[:80]}")
+
+        if result.openstates_url:
+            parts.append(f"\n**More info:** {result.openstates_url}")
+
+        return "\n".join(parts)
 
     async def get_bill_votes_by_url(self, openstates_url: str) -> BillVotesResult | None:
         """
