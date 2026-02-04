@@ -125,13 +125,8 @@ class LegislatorHandler:
             party = fields.get("party-2", fields.get("party", ""))
             chamber = fields.get("chamber", "")
 
-            # Resolve jurisdiction
+            # Store jurisdiction ref for resolution after building mapping
             jurisdiction_ref = fields.get("jurisdiction")
-            jurisdiction = "us"
-            if isinstance(jurisdiction_ref, list) and jurisdiction_ref:
-                jurisdiction_ref = jurisdiction_ref[0]
-            if isinstance(jurisdiction_ref, str) and len(jurisdiction_ref) == 2:
-                jurisdiction = jurisdiction_ref.lower()
 
             logger.info(
                 "Legislator found",
@@ -157,6 +152,9 @@ class LegislatorHandler:
                     "accept": "application/json",
                 }
                 await self.webflow._build_jurisdiction_mapping(client, headers)
+
+            # Resolve jurisdiction using the mapping
+            jurisdiction = self.webflow._resolve_jurisdiction(jurisdiction_ref).lower()
 
             # Process the legislator item for Webflow content
             doc = self.webflow._process_legislator_item(item)
