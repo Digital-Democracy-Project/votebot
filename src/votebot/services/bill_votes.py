@@ -286,8 +286,11 @@ class BillVotesService:
                         "chamber": action.get("organization", {}).get("classification", ""),
                     })
 
-                # Parse votes
-                votes = self._parse_votes(data.get("votes", []))
+                # Fetch legislators for this jurisdiction to get party info
+                legislator_parties = await self._get_legislator_parties(jurisdiction, client, headers)
+
+                # Parse votes with party info
+                votes = self._parse_votes(data.get("votes", []), legislator_parties)
 
                 # Get latest action for status
                 latest_action = data.get("latest_action_description", "")
@@ -319,6 +322,85 @@ class BillVotesService:
             logger.error("Error fetching bill info from OpenStates", error=str(e), bill_identifier=clean_bill_id)
             return None
 
+    async def _get_legislator_parties(
+        self,
+        jurisdiction: str,
+        client: httpx.AsyncClient,
+        headers: dict,
+    ) -> dict[str, str]:
+        """
+        Get a mapping of legislator names to their party affiliation.
+
+        Uses caching to avoid repeated API calls for the same jurisdiction.
+
+        Args:
+            jurisdiction: State code (e.g., 'va', 'fl')
+            client: HTTP client to use
+            headers: Request headers with API key
+
+        Returns:
+            Dict mapping legislator names (lowercase) to party name
+        """
+        cache_key = f"legislators-{jurisdiction.lower()}"
+
+        # Check cache first
+        if cache_key in self._legislator_cache:
+            return self._legislator_cache[cache_key]
+
+        logger.info("Fetching legislators for party info", jurisdiction=jurisdiction)
+
+        name_to_party: dict[str, str] = {}
+
+        try:
+            # Fetch legislators from both chambers
+            for org_class in ["upper", "lower"]:
+                offset = 0
+                per_page = 50
+                max_pages = 10
+
+                for _ in range(max_pages):
+                    url = f"{self.OPENSTATES_API_BASE}/people"
+                    params = {
+                        "jurisdiction": jurisdiction.lower(),
+                        "org_classification": org_class,
+                        "per_page": per_page,
+                        "page": (offset // per_page) + 1,
+                    }
+                    response = await client.get(url, headers=headers, params=params)
+
+                    if response.status_code != 200:
+                        break
+
+                    data = response.json()
+                    results = data.get("results", [])
+
+                    for person in results:
+                        name = person.get("name", "")
+                        party = person.get("party", "")
+                        if name and party:
+                            # Store by lowercase name for case-insensitive lookup
+                            name_to_party[name.lower()] = party
+
+                    # Check pagination
+                    pagination = data.get("pagination", {})
+                    total = pagination.get("total_items", 0)
+                    if offset + len(results) >= total or len(results) < per_page:
+                        break
+                    offset += per_page
+
+            # Cache the results
+            self._legislator_cache[cache_key] = name_to_party
+            logger.info(
+                "Cached legislator party info",
+                jurisdiction=jurisdiction,
+                count=len(name_to_party),
+            )
+
+        except Exception as e:
+            logger.warning("Failed to fetch legislator parties", error=str(e))
+
+        return name_to_party
+
     def format_bill_info_document(self, result: BillInfoResult) -> str:
         """Format full bill info into a readable document."""
         if not result.found:
@@ -347,8 +429,55 @@ class BillVotesService:
 
         if result.votes:
             parts.append(f"\n**Votes:** {len(result.votes)} recorded vote(s)")
-            for vote in result.votes[:3]:
-                parts.append(f"- {vote.date} ({vote.chamber}): {vote.result.upper()} - {vote.motion_text[:80]}")
+            # Show key votes with individual legislator details
+            for vote in result.votes:
+                # Prioritize final passage and chamber votes
+                motion_lower = vote.motion_text.lower()
+                is_key_vote = any(kw in motion_lower for kw in [
+                    "passed", "third reading", "final passage", "engrossed",
+                    "agreed to", "concur", "adopt"
+                ])
+
+                parts.append(f"\n### {vote.motion_text[:100]}")
+                parts.append(f"**Date:** {vote.date} | **Chamber:** {vote.chamber} | **Result:** {vote.result.upper()}")
+                parts.append(f"**Totals:** Yes: {vote.yes_count}, No: {vote.no_count}, Other: {vote.other_count}")
+
+                # Group votes by party
+                if vote.votes:
+                    party_votes: dict[str, dict[str, list[str]]] = {}
+                    for v in vote.votes:
+                        party = v.party or "Unknown"
+                        if party not in party_votes:
+                            party_votes[party] = {"yes": [], "no": [], "other": []}
+                        vote_type = v.vote.lower()
+                        if vote_type == "yes":
+                            party_votes[party]["yes"].append(v.legislator_name)
+                        elif vote_type == "no":
+                            party_votes[party]["no"].append(v.legislator_name)
+                        else:
+                            party_votes[party]["other"].append(v.legislator_name)
+
+                    # Output party breakdown
+                    for party in sorted(party_votes.keys()):
+                        votes_by_party = party_votes[party]
+                        yes_count = len(votes_by_party["yes"])
+                        no_count = len(votes_by_party["no"])
+                        other_count = len(votes_by_party["other"])
+
+                        parts.append(f"\n**{party}:** {yes_count} Yes, {no_count} No, {other_count} Other")
+
+                        # For key votes, list individual names
+                        if is_key_vote or len(vote.votes) <= 50:
+                            if votes_by_party["yes"]:
+                                names = ", ".join(votes_by_party["yes"][:20])
+                                if len(votes_by_party["yes"]) > 20:
+                                    names += f" (+{len(votes_by_party['yes']) - 20} more)"
+                                parts.append(f"  Voted Yes: {names}")
+                            if votes_by_party["no"]:
+                                names = ", ".join(votes_by_party["no"][:20])
+                                if len(votes_by_party["no"]) > 20:
+                                    names += f" (+{len(votes_by_party['no']) - 20} more)"
+                                parts.append(f"  Voted No: {names}")
 
         if result.openstates_url:
             parts.append(f"\n**More info:** {result.openstates_url}")
@@ -444,8 +573,11 @@ class BillVotesService:
                 response.raise_for_status()
                 data = response.json()
 
-                # Parse the votes
-                votes = self._parse_votes(data.get("votes", []))
+                # Fetch legislators for party info
+                legislator_parties = await self._get_legislator_parties(jurisdiction, client, headers)
+
+                # Parse the votes with party info
+                votes = self._parse_votes(data.get("votes", []), legislator_parties)
 
                 return BillVotesResult(
                     bill_id=f"{jurisdiction}-{session}-{clean_bill_id}",
@@ -673,9 +805,23 @@ class BillVotesService:
             logger.warning("Error fetching roll call vote", error=str(e))
             return None
 
-    def _parse_votes(self, votes_data: list) -> list[BillVote]:
-        """Parse votes from OpenStates response."""
+    def _parse_votes(
+        self,
+        votes_data: list,
+        legislator_parties: dict[str, str] | None = None,
+    ) -> list[BillVote]:
+        """Parse votes from OpenStates response.
+
+        Args:
+            votes_data: Raw vote data from OpenStates
+            legislator_parties: Optional dict mapping legislator names to parties
+
+        Returns:
+            List of BillVote objects
+        """
         votes = []
+        legislator_parties = legislator_parties or {}
+
         for vote in votes_data:
             # Parse counts
             counts = vote.get("counts", [])
@@ -689,11 +835,14 @@ class BillVotesService:
             # Parse individual votes
             vote_records = []
             for v in vote.get("votes", []):
+                voter_name = v.get("voter_name", "Unknown")
+                # Look up party from our legislator cache
+                party = v.get("party") or legislator_parties.get(voter_name.lower(), "")
                 vote_records.append(VoteRecord(
                     legislator_id=v.get("legislator_id", ""),
-                    legislator_name=v.get("voter_name", "Unknown"),
+                    legislator_name=voter_name,
                     vote=v.get("option", "unknown"),
-                    party=v.get("party"),
+                    party=party,
                 ))
 
             # Get chamber from organization
