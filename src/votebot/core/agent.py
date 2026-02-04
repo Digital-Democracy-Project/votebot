@@ -280,17 +280,31 @@ class VoteBotAgent:
             ]
         )
 
+        # Step 2b: Pre-fetch bill info if query mentions a specific bill
+        # (This is done before streaming since tool calls can't interrupt streams)
+        rag_confidence = self._calculate_rag_confidence(retrieval_result)
+        bill_info_context = ""
+        if self._should_use_bill_votes_tool(rag_confidence, message):
+            bill_info_context = await self._prefetch_bill_info(message, page_context)
+            if bill_info_context:
+                logger.info("Pre-fetched bill info for streaming", has_info=bool(bill_info_context))
+
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
+
+        # Combine RAG context with bill info
+        full_context = retrieved_context
+        if bill_info_context:
+            full_context = f"{retrieved_context}\n\n{bill_info_context}"
+
         system_prompt = build_system_prompt(
             page_type=page_context.type,
             page_info=page_info,
             include_rag_context=True,
-            retrieved_context=retrieved_context,
+            retrieved_context=full_context,
         )
 
-        # Step 4: Calculate RAG confidence and determine if web search should be enabled
-        rag_confidence = self._calculate_rag_confidence(retrieval_result)
+        # Step 4: Determine if web search should be enabled
         enable_web_search = self._should_use_web_search(rag_confidence, page_context.type, message)
 
         # Step 5: Build messages
@@ -665,6 +679,117 @@ class VoteBotAgent:
             )
 
         return should_enable
+
+    async def _prefetch_bill_info(
+        self,
+        message: str,
+        page_context: PageContext,
+    ) -> str:
+        """
+        Pre-fetch bill info for streaming responses.
+
+        Extracts bill identifier from message and fetches from OpenStates
+        before streaming begins.
+
+        Args:
+            message: The user's message
+            page_context: Context about the current page
+
+        Returns:
+            Formatted bill info string to add to context, or empty string
+        """
+        # Extract bill identifier from message
+        message_lower = message.lower()
+        bill_pattern = r'\b(hb|sb|hr|s|hj|sj|hcr|scr|hjr|sjr)\s*(\d+)'
+        match = re.search(bill_pattern, message_lower)
+
+        if not match:
+            return ""
+
+        bill_type = match.group(1).upper()
+        bill_number = match.group(2)
+        bill_identifier = f"{bill_type}{bill_number}"
+
+        # Extract jurisdiction from message or page context
+        jurisdiction = self._extract_jurisdiction_from_message(message)
+        if not jurisdiction:
+            jurisdiction = page_context.jurisdiction or "US"
+
+        # Determine session (default to current year, service will fallback)
+        session = getattr(page_context, "session", None)
+        if not session:
+            from datetime import datetime
+            session = str(datetime.now().year)
+
+        logger.info(
+            "Pre-fetching bill info for streaming",
+            jurisdiction=jurisdiction,
+            session=session,
+            bill_identifier=bill_identifier,
+        )
+
+        try:
+            result = await self.bill_votes.get_bill_info(
+                jurisdiction=jurisdiction,
+                session=session,
+                bill_identifier=bill_identifier,
+            )
+
+            if result and result.found:
+                formatted = self.bill_votes.format_bill_info_document(result)
+                return f"## Bill Information from OpenStates API\n\n{formatted}"
+            else:
+                logger.info(
+                    "Bill not found in OpenStates",
+                    jurisdiction=jurisdiction,
+                    bill_identifier=bill_identifier,
+                )
+                return ""
+
+        except Exception as e:
+            logger.error("Error pre-fetching bill info", error=str(e))
+            return ""
+
+    def _extract_jurisdiction_from_message(self, message: str) -> str | None:
+        """Extract state/jurisdiction from message text."""
+        message_lower = message.lower()
+
+        # State name to code mapping
+        state_names = {
+            "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+            "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+            "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+            "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+            "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+            "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+            "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+            "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+            "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+            "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+            "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+            "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
+            "wisconsin": "WI", "wyoming": "WY",
+        }
+
+        # Check for state names
+        for state_name, state_code in state_names.items():
+            if state_name in message_lower:
+                return state_code
+
+        # Check for explicit state codes (e.g., "VA HB 2724")
+        state_code_pattern = r'\b([A-Z]{2})\s+(hb|sb|hr|s|hj|sj)'
+        match = re.search(state_code_pattern, message, re.IGNORECASE)
+        if match:
+            potential_code = match.group(1).upper()
+            if potential_code in state_names.values():
+                return potential_code
+
+        # Check for federal bill indicators
+        federal_keywords = ["federal", "congress", "us ", "u.s.", "united states"]
+        if any(kw in message_lower for kw in federal_keywords):
+            return "US"
+
+        return None
 
     def _should_use_web_search(
         self,
