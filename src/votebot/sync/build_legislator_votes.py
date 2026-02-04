@@ -105,34 +105,38 @@ class LegislatorVotesBuilder:
         """Fetch all bill-votes documents from Pinecone."""
         all_docs = []
 
-        # Query with a broad search to get bill-votes documents
-        # We'll need to paginate through results
-        queries = [
-            "vote voting record senate house passed failed",
-            "voted yes no legislator senator representative",
-            "roll call vote tally passage",
-        ]
+        # Use Pinecone's list() to get all bill-votes vector IDs
+        # This is more reliable than semantic search for getting ALL documents
+        all_ids = []
+        for ids in self.vector_store.index.list(
+            namespace=self.vector_store.namespace,
+            prefix="bill-votes-"
+        ):
+            all_ids.extend(ids)
 
-        seen_ids = set()
+        logger.info(f"Found {len(all_ids)} bill-votes vector IDs")
 
-        for query in queries:
-            results = await self.vector_store.query(
-                query=query,
-                top_k=100,  # Max allowed
-                filter={"document_type": "bill-votes"},
+        # Fetch vectors in batches (Pinecone fetch limit is 1000)
+        batch_size = 100
+        for i in range(0, len(all_ids), batch_size):
+            batch_ids = all_ids[i:i + batch_size]
+            fetch_result = self.vector_store.index.fetch(
+                ids=batch_ids,
+                namespace=self.vector_store.namespace
             )
 
-            for r in results:
-                if r.id not in seen_ids:
-                    seen_ids.add(r.id)
-                    all_docs.append({
-                        "id": r.id,
-                        "content": r.content,
-                        "metadata": r.metadata,
-                    })
+            for vec_id, vec_data in fetch_result.vectors.items():
+                metadata = vec_data.metadata or {}
+                content = metadata.get("content", "")
 
-        # Also try to get documents by listing (if the vector store supports it)
-        # For now, we rely on the query approach
+                all_docs.append({
+                    "id": vec_id,
+                    "content": content,
+                    "metadata": metadata,
+                })
+
+            if (i + batch_size) % 500 == 0:
+                logger.info(f"Fetched {min(i + batch_size, len(all_ids))}/{len(all_ids)} bill-votes documents")
 
         return all_docs
 
