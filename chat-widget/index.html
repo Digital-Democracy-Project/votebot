@@ -100,11 +100,11 @@
             wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
             primaryColor: '#1a5f7a',
             botName: 'VoteBot',
-            autoOpen: true
+            // Mode 1 (Explicit): ddp_url provided - auto-open the chat
+            // Mode 2 (Discovery): no ddp_url - auto-detect page context, don't auto-open
+            autoOpen: !!ddpUrl,
+            autoDetect: !ddpUrl
         };
-
-        // If ddp_url provided, the widget will resolve it automatically
-        // Otherwise, it defaults to general context
     </script>
     <script src="./dist/ddp-chat.min.js"></script>
 </body>
