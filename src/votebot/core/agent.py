@@ -289,13 +289,22 @@ class VoteBotAgent:
             if bill_info_context:
                 logger.info("Pre-fetched bill info for streaming", has_info=bool(bill_info_context))
 
+        # Step 2c: Pre-fetch legislator info if query mentions a person on a bill page
+        legislator_info_context = ""
+        if page_context and page_context.type == "bill":
+            legislator_info_context = await self._prefetch_legislator_info(message)
+            if legislator_info_context:
+                logger.info("Pre-fetched legislator info for streaming")
+
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
 
-        # Combine RAG context with bill info
+        # Combine RAG context with bill info and legislator info
         full_context = retrieved_context
         if bill_info_context:
             full_context = f"{retrieved_context}\n\n{bill_info_context}"
+        if legislator_info_context:
+            full_context = f"{full_context}\n\n{legislator_info_context}"
 
         system_prompt = build_system_prompt(
             page_type=page_context.type,
@@ -748,6 +757,98 @@ class VoteBotAgent:
 
         except Exception as e:
             logger.error("Error pre-fetching bill info", error=str(e))
+            return ""
+
+    async def _prefetch_legislator_info(self, message: str) -> str:
+        """
+        Pre-fetch legislator info from OpenStates when a name is mentioned.
+
+        This helps override outdated LLM training data with current info
+        (e.g., Ashley Moody is now a Senator, not FL Attorney General).
+
+        Args:
+            message: The user's message
+
+        Returns:
+            Formatted legislator info string, or empty string
+        """
+        import httpx
+
+        # Extract potential name from message
+        common_words = {
+            "how", "did", "what", "about", "the", "this", "vote", "on", "and",
+            "senator", "rep", "representative", "congressman", "congresswoman",
+            "she", "he", "they", "is", "a", "us", "u.s."
+        }
+
+        # Get capitalized words that might be names
+        words = message.split()
+        name_parts = []
+        for w in words:
+            # Keep capitalized words that aren't common
+            if len(w) > 1 and w[0].isupper() and w.lower() not in common_words:
+                name_parts.append(w)
+
+        if not name_parts:
+            return ""
+
+        # Construct search name (e.g., "Ashley Moody")
+        search_name = " ".join(name_parts)
+
+        logger.info("Looking up legislator info", name=search_name)
+
+        try:
+            api_key = self.settings.openstates_api_key.get_secret_value()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    "https://v3.openstates.org/people",
+                    headers={"x-api-key": api_key},
+                    params={"name": search_name, "per_page": 3},
+                )
+
+                if response.status_code != 200:
+                    return ""
+
+                data = response.json()
+                results = data.get("results", [])
+
+                if not results:
+                    return ""
+
+                # Format the first matching result
+                person = results[0]
+                name = person.get("name", search_name)
+                party = person.get("party", "")
+                current_role = person.get("current_role", {})
+                title = current_role.get("title", "")
+                district = current_role.get("district", "")
+                org_class = current_role.get("org_classification", "")
+
+                # Build context string
+                parts = [f"## Current Legislator Information (from OpenStates)"]
+                parts.append(f"**{name}** ({party})")
+                if title and district:
+                    parts.append(f"**Current Role:** {title} - {district}")
+                elif title:
+                    parts.append(f"**Current Role:** {title}")
+                if org_class:
+                    chamber = "Senate" if org_class == "upper" else "House" if org_class == "lower" else org_class
+                    parts.append(f"**Chamber:** {chamber}")
+
+                parts.append("")
+                parts.append("*Note: This is current information from OpenStates. If the RAG data conflicts with this, trust this current information.*")
+
+                logger.info(
+                    "Found legislator info",
+                    name=name,
+                    title=title,
+                    district=district,
+                )
+
+                return "\n".join(parts)
+
+        except Exception as e:
+            logger.warning("Error fetching legislator info", error=str(e))
             return ""
 
     def _extract_jurisdiction_from_message(self, message: str) -> str | None:
