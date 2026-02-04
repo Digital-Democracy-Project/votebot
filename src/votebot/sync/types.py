@@ -70,13 +70,13 @@ class SyncOptions:
     Options for sync operations.
 
     Different content types use different options:
-    - Bills: include_pdfs, include_openstates (votes are now included automatically)
-    - Legislators: include_sponsored_bills
+    - Bills: include_pdfs, include_openstates
+    - Legislators: include_sponsored_bills, include_votes
     - All batch operations: limit, jurisdiction
 
-    Note: Vote syncing strategy has changed. Votes are now:
-    - Synced per-bill during bill sync (creates bill-votes-{id} documents)
-    - Available on-demand via BillVotesService for bills not in our system
+    Vote syncing creates two types of documents:
+    - bill-votes: Per-bill vote records (synced during bill sync)
+    - legislator-votes: Per-legislator voting history (synced with include_votes=True)
     """
 
     # PDF processing for bills
@@ -88,10 +88,11 @@ class SyncOptions:
     # Legislator-specific
     include_sponsored_bills: bool = True
 
-    # Legacy vote options (deprecated - votes now sync with bills)
-    include_votes: bool = False  # Deprecated: votes sync automatically with bills
-    vote_session: str | None = None  # Deprecated
-    max_vote_bills: int = 200  # Deprecated
+    # Legislator voting record options
+    # Creates legislator-votes documents with each legislator's voting history
+    include_votes: bool = True  # Sync voting records (set to match sync_schedule.yaml)
+    vote_session: str | None = None  # Optional session filter (null = current session)
+    max_vote_bills: int = 200  # Max bills to check for votes per legislator
 
     # Filtering
     jurisdiction: str | None = None

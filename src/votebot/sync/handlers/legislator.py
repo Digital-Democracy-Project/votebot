@@ -183,7 +183,9 @@ class LegislatorHandler:
 
                 result = await self.legislator_sync.sync_legislator(
                     legislator_data,
-                    include_votes=False,  # Votes now sync with bills
+                    include_votes=options.include_votes,
+                    vote_session=options.vote_session,
+                    max_vote_bills=options.max_vote_bills,
                 )
 
                 if result.success:
@@ -304,7 +306,9 @@ class LegislatorHandler:
                 if legislator_data_list:
                     os_result = await self.legislator_sync.sync_all_legislators(
                         legislator_data_list,
-                        include_votes=False,  # Votes now sync with bills
+                        include_votes=options.include_votes,
+                        vote_session=options.vote_session,
+                        max_vote_bills=options.max_vote_bills,
                     )
                     total_chunks += os_result.chunks_created
                     errors.extend(os_result.errors)
