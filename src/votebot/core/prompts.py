@@ -218,6 +218,8 @@ def _format_bill_info(info: dict) -> str:
         parts.append(f"- Title: {info['title']}")
     if info.get("jurisdiction"):
         parts.append(f"- Jurisdiction: {info['jurisdiction']}")
+    if info.get("session"):
+        parts.append(f"- Session: {info['session']}")
     if info.get("status"):
         parts.append(f"- Status: {info['status']}")
     if info.get("sponsor"):

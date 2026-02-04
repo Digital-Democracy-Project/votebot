@@ -21,6 +21,10 @@ class PageContext(BaseModel):
         None,
         description="Jurisdiction code (e.g., 'US', 'CA', 'NY')",
     )
+    session: str | None = Field(
+        None,
+        description="Legislative session (e.g., '2025' for states, '119' for 119th Congress)",
+    )
     title: str | None = Field(
         None,
         description="Title of the bill or name of the legislator",

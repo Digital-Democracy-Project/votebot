@@ -109,11 +109,14 @@ async def resolve_content(
     fields = item.get("fieldData", {})
 
     if content_type == "bill":
+        jurisdiction = extract_jurisdiction(fields)
+        session = extract_session(fields, slug, jurisdiction)
         return {
             "type": "bill",
             "id": f"{fields.get('bill-prefix', '')} {fields.get('bill-number', '')}".strip() or slug,
             "title": fields.get("name", ""),
-            "jurisdiction": extract_jurisdiction(fields),
+            "jurisdiction": jurisdiction,
+            "session": session,
             "description": truncate_text(strip_html(fields.get("description", "")), 200),
             "status": fields.get("status", ""),
             "url": url,
@@ -199,6 +202,33 @@ async def fetch_webflow_item_by_slug(
             offset += page_size
 
     return None
+
+
+def extract_session(fields: dict, slug: str, jurisdiction: str) -> str:
+    """Extract legislative session from CMS fields or slug."""
+    # Check if session is explicitly set in CMS
+    session = fields.get("session") or fields.get("legislative-session")
+    if session:
+        return str(session)
+
+    # Try to extract year from slug (e.g., "one-big-beautiful-bill-act-hr1-2025")
+    year_match = re.search(r"-(\d{4})$", slug)
+    if year_match:
+        year = int(year_match.group(1))
+        # For federal bills, convert year to Congress number
+        if jurisdiction == "US":
+            congress = ((year - 1789) // 2) + 1
+            return str(congress)
+        # For state bills, use the year as session
+        return str(year)
+
+    # Default to current year/Congress
+    from datetime import datetime
+    current_year = datetime.now().year
+    if jurisdiction == "US":
+        congress = ((current_year - 1789) // 2) + 1
+        return str(congress)
+    return str(current_year)
 
 
 def extract_jurisdiction(fields: dict) -> str:

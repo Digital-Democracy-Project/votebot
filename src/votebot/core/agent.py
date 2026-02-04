@@ -353,6 +353,7 @@ class VoteBotAgent:
         return {
             "id": page_context.id,
             "jurisdiction": page_context.jurisdiction,
+            "session": getattr(page_context, "session", None),
             "title": page_context.title,
             "url": page_context.url,
         }
