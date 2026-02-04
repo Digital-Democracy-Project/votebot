@@ -7,6 +7,8 @@ const DDPUI = (function() {
     let elements = {};
     let currentStreamingMessage = null;
     let currentStreamingText = '';
+    let userScrolledUp = false;  // Track if user manually scrolled up
+    let scrollThreshold = 50;    // Pixels from bottom to consider "at bottom"
 
     // Simple markdown parser (no external dependencies)
     const markdownParser = {
@@ -128,6 +130,11 @@ const DDPUI = (function() {
                 </div>
                 <div class="ddp-handoff-banner"></div>
                 <div class="ddp-chat-messages"></div>
+                <button class="ddp-scroll-bottom" aria-label="Scroll to bottom" style="display: none;">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                        <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/>
+                    </svg>
+                </button>
                 <div class="ddp-chat-input-area">
                     <div class="ddp-chat-input-container">
                         <textarea
@@ -163,8 +170,45 @@ const DDPUI = (function() {
             handoffBanner: shadowRoot.querySelector('.ddp-handoff-banner'),
             messagesContainer: shadowRoot.querySelector('.ddp-chat-messages'),
             chatInput: shadowRoot.querySelector('.ddp-chat-input'),
-            sendButton: shadowRoot.querySelector('.ddp-send-button')
+            sendButton: shadowRoot.querySelector('.ddp-send-button'),
+            scrollBottomButton: shadowRoot.querySelector('.ddp-scroll-bottom')
         };
+
+        // Set up scroll listener to detect when user scrolls up
+        elements.messagesContainer.addEventListener('scroll', handleUserScroll);
+
+        // Set up click handler for scroll-to-bottom button
+        elements.scrollBottomButton.addEventListener('click', function() {
+            userScrolledUp = false;
+            elements.scrollBottomButton.style.display = 'none';
+            elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
+        });
+    }
+
+    /**
+     * Handle user scroll to detect manual scrolling.
+     */
+    function handleUserScroll() {
+        var container = elements.messagesContainer;
+        var isAtBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < scrollThreshold;
+
+        if (isAtBottom) {
+            // User scrolled back to bottom, resume auto-scroll
+            userScrolledUp = false;
+            elements.scrollBottomButton.style.display = 'none';
+        } else {
+            // User scrolled up, pause auto-scroll
+            userScrolledUp = true;
+        }
+    }
+
+    /**
+     * Show the scroll-to-bottom button.
+     */
+    function showScrollButton() {
+        if (userScrolledUp && elements.scrollBottomButton) {
+            elements.scrollBottomButton.style.display = 'flex';
+        }
     }
 
     /**
@@ -504,10 +548,26 @@ const DDPUI = (function() {
     }
 
     /**
-     * Scroll messages to bottom.
+     * Scroll messages to bottom (respects user scroll position).
+     * @param {boolean} force - Force scroll even if user scrolled up
      */
-    function scrollToBottom() {
-        elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
+    function scrollToBottom(force) {
+        if (force || !userScrolledUp) {
+            elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
+        } else {
+            // User has scrolled up, show button instead of scrolling
+            showScrollButton();
+        }
+    }
+
+    /**
+     * Reset scroll state (call when user sends a message).
+     */
+    function resetScrollState() {
+        userScrolledUp = false;
+        if (elements.scrollBottomButton) {
+            elements.scrollBottomButton.style.display = 'none';
+        }
     }
 
     /**
@@ -517,6 +577,7 @@ const DDPUI = (function() {
     function handleUIUpdate(event) {
         switch (event.type) {
             case 'user_message':
+                resetScrollState();  // Resume auto-scroll for the response
                 addMessage('user', event.payload.message);
                 clearInput();
                 break;
@@ -609,6 +670,7 @@ const DDPUI = (function() {
         hideHandoffBanner: hideHandoffBanner,
         showHandoffConfirmation: showHandoffConfirmation,
         scrollToBottom: scrollToBottom,
+        resetScrollState: resetScrollState,
         handleUIUpdate: handleUIUpdate
     };
 })();
