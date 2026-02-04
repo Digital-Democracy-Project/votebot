@@ -170,13 +170,60 @@ class BillVotesService:
             BillInfoResult with full bill details or None if not found
         """
         clean_bill_id = bill_identifier.replace(" ", "")
+
+        # Try the specified session first, then fall back to recent years
+        sessions_to_try = [session]
+
+        # For state bills, also try previous years if not found
+        if jurisdiction.lower() != "us":
+            try:
+                year = int(session)
+                # Add previous 2 years as fallback
+                sessions_to_try.extend([str(year - 1), str(year - 2)])
+            except ValueError:
+                pass
+
+        for try_session in sessions_to_try:
+            result = await self._fetch_bill_info(jurisdiction, try_session, clean_bill_id)
+            if result and result.found:
+                logger.info(
+                    "Found bill in session",
+                    jurisdiction=jurisdiction,
+                    session=try_session,
+                    bill_identifier=bill_identifier,
+                )
+                return result
+
+        # Return not-found result
+        return BillInfoResult(
+            bill_id=f"{jurisdiction}-{session}-{clean_bill_id}",
+            bill_identifier=bill_identifier,
+            jurisdiction=jurisdiction.upper(),
+            title=None,
+            description=None,
+            session=session,
+            status=None,
+            chamber=None,
+            sponsors=[],
+            actions=[],
+            votes=[],
+            found=False,
+        )
+
+    async def _fetch_bill_info(
+        self,
+        jurisdiction: str,
+        session: str,
+        clean_bill_id: str,
+    ) -> BillInfoResult | None:
+        """Fetch bill info from OpenStates for a specific session."""
         url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction.lower()}/{session}/{clean_bill_id}"
 
         logger.info(
             "Looking up bill info from OpenStates",
             jurisdiction=jurisdiction,
             session=session,
-            bill_identifier=bill_identifier,
+            bill_identifier=clean_bill_id,
             url=url,
         )
 
@@ -199,11 +246,11 @@ class BillVotesService:
                         "Bill not found in OpenStates",
                         jurisdiction=jurisdiction,
                         session=session,
-                        bill_identifier=bill_identifier,
+                        bill_identifier=clean_bill_id,
                     )
                     return BillInfoResult(
                         bill_id=f"{jurisdiction}-{session}-{clean_bill_id}",
-                        bill_identifier=bill_identifier,
+                        bill_identifier=clean_bill_id,
                         jurisdiction=jurisdiction.upper(),
                         title=None,
                         description=None,
@@ -251,7 +298,7 @@ class BillVotesService:
 
                 return BillInfoResult(
                     bill_id=f"{jurisdiction}-{session}-{clean_bill_id}",
-                    bill_identifier=data.get("identifier", bill_identifier),
+                    bill_identifier=data.get("identifier", clean_bill_id),
                     jurisdiction=jurisdiction.upper(),
                     title=data.get("title"),
                     description=data.get("abstract") or data.get("title"),
@@ -266,10 +313,10 @@ class BillVotesService:
                 )
 
         except httpx.TimeoutException:
-            logger.error("Timeout fetching bill info from OpenStates", bill_identifier=bill_identifier)
+            logger.error("Timeout fetching bill info from OpenStates", bill_identifier=clean_bill_id)
             return None
         except Exception as e:
-            logger.error("Error fetching bill info from OpenStates", error=str(e))
+            logger.error("Error fetching bill info from OpenStates", error=str(e), bill_identifier=clean_bill_id)
             return None
 
     def format_bill_info_document(self, result: BillInfoResult) -> str:
