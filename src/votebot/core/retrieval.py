@@ -321,6 +321,16 @@ class RetrievalService:
 
         vote_results = []
 
+        # Extract potential legislator name from query for targeted search
+        extracted_name = ""
+        if is_legislator_followup and page_context:
+            # Extract names (capitalized words that aren't common words)
+            common_words = {"how", "did", "what", "about", "the", "this", "vote", "on", "and", "senator", "rep", "representative"}
+            name_parts = [w for w in query.split() if w[0].isupper() and w.lower() not in common_words and len(w) > 1]
+            if name_parts:
+                extracted_name = " ".join(name_parts)
+                logger.info("Extracted legislator name for vote search", name=extracted_name)
+
         # For vote queries OR legislator follow-ups on bill pages, get vote data
         if is_vote_query or is_legislator_followup:
             vote_query = query
@@ -347,6 +357,21 @@ class RetrievalService:
             vote_results = [
                 r for r in vote_results if r.score >= self.config.similarity_threshold
             ]
+
+            # If we're looking for a specific legislator, prioritize chunks containing their name
+            if extracted_name and vote_results:
+                name_lower = extracted_name.lower()
+                # Separate chunks that contain the name vs those that don't
+                with_name = [r for r in vote_results if name_lower in (r.content or "").lower()]
+                without_name = [r for r in vote_results if name_lower not in (r.content or "").lower()]
+                # Prioritize chunks with the name
+                vote_results = with_name + without_name
+                logger.info(
+                    "Re-ranked vote results for legislator name",
+                    name=extracted_name,
+                    chunks_with_name=len(with_name),
+                    chunks_without_name=len(without_name),
+                )
 
             logger.info(
                 "Bill text retrieval phase 4 (votes)",
