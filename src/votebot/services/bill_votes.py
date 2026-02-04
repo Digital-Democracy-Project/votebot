@@ -836,10 +836,24 @@ class BillVotesService:
             vote_records = []
             for v in vote.get("votes", []):
                 voter_name = v.get("voter_name", "Unknown")
-                # Look up party from our legislator cache
-                party = v.get("party") or legislator_parties.get(voter_name.lower(), "")
+
+                # Extract person ID from nested voter object (OpenStates API structure)
+                voter_obj = v.get("voter", {})
+                person_id = ""
+                party = ""
+                if isinstance(voter_obj, dict):
+                    person_id = voter_obj.get("id", "")
+                    party = voter_obj.get("party", "")
+                    # Use full name from voter object if available
+                    if voter_obj.get("name"):
+                        voter_name = voter_obj.get("name")
+
+                # Fall back to legislator cache for party if not in voter object
+                if not party:
+                    party = legislator_parties.get(voter_name.lower(), "")
+
                 vote_records.append(VoteRecord(
-                    legislator_id=v.get("legislator_id", ""),
+                    legislator_id=person_id,
                     legislator_name=voter_name,
                     vote=v.get("option", "unknown"),
                     party=party,

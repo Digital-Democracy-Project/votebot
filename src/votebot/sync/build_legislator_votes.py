@@ -35,14 +35,16 @@ class ExtractedVote:
     motion: str
     result: str
     vote_option: str  # yes, no, not voting, etc.
+    openstates_bill_id: str = ""  # ocd-bill/...
 
 
 @dataclass
 class LegislatorVoteRecord:
     """Accumulated votes for a legislator."""
+    person_id: str  # OpenStates person ID (ocd-person/...)
     name: str
     party: str
-    state: str  # e.g., "FL", "TX"
+    jurisdiction: str  # e.g., "FL", "US"
     votes: list[ExtractedVote]
 
 
@@ -145,39 +147,108 @@ class LegislatorVotesBuilder:
         bill_votes_docs: list[dict]
     ) -> dict[str, LegislatorVoteRecord]:
         """
-        Parse bill-votes documents and extract votes grouped by legislator.
+        Extract votes grouped by legislator using structured vote data from metadata.
+
+        Uses the OpenStates person_id as the unique key for each legislator,
+        which is more reliable than name-based matching.
 
         Args:
-            bill_votes_docs: List of bill-votes documents with content
+            bill_votes_docs: List of bill-votes documents with metadata
 
         Returns:
-            Dict mapping legislator key to their vote record
+            Dict mapping person_id to their vote record
         """
+        import json
+
         legislator_votes: dict[str, LegislatorVoteRecord] = {}
+        docs_with_structured_data = 0
+        docs_without_structured_data = 0
 
         for doc in bill_votes_docs:
-            content = doc.get("content", "")
             metadata = doc.get("metadata", {})
 
             # Extract bill info from document
             bill_id = metadata.get("bill_id", "")
             bill_title = metadata.get("title", "")
+            jurisdiction = metadata.get("jurisdiction", "").upper()
+            openstates_bill_id = metadata.get("openstates_bill_id", "")
 
-            # Parse the content to find vote sections and extract individual votes
-            votes_extracted = self._parse_bill_votes_content(content, bill_id, bill_title)
+            # Try to use structured vote data first (preferred)
+            structured_votes_json = metadata.get("structured_votes", "")
+            if structured_votes_json:
+                try:
+                    structured_votes = json.loads(structured_votes_json)
+                    docs_with_structured_data += 1
+
+                    for vote_data in structured_votes:
+                        person_id = vote_data.get("person_id", "")
+                        if not person_id:
+                            continue
+
+                        name = vote_data.get("name", "Unknown")
+                        party = vote_data.get("party", "")
+                        option = vote_data.get("option", "").lower()
+
+                        # Create vote record
+                        vote = ExtractedVote(
+                            bill_id=bill_id,
+                            bill_title=bill_title,
+                            vote_date="",  # Not stored in structured data
+                            chamber="",  # Not stored in structured data
+                            motion="",  # Not stored in structured data
+                            result="",  # Not stored in structured data
+                            vote_option=option,
+                            openstates_bill_id=openstates_bill_id,
+                        )
+
+                        # Add to legislator record (keyed by person_id)
+                        if person_id not in legislator_votes:
+                            legislator_votes[person_id] = LegislatorVoteRecord(
+                                person_id=person_id,
+                                name=name,
+                                party=party,
+                                jurisdiction=jurisdiction,
+                                votes=[],
+                            )
+                        legislator_votes[person_id].votes.append(vote)
+
+                    continue  # Successfully processed structured data
+
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Failed to parse structured_votes JSON",
+                        doc_id=doc.get("id", ""),
+                    )
+
+            # Parse from text content (works for both new and old documents)
+            # New documents may have inline person IDs: [ocd-person/uuid]Name (Party-State)
+            docs_without_structured_data += 1
+            content = doc.get("content", "")
+            votes_extracted = self._parse_bill_votes_content(
+                content, bill_id, bill_title, jurisdiction, openstates_bill_id
+            )
 
             # Add to legislator records
-            for leg_key, vote in votes_extracted:
-                if leg_key not in legislator_votes:
-                    # Parse the key to get name, party, state
+            for leg_key, person_id, vote in votes_extracted:
+                # Use person_id as key if available, otherwise use name-based key
+                key = person_id if person_id else leg_key
+                if key not in legislator_votes:
                     name, party, state = self._parse_legislator_key(leg_key)
-                    legislator_votes[leg_key] = LegislatorVoteRecord(
+                    legislator_votes[key] = LegislatorVoteRecord(
+                        person_id=person_id,
                         name=name,
                         party=party,
-                        state=state,
+                        jurisdiction=state or jurisdiction,
                         votes=[],
                     )
-                legislator_votes[leg_key].votes.append(vote)
+                legislator_votes[key].votes.append(vote)
+
+        logger.info(
+            "Vote extraction complete",
+            docs_with_structured_data=docs_with_structured_data,
+            docs_without_structured_data=docs_without_structured_data,
+            unique_legislators=len(legislator_votes),
+        )
 
         return legislator_votes
 
@@ -186,7 +257,9 @@ class LegislatorVotesBuilder:
         content: str,
         bill_id: str,
         bill_title: str,
-    ) -> list[tuple[str, ExtractedVote]]:
+        jurisdiction: str = "",
+        openstates_bill_id: str = "",
+    ) -> list[tuple[str, str, ExtractedVote]]:
         """
         Parse a bill-votes document content to extract individual votes.
 
@@ -197,8 +270,16 @@ class LegislatorVotesBuilder:
         **Voted Yes:** Banks (R-IN), Moody (R-FL), Scott (R-FL), ...
         **Voted No:** Alsobrooks (D-MD), ...
 
+        New format with inline person IDs (for state bills):
+        **Voted Yes:** [ocd-person/uuid]Name (Party-State), ...
+
+        Args:
+            jurisdiction: Bill's jurisdiction (e.g., "US", "FL") - used to associate
+                         state legislators with their state when not in vote list
+            openstates_bill_id: OpenStates bill ID for metadata
+
         Returns:
-            List of (legislator_key, ExtractedVote) tuples
+            List of (legislator_key, person_id, ExtractedVote) tuples
         """
         results = []
 
@@ -246,8 +327,8 @@ class LegislatorVotesBuilder:
             yes_match = re.search(r'\*\*Voted Yes[^:]*:\*\*\s*(.+?)(?:\n\*\*|\n###|$)', section, re.DOTALL)
             if yes_match:
                 yes_text = yes_match.group(1)
-                legislators = self._parse_legislator_list(yes_text)
-                for leg_key in legislators:
+                legislators = self._parse_legislator_list(yes_text, jurisdiction)
+                for leg_key, person_id in legislators:
                     vote = ExtractedVote(
                         bill_id=bill_id,
                         bill_title=bill_title,
@@ -256,15 +337,16 @@ class LegislatorVotesBuilder:
                         motion=motion,
                         result=result,
                         vote_option="yes",
+                        openstates_bill_id=openstates_bill_id,
                     )
-                    results.append((leg_key, vote))
+                    results.append((leg_key, person_id, vote))
 
             # Extract voted no
             no_match = re.search(r'\*\*Voted No[^:]*:\*\*\s*(.+?)(?:\n\*\*|\n###|$)', section, re.DOTALL)
             if no_match:
                 no_text = no_match.group(1)
-                legislators = self._parse_legislator_list(no_text)
-                for leg_key in legislators:
+                legislators = self._parse_legislator_list(no_text, jurisdiction)
+                for leg_key, person_id in legislators:
                     vote = ExtractedVote(
                         bill_id=bill_id,
                         bill_title=bill_title,
@@ -273,15 +355,16 @@ class LegislatorVotesBuilder:
                         motion=motion,
                         result=result,
                         vote_option="no",
+                        openstates_bill_id=openstates_bill_id,
                     )
-                    results.append((leg_key, vote))
+                    results.append((leg_key, person_id, vote))
 
             # Extract not voting / other
             other_match = re.search(r'\*\*Not Voting[^:]*:\*\*\s*(.+?)(?:\n\*\*|\n###|$)', section, re.DOTALL)
             if other_match:
                 other_text = other_match.group(1)
-                legislators = self._parse_legislator_list(other_text)
-                for leg_key in legislators:
+                legislators = self._parse_legislator_list(other_text, jurisdiction)
+                for leg_key, person_id in legislators:
                     vote = ExtractedVote(
                         bill_id=bill_id,
                         bill_title=bill_title,
@@ -290,33 +373,140 @@ class LegislatorVotesBuilder:
                         motion=motion,
                         result=result,
                         vote_option="not voting",
+                        openstates_bill_id=openstates_bill_id,
                     )
-                    results.append((leg_key, vote))
+                    results.append((leg_key, person_id, vote))
 
         return results
 
-    def _parse_legislator_list(self, text: str) -> list[str]:
+    def _parse_legislator_list(
+        self, text: str, jurisdiction: str = ""
+    ) -> list[tuple[str, str]]:
         """
         Parse a comma-separated list of legislators.
 
-        Format: "Banks (R-IN), Moody (R-FL), Scott (R-FL), ..."
+        Handles multiple formats:
+        - New format with person IDs: "[ocd-person/uuid]Name (Party-State), ..."
+        - US Senate: "Banks (R-IN), Moody (R-FL), Scott (R-FL), ..."
+        - US House: "Adams, Bean (FL), Amodei (NV), ..."
+        - State legislatures: "Luke E. Torian, Robert S. Bloxom, Jr., ..."
+
+        Args:
+            text: The comma-separated list of legislators
+            jurisdiction: Bill's jurisdiction (e.g., "US", "FL") - used to associate
+                         state legislators with their state when not in vote list
 
         Returns:
-            List of legislator keys like "Banks|R|IN"
+            List of (leg_key, person_id) tuples. person_id is empty string if not present.
+            leg_key format: "Banks|R|IN" or "Torian||VA" (state from jurisdiction)
         """
-        legislators = []
+        legislators: list[tuple[str, str]] = []
 
-        # Pattern: Name (Party-State)
-        pattern = r'([A-Za-z\'\-\.\s]+?)\s*\(([RDI])-([A-Z]{2})\)'
+        # First check for new format with inline person IDs: [ocd-person/uuid]Name (Party-State)
+        # Pattern matches: [ocd-person/uuid]Name (Party-State) or [ocd-person/uuid]Name
+        person_id_pattern = r'\[([^\]]+)\]([A-Za-z\'\-\.\s]+?)(?:\s*\(([RDI])-([A-Z]{2})\))?(?=,|\s*$|\.\.\.)'
+        person_id_matches = list(re.finditer(person_id_pattern, text))
 
-        for match in re.finditer(pattern, text):
-            name = match.group(1).strip()
-            party = match.group(2)
-            state = match.group(3)
+        if person_id_matches:
+            for match in person_id_matches:
+                person_id = match.group(1)  # ocd-person/uuid
+                name = match.group(2).strip()
+                party = match.group(3) or ""  # R, D, I
+                state = match.group(4) or ""  # State code
 
-            # Create a unique key
-            leg_key = f"{name}|{party}|{state}"
-            legislators.append(leg_key)
+                # Use jurisdiction as fallback for state
+                if not state and jurisdiction and jurisdiction.upper() not in ["US", "UNITED STATES"]:
+                    state = jurisdiction.upper()
+
+                leg_key = f"{name}|{party}|{state}"
+                legislators.append((leg_key, person_id))
+            return legislators
+
+        # Try US Senate format: Name (Party-State)
+        senate_pattern = r'([A-Za-z\'\-\.\s]+?)\s*\(([RDI])-([A-Z]{2})\)'
+        senate_matches = list(re.finditer(senate_pattern, text))
+
+        if senate_matches:
+            for match in senate_matches:
+                name = match.group(1).strip()
+                party = match.group(2)
+                state = match.group(3)
+                leg_key = f"{name}|{party}|{state}"
+                legislators.append((leg_key, ""))  # No person_id available
+            return legislators
+
+        # For state-level bills (FL, VA, etc.), use jurisdiction as default state
+        # For US bills, leave state empty (we can't know which state House members represent)
+        default_state = ""
+        if jurisdiction and jurisdiction.upper() not in ["US", "UNITED STATES"]:
+            default_state = jurisdiction.upper()
+
+        # Handle patterns like "...and 170 others" at the end
+        text = re.sub(r'\.\.\.and \d+ others', '', text)
+
+        # Check if this looks like full names (state legislature format)
+        # State legislatures often use full names with middle initials
+        has_full_names = bool(re.search(r'[A-Z][a-z]+\s+[A-Z]\.\s+[A-Z][a-z]+', text))
+
+        if has_full_names:
+            # State legislature format with full names
+            # Handle "Jr.", "Sr.", "III" suffixes - temporarily replace comma before suffix
+            text = re.sub(r',\s*(Jr\.|Sr\.|III|IV|II)\b', r' \1', text)
+
+            # Split by comma
+            entries = text.split(',')
+            for entry in entries:
+                entry = entry.strip()
+                if not entry or len(entry) < 2:
+                    continue
+
+                # Skip junk entries
+                if entry.lower() in ['and', 'others', 'voted', 'yes', 'no']:
+                    continue
+
+                # Extract the last name (usually last word after removing suffixes)
+                # For "Luke E. Torian" -> "Torian"
+                # For "Robert S. Bloxom Jr." -> "Bloxom"
+                name_parts = entry.split()
+                if not name_parts:
+                    continue
+
+                # Remove suffixes and find last name
+                suffixes = {'jr.', 'jr', 'sr.', 'sr', 'ii', 'iii', 'iv'}
+                name_parts = [p for p in name_parts if p.lower() not in suffixes]
+
+                if not name_parts:
+                    continue
+
+                # Last name is typically the last part after removing suffixes
+                # But handle "Buddy" nicknames in quotes
+                last_name = name_parts[-1].strip('"').strip("'")
+
+                if last_name and len(last_name) > 1 and last_name[0].isupper():
+                    leg_key = f"{last_name}||{default_state}"
+                    legislators.append((leg_key, ""))  # No person_id available
+        else:
+            # US House/simple format: short names, optionally with (State)
+            entries = text.split(',')
+            for entry in entries:
+                entry = entry.strip()
+                if not entry or len(entry) < 2:
+                    continue
+
+                # Check if it has state: "Bean (FL)"
+                state_match = re.match(r'([A-Za-z\'\-\.]+)\s*\(([A-Z]{2})\)', entry)
+                if state_match:
+                    name = state_match.group(1).strip()
+                    state = state_match.group(2)
+                    leg_key = f"{name}||{state}"
+                    if name and len(name) > 1:
+                        legislators.append((leg_key, ""))  # No person_id available
+                else:
+                    # Just a name
+                    name = re.sub(r'[^A-Za-z\'\-\.\s]', '', entry).strip()
+                    if name and len(name) > 1:
+                        leg_key = f"{name}||{default_state}"
+                        legislators.append((leg_key, ""))  # No person_id available
 
         return legislators
 
@@ -335,7 +525,7 @@ class LegislatorVotesBuilder:
         Create legislator-votes documents in Pinecone.
 
         Args:
-            legislator_votes: Dict of legislator records
+            legislator_votes: Dict mapping person_id (or legacy key) to LegislatorVoteRecord
 
         Returns:
             Stats about created documents
@@ -351,27 +541,46 @@ class LegislatorVotesBuilder:
                 content = self._format_legislator_votes_document(record)
 
                 # Create document ID
-                # Use name and state to create a somewhat stable ID
-                safe_name = re.sub(r'[^a-zA-Z0-9]', '-', record.name.lower())
-                doc_id = f"legislator-votes-{safe_name}-{record.state.lower()}"
+                # Prefer person_id (ocd-person/...) for stable, unique IDs
+                if record.person_id and record.person_id.startswith("ocd-person/"):
+                    # Extract the UUID part from ocd-person/uuid
+                    person_uuid = record.person_id.replace("ocd-person/", "")
+                    doc_id = f"legislator-votes-{person_uuid}"
+                else:
+                    # Fall back to name-based ID for legacy data
+                    safe_name = re.sub(r'[^a-zA-Z0-9]', '-', record.name.lower())
+                    jurisdiction_part = record.jurisdiction.lower() if record.jurisdiction else "unknown"
+                    doc_id = f"legislator-votes-{safe_name}-{jurisdiction_part}"
 
-                # Create metadata
+                # Normalize party
                 party_full = {
                     "R": "Republican",
                     "D": "Democratic",
                     "I": "Independent",
-                }.get(record.party, record.party)
+                    "Republican": "Republican",
+                    "Democratic": "Democratic",
+                    "Independent": "Independent",
+                }.get(record.party, record.party) if record.party else ""
+
+                # Build title based on available info
+                if party_full and record.jurisdiction:
+                    title = f"{record.name} ({party_full}-{record.jurisdiction}) - Voting Record"
+                elif record.jurisdiction:
+                    title = f"{record.name} ({record.jurisdiction}) - Voting Record"
+                else:
+                    title = f"{record.name} - Voting Record"
 
                 metadata = DocumentMetadata(
                     document_id=doc_id,
                     document_type="legislator-votes",
                     source="Digital Democracy Project",
-                    title=f"{record.name} ({party_full}-{record.state}) - Voting Record",
-                    jurisdiction=record.state if record.state != "US" else "US",
+                    title=title,
+                    jurisdiction=record.jurisdiction if record.jurisdiction else "US",
                     extra={
+                        "openstates_person_id": record.person_id,
                         "legislator_name": record.name,
                         "party": party_full,
-                        "state": record.state,
+                        "jurisdiction": record.jurisdiction or "",
                         "total_votes": len(record.votes),
                         "yes_votes": len([v for v in record.votes if v.vote_option == "yes"]),
                         "no_votes": len([v for v in record.votes if v.vote_option == "no"]),
@@ -428,12 +637,19 @@ class LegislatorVotesBuilder:
             "R": "Republican",
             "D": "Democratic",
             "I": "Independent",
-        }.get(record.party, record.party)
+            "Republican": "Republican",
+            "Democratic": "Democratic",
+            "Independent": "Independent",
+        }.get(record.party, record.party) if record.party else ""
 
         parts = []
         parts.append(f"# {record.name} - Voting Record")
-        parts.append(f"**Party:** {party_full}")
-        parts.append(f"**State:** {record.state}")
+        if record.person_id:
+            parts.append(f"**OpenStates ID:** {record.person_id}")
+        if party_full:
+            parts.append(f"**Party:** {party_full}")
+        if record.jurisdiction:
+            parts.append(f"**Jurisdiction:** {record.jurisdiction}")
         parts.append("")
 
         # Summary stats

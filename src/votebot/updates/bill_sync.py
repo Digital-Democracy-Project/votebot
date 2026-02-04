@@ -133,6 +133,16 @@ class BillSyncService:
         self._jurisdiction_cache: dict[str, JurisdictionInfo] = {}
         # OpenStates source for jurisdiction lookups
         self._openstates_source = OpenStatesSource(self.settings)
+        # Federal legislator cache for looking up person IDs by name (lazy loaded)
+        self.__federal_cache = None
+
+    @property
+    def _federal_cache(self):
+        """Lazily load the federal legislator cache to avoid circular imports."""
+        if self.__federal_cache is None:
+            from votebot.sync.federal_legislator_cache import get_federal_cache
+            self.__federal_cache = get_federal_cache()
+        return self.__federal_cache
 
     def _load_rate_limit_config(self) -> RateLimitConfig:
         """Load rate limit configuration from YAML file."""
@@ -614,11 +624,19 @@ class BillSyncService:
 
                     for v in individual_votes:
                         option = v.get("option", "").lower()
-                        legislator_id = v.get("legislator_id", "")
                         voter_name = v.get("voter_name", "Unknown")
 
+                        # Extract person ID from nested voter object (OpenStates API structure)
+                        voter_obj = v.get("voter", {})
+                        person_id = ""
+                        if isinstance(voter_obj, dict):
+                            person_id = voter_obj.get("id", "")
+                            # Use full name from voter object if available
+                            if voter_obj.get("name"):
+                                voter_name = voter_obj.get("name")
+
                         # Format with DDP link if available
-                        formatted = self._format_voter_with_link(legislator_id, voter_name)
+                        formatted = self._format_voter_with_link(person_id, voter_name)
 
                         if option == "yes":
                             yes_voters.append(formatted)
@@ -646,7 +664,7 @@ class BillSyncService:
         self,
         bill_data: dict[str, Any],
         ddp_url: str | None = None,
-    ) -> str | None:
+    ) -> tuple[str, dict[str, Any]] | None:
         """
         Format bill votes into a dedicated text chunk for RAG.
 
@@ -658,19 +676,26 @@ class BillSyncService:
             ddp_url: Optional DDP URL for the bill page
 
         Returns:
-            Formatted text chunk, or None if no votes
+            Tuple of (formatted text chunk, voter_ids dict) or None if no votes
+            The voter_ids dict maps person IDs to voter info for metadata storage
         """
         votes = bill_data.get("votes", [])
         if not votes:
             return None
 
         parts = []
+        # Track all voter person IDs for metadata
+        all_voter_ids: dict[str, dict[str, str]] = {}
+        # Track organization IDs from vote events
+        organization_ids: list[str] = []
 
         # Header
         identifier = bill_data.get("identifier", "Unknown")
         title = bill_data.get("title", "Unknown Bill")
+        openstates_bill_id = bill_data.get("id", "")
         jurisdiction = bill_data.get("jurisdiction", {})
         jurisdiction_name = jurisdiction.get("name", "Unknown") if isinstance(jurisdiction, dict) else str(jurisdiction)
+        jurisdiction_id = jurisdiction.get("id", "") if isinstance(jurisdiction, dict) else ""
 
         if ddp_url:
             parts.append(f"## Voting Record: [{identifier}]({ddp_url})")
@@ -685,9 +710,14 @@ class BillSyncService:
             motion = vote.get("motion_text", "Vote")
             result = vote.get("result", "Unknown")
             vote_date = vote.get("start_date", "Unknown date")
+            vote_event_id = vote.get("id", "")
             org = vote.get("organization", {})
             org_name = org.get("name", "Unknown") if isinstance(org, dict) else "Unknown"
+            org_id = org.get("id", "") if isinstance(org, dict) else ""
             chamber = org.get("classification", "") if isinstance(org, dict) else ""
+
+            if org_id and org_id not in organization_ids:
+                organization_ids.append(org_id)
 
             # Count votes
             counts = vote.get("counts", [])
@@ -712,41 +742,120 @@ class BillSyncService:
                 no_voters = []
                 other_voters: dict[str, list[str]] = {}
 
+                # Check if this is a federal bill (for cache lookup)
+                is_federal = jurisdiction_name.lower() in ("us", "united states")
+
                 for v in individual_votes:
                     option = v.get("option", "").lower()
-                    legislator_id = v.get("legislator_id", "")
                     voter_name = v.get("voter_name", "Unknown")
 
+                    # Extract person ID from nested voter object (OpenStates API structure)
+                    voter_obj = v.get("voter", {})
+                    person_id = ""
+                    party = ""
+                    if isinstance(voter_obj, dict):
+                        person_id = voter_obj.get("id", "")
+                        party = voter_obj.get("party", "")
+                        # Use full name from voter object if available
+                        if voter_obj.get("name"):
+                            voter_name = voter_obj.get("name")
+
+                    # For federal bills without person_id, look up from cache
+                    if not person_id and is_federal:
+                        cached_info = self._federal_cache.lookup_with_info(voter_name)
+                        if cached_info:
+                            person_id = cached_info.get("person_id", "")
+                            # Use cached party if not available from vote
+                            if not party:
+                                party = cached_info.get("party", "")
+
+                    # Track voter for metadata (keyed by person_id)
+                    if person_id:
+                        all_voter_ids[person_id] = {
+                            "name": voter_name,
+                            "party": party,
+                            "option": option,
+                        }
+
                     # Format with DDP link if available
-                    formatted = self._format_voter_with_link(legislator_id, voter_name)
+                    formatted = self._format_voter_with_link(person_id, voter_name)
+
+                    # Include party abbreviation for better parsing by reverse index
+                    party_abbrev = ""
+                    if party:
+                        party_abbrev = {"Democratic": "D", "Republican": "R", "Independent": "I"}.get(party, party[0] if party else "")
+
+                    # Build formatted name with available info
+                    # Include person ID inline for reverse index (both state and federal)
+                    if person_id and person_id.startswith("ocd-person/"):
+                        # Has person ID - include ID in format: [id]Name (Party-State)
+                        if party_abbrev:
+                            # For federal bills, get state from cache; for state bills, use jurisdiction
+                            if is_federal:
+                                cached_info = self._federal_cache.lookup_with_info(voter_name)
+                                state_code = cached_info.get("state", "") if cached_info else ""
+                            else:
+                                state_code = jurisdiction_name.upper()[:2] if len(jurisdiction_name) >= 2 else ""
+                            if state_code and state_code.isalpha():
+                                formatted_with_party = f"[{person_id}]{voter_name} ({party_abbrev}-{state_code})"
+                            else:
+                                formatted_with_party = f"[{person_id}]{voter_name} ({party_abbrev})"
+                        else:
+                            formatted_with_party = f"[{person_id}]{voter_name}"
+                    elif party_abbrev:
+                        # No person_id - use Name (Party-State) format
+                        state_code = jurisdiction_name.upper()[:2] if len(jurisdiction_name) >= 2 else ""
+                        if state_code and state_code.isalpha():
+                            formatted_with_party = f"{voter_name} ({party_abbrev}-{state_code})"
+                        else:
+                            formatted_with_party = f"{voter_name} ({party_abbrev})"
+                    else:
+                        formatted_with_party = formatted
 
                     if option == "yes":
-                        yes_voters.append(formatted)
+                        yes_voters.append(formatted_with_party)
                     elif option == "no":
-                        no_voters.append(formatted)
+                        no_voters.append(formatted_with_party)
                     else:
                         if option not in other_voters:
                             other_voters[option] = []
-                        other_voters[option].append(formatted)
+                        other_voters[option].append(formatted_with_party)
 
                 # List all voters (increased limits for vote-specific document)
                 if yes_voters:
-                    parts.append(f"**Voted Yes ({len(yes_voters)}):** {', '.join(yes_voters[:50])}")
-                    if len(yes_voters) > 50:
-                        parts.append(f"  ...and {len(yes_voters) - 50} others")
+                    parts.append(f"**Voted Yes ({len(yes_voters)}):** {', '.join(yes_voters[:100])}")
+                    if len(yes_voters) > 100:
+                        parts.append(f"  ...and {len(yes_voters) - 100} others")
 
                 if no_voters:
-                    parts.append(f"**Voted No ({len(no_voters)}):** {', '.join(no_voters[:50])}")
-                    if len(no_voters) > 50:
-                        parts.append(f"  ...and {len(no_voters) - 50} others")
+                    parts.append(f"**Voted No ({len(no_voters)}):** {', '.join(no_voters[:100])}")
+                    if len(no_voters) > 100:
+                        parts.append(f"  ...and {len(no_voters) - 100} others")
 
                 for option, voters in other_voters.items():
                     display_option = option.replace("_", " ").title()
-                    parts.append(f"**{display_option} ({len(voters)}):** {', '.join(voters[:20])}")
-                    if len(voters) > 20:
-                        parts.append(f"  ...and {len(voters) - 20} others")
+                    parts.append(f"**{display_option} ({len(voters)}):** {', '.join(voters[:50])}")
+                    if len(voters) > 50:
+                        parts.append(f"  ...and {len(voters) - 50} others")
 
-        return "\n".join(parts)
+        # Build metadata for OpenStates IDs
+        # Count voters with and without person IDs
+        voters_with_ids = [pid for pid in all_voter_ids.keys() if pid.startswith("ocd-person/")]
+        voters_without_ids = [pid for pid in all_voter_ids.keys() if not pid.startswith("ocd-person/")]
+
+        ids_metadata = {
+            "openstates_bill_id": openstates_bill_id,
+            "openstates_jurisdiction_id": jurisdiction_id,
+            "openstates_organization_ids": organization_ids,
+            "voter_count": len(all_voter_ids),
+            "voters_with_person_ids": len(voters_with_ids),
+            "voters_without_person_ids": len(voters_without_ids),
+            # Store person IDs separately (limited to avoid metadata size issues)
+            # These are only available for state bills, not federal
+            "voter_person_ids": voters_with_ids[:200] if voters_with_ids else [],
+        }
+
+        return "\n".join(parts), ids_metadata
 
     def extract_metadata_from_openstates(
         self,
@@ -870,8 +979,9 @@ class BillSyncService:
             total_chunks += result.chunks_created
 
             # Also create a dedicated votes document if votes exist
-            votes_chunk = self.format_bill_votes_chunk(bill_data, ddp_url=ddp_url)
-            if votes_chunk:
+            votes_result_data = self.format_bill_votes_chunk(bill_data, ddp_url=ddp_url)
+            if votes_result_data:
+                votes_chunk, votes_ids_metadata = votes_result_data
                 votes_metadata = DocumentMetadata(
                     document_id=f"bill-votes-{webflow_bill_id}",
                     document_type="bill-votes",
@@ -883,6 +993,12 @@ class BillSyncService:
                     extra={
                         **extra_metadata,
                         "vote_count": len(bill_data.get("votes", [])),
+                        # Include OpenStates IDs for linking
+                        "openstates_bill_id": votes_ids_metadata.get("openstates_bill_id", ""),
+                        "openstates_jurisdiction_id": votes_ids_metadata.get("openstates_jurisdiction_id", ""),
+                        "openstates_organization_ids": votes_ids_metadata.get("openstates_organization_ids", []),
+                        "voter_count": votes_ids_metadata.get("voter_count", 0),
+                        "voter_person_ids": votes_ids_metadata.get("voter_person_ids", []),
                     },
                 )
                 votes_result = await self.pipeline.ingest_document(
@@ -895,6 +1011,7 @@ class BillSyncService:
                     "Bill votes document created",
                     webflow_bill_id=webflow_bill_id,
                     vote_chunks=votes_result.chunks_created,
+                    voter_count=votes_ids_metadata.get("voter_count", 0),
                 )
 
             return BillSyncResult(

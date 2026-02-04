@@ -90,7 +90,9 @@ class SyncOptions:
 
     # Legislator voting record options
     # Creates legislator-votes documents with each legislator's voting history
-    include_votes: bool = True  # Sync voting records (set to match sync_schedule.yaml)
+    # NOTE: Set to False by default - use build_legislator_votes.py reverse index instead
+    # The reverse index extracts votes from bill-votes documents without API calls
+    include_votes: bool = False
     vote_session: str | None = None  # Optional session filter (null = current session)
     max_vote_bills: int = 200  # Max bills to check for votes per legislator
 

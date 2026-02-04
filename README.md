@@ -399,6 +399,62 @@ The bill info tool returns:
   - Party breakdown (Democratic/Republican counts)
   - Individual legislator names grouped by party and vote
 
+## Legislator Voting Records
+
+VoteBot maintains a reverse index of legislator voting records, enabling queries like "How did Ashley Moody vote on HR 1?" to find answers directly in the legislator's voting record document.
+
+### Architecture
+
+1. **Bill-Votes Documents**: When bills are synced with `include_openstates=True`, vote records are extracted and stored with inline OpenStates person IDs in the format `[ocd-person/uuid]Name (Party-State)`
+
+2. **Federal Legislator Cache**: A local cache of US Congress members' OpenStates person IDs, used to match federal legislators (who don't have person IDs in vote records) to their stable IDs
+
+3. **Legislator-Votes Documents**: A reverse index built from bill-votes documents, creating per-legislator voting record documents keyed by OpenStates person ID
+
+### CLI Commands
+
+```bash
+# Refresh the federal legislator cache (538 members of Congress)
+python -m votebot.sync.federal_legislator_cache
+
+# Show cached legislators
+python -m votebot.sync.federal_legislator_cache --show
+
+# Build legislator-votes documents from bill-votes (reverse index)
+python -m votebot.sync.build_legislator_votes
+
+# Dry run to see stats without writing
+python -m votebot.sync.build_legislator_votes --dry-run
+```
+
+### Sync Workflow
+
+For complete legislator voting records:
+
+```bash
+# 1. Refresh federal legislator cache (periodic - legislators don't change often)
+python -m votebot.sync.federal_legislator_cache
+
+# 2. Sync bills with OpenStates data (injects person IDs into vote content)
+python -m votebot.updates.bill_sync batch --jurisdiction us --include-openstates
+python -m votebot.updates.bill_sync batch --jurisdiction fl --include-openstates
+
+# 3. Build reverse index for legislator-votes documents
+python -m votebot.sync.build_legislator_votes
+```
+
+### Document Types
+
+| Document Type | Description | ID Format |
+|--------------|-------------|-----------|
+| `bill-votes` | Per-bill vote records with all legislators | `bill-votes-{webflow_id}` |
+| `legislator-votes` | Per-legislator voting history | `legislator-votes-{person_uuid}` |
+
+### OpenStates Person ID Coverage
+
+- **State bills**: ~100% coverage (person IDs from OpenStates API)
+- **Federal bills**: ~68% coverage (matched via federal legislator cache)
+
 ## Data Ingestion
 
 VoteBot uses a unified sync service for all content types. The primary data sources are:
@@ -512,6 +568,8 @@ votebot/
 │   ├── sync/                # Unified sync service
 │   │   ├── service.py       # UnifiedSyncService
 │   │   ├── types.py         # ContentType, SyncMode, etc.
+│   │   ├── build_legislator_votes.py  # Reverse index builder
+│   │   ├── federal_legislator_cache.py  # Federal legislator ID cache
 │   │   └── handlers/        # Content-specific handlers
 │   │       ├── bill.py      # Bill sync (Webflow + OpenStates + PDFs)
 │   │       ├── legislator.py    # Legislator sync
