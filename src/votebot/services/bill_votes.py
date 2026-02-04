@@ -194,6 +194,15 @@ class BillVotesService:
         bill_identifier: str,
     ) -> BillVotesResult | None:
         """Fetch bill and votes from OpenStates API."""
+        # OpenStates only covers state legislatures, not federal
+        if jurisdiction.lower() in ("us", "usa", "federal"):
+            logger.info(
+                "Federal bill detected - OpenStates does not cover Congress",
+                bill_identifier=bill_identifier,
+            )
+            # Try Congress.gov for federal bills
+            return await self._fetch_from_congress_gov(session, bill_identifier)
+
         clean_bill_id = bill_identifier.replace(" ", "")
         url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction}/{session}/{clean_bill_id}"
 
@@ -237,6 +246,215 @@ class BillVotesService:
             return None
         except Exception as e:
             logger.error("Error fetching from OpenStates", error=str(e))
+            return None
+
+    async def _fetch_from_congress_gov(
+        self,
+        session: str,
+        bill_identifier: str,
+    ) -> BillVotesResult | None:
+        """Fetch bill and votes from Congress.gov API."""
+        # Parse bill type and number from identifier (e.g., "HR1", "S 123", "HJRES45")
+        match = re.match(r"([A-Z]+)\s*(\d+)", bill_identifier.upper())
+        if not match:
+            logger.warning("Could not parse federal bill identifier", bill_identifier=bill_identifier)
+            return None
+
+        bill_type_raw = match.group(1)
+        bill_number = match.group(2)
+
+        # Map common bill type abbreviations to Congress.gov format
+        type_map = {
+            "HR": "hr",
+            "H": "hr",
+            "S": "s",
+            "HRES": "hres",
+            "SRES": "sres",
+            "HJRES": "hjres",
+            "SJRES": "sjres",
+            "HCONRES": "hconres",
+            "SCONRES": "sconres",
+        }
+        bill_type = type_map.get(bill_type_raw, bill_type_raw.lower())
+
+        # Determine Congress number from session (e.g., "2025" -> 119th Congress)
+        try:
+            year = int(session)
+            congress = ((year - 1789) // 2) + 1
+        except ValueError:
+            # Maybe session is already congress number
+            try:
+                congress = int(session)
+            except ValueError:
+                congress = 119  # Default to current Congress
+
+        api_key = self.settings.congress_api_key.get_secret_value() if self.settings.congress_api_key else ""
+
+        # First, get the bill details
+        bill_url = f"https://api.congress.gov/v3/bill/{congress}/{bill_type}/{bill_number}"
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                params = {"api_key": api_key, "format": "json"}
+
+                # Get bill info
+                response = await client.get(bill_url, params=params)
+                if response.status_code == 404:
+                    logger.warning(
+                        "Bill not found in Congress.gov",
+                        congress=congress,
+                        bill_type=bill_type,
+                        bill_number=bill_number,
+                    )
+                    return None
+
+                response.raise_for_status()
+                bill_data = response.json().get("bill", {})
+
+                title = bill_data.get("title", "")
+                bill_id = f"{bill_type.upper()}{bill_number}"
+
+                # Get actions which may include roll call votes
+                actions_url = f"{bill_url}/actions"
+                actions_response = await client.get(actions_url, params=params)
+                actions_data = actions_response.json() if actions_response.status_code == 200 else {}
+
+                # Parse votes from actions
+                votes = await self._parse_congress_votes(
+                    actions_data.get("actions", []),
+                    congress,
+                    client,
+                    params,
+                )
+
+                logger.info(
+                    "Congress.gov bill lookup complete",
+                    bill_id=bill_id,
+                    title=title[:50] if title else None,
+                    vote_count=len(votes),
+                )
+
+                return BillVotesResult(
+                    bill_id=f"us-{congress}-{bill_id}",
+                    bill_identifier=bill_id,
+                    jurisdiction="US",
+                    title=title,
+                    votes=votes,
+                    cached=False,
+                    openstates_id=None,
+                )
+
+        except httpx.TimeoutException:
+            logger.error("Timeout fetching from Congress.gov", bill_identifier=bill_identifier)
+            return None
+        except Exception as e:
+            logger.error("Error fetching from Congress.gov", error=str(e))
+            return None
+
+    async def _parse_congress_votes(
+        self,
+        actions: list,
+        congress: int,
+        client: httpx.AsyncClient,
+        params: dict,
+    ) -> list[BillVote]:
+        """Parse votes from Congress.gov bill actions."""
+        votes = []
+
+        for action in actions:
+            # Look for roll call vote references in action text
+            action_text = action.get("text", "")
+            recorded_votes = action.get("recordedVotes", [])
+
+            for rv in recorded_votes:
+                chamber = rv.get("chamber", "").lower()
+                roll_num = rv.get("rollNumber")
+                date = rv.get("date", action.get("actionDate", ""))
+                url = rv.get("url", "")
+
+                # Try to fetch detailed roll call vote
+                vote_details = await self._fetch_roll_call_vote(
+                    congress, chamber, roll_num, client, params
+                )
+
+                if vote_details:
+                    votes.append(vote_details)
+                else:
+                    # Fallback to basic info from action
+                    votes.append(BillVote(
+                        vote_id=f"{chamber}-{congress}-{roll_num}" if roll_num else "",
+                        motion_text=action_text[:200] if action_text else "Roll Call Vote",
+                        result="recorded",
+                        date=date,
+                        chamber=chamber,
+                        yes_count=0,
+                        no_count=0,
+                        other_count=0,
+                        votes=[],
+                    ))
+
+        return votes
+
+    async def _fetch_roll_call_vote(
+        self,
+        congress: int,
+        chamber: str,
+        roll_number: int | None,
+        client: httpx.AsyncClient,
+        params: dict,
+    ) -> BillVote | None:
+        """Fetch detailed roll call vote from Congress.gov."""
+        if not roll_number:
+            return None
+
+        # Map chamber names
+        chamber_map = {"house": "house", "senate": "senate", "h": "house", "s": "senate"}
+        chamber_normalized = chamber_map.get(chamber.lower(), chamber.lower())
+
+        try:
+            url = f"https://api.congress.gov/v3/{chamber_normalized}/vote/{congress}/{roll_number}"
+            response = await client.get(url, params=params)
+
+            if response.status_code != 200:
+                return None
+
+            data = response.json().get("vote", {})
+
+            # Parse vote counts
+            yes_count = data.get("yeas", 0) or data.get("yea", {}).get("total", 0)
+            no_count = data.get("nays", 0) or data.get("nay", {}).get("total", 0)
+            other_count = (
+                data.get("present", 0) +
+                data.get("notVoting", 0)
+            )
+
+            # Parse individual votes if available
+            vote_records = []
+            for position in ["yea", "nay", "present", "notVoting"]:
+                pos_data = data.get(position, {})
+                members = pos_data.get("members", []) if isinstance(pos_data, dict) else []
+                for member in members:
+                    vote_records.append(VoteRecord(
+                        legislator_id=member.get("bioguideId", ""),
+                        legislator_name=f"{member.get('firstName', '')} {member.get('lastName', '')}".strip(),
+                        vote=position.lower().replace("notvoting", "not_voting"),
+                        party=member.get("party"),
+                    ))
+
+            return BillVote(
+                vote_id=f"{chamber_normalized}-{congress}-{roll_number}",
+                motion_text=data.get("question", "Roll Call Vote"),
+                result="passed" if data.get("result", "").lower() in ["passed", "agreed to"] else "failed",
+                date=data.get("date", ""),
+                chamber=chamber_normalized,
+                yes_count=yes_count,
+                no_count=no_count,
+                other_count=other_count,
+                votes=vote_records,
+            )
+
+        except Exception as e:
+            logger.warning("Error fetching roll call vote", error=str(e))
             return None
 
     def _parse_votes(self, votes_data: list) -> list[BillVote]:

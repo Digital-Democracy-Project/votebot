@@ -107,10 +107,11 @@ class LLMService:
                 "type": "function",
                 "name": "get_bill_votes",
                 "description": (
-                    "Retrieve voting records for a specific bill from OpenStates. "
-                    "Use this when asked about how legislators voted on a bill, vote counts, "
-                    "or who supported/opposed a bill. Only use if the vote information is not "
-                    "already in the provided context."
+                    "Retrieve voting records for a specific bill. Supports both state bills (via OpenStates) "
+                    "and federal bills (via Congress.gov). ALWAYS use this tool when the user asks about: "
+                    "how a legislator voted, vote counts, roll call votes, who supported/opposed a bill, "
+                    "or if a bill passed/failed. Use this even if general bill information is in the context, "
+                    "as detailed voting records require a separate lookup."
                 ),
                 "parameters": {
                     "type": "object",
