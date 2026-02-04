@@ -291,8 +291,53 @@ class RetrievalService:
                 history_query_preview=history_query[:50],
             )
 
-        # Combine results: legislative text first, then summaries, then history
-        combined = text_results + summary_results + history_results
+        # Phase 4: Get vote records if query is about voting
+        vote_keywords = ["vote", "voted", "voting", "votes", "who supported", "who opposed", "pass", "passed", "fail", "failed"]
+        query_lower = query.lower()
+        is_vote_query = any(kw in query_lower for kw in vote_keywords)
+
+        vote_results = []
+
+        # For vote queries, ALWAYS try to get vote data (at least 5 chunks)
+        if is_vote_query:
+            vote_query = query
+            if page_context:
+                bill_id = page_context.id or ""
+                bill_title = page_context.title or ""
+                if bill_id or bill_title:
+                    vote_query = f"{bill_id} {bill_title} vote voting record".strip()
+
+            vote_filters = {"document_type": "bill-votes"}
+            # Apply filters to get the correct bill's votes
+            if filters.get("webflow_id"):
+                vote_filters["webflow_id"] = filters["webflow_id"]
+            elif filters.get("slug"):
+                vote_filters["slug"] = filters["slug"]
+
+            # Always request at least 5 vote chunks for vote queries
+            vote_top_k = max(5, max_chunks)
+            vote_results = await self.vector_store.query(
+                query=vote_query,
+                top_k=vote_top_k,
+                filter=vote_filters,
+            )
+            vote_results = [
+                r for r in vote_results if r.score >= self.config.similarity_threshold
+            ]
+
+            logger.info(
+                "Bill text retrieval phase 4 (votes)",
+                vote_chunks_found=len(vote_results),
+                vote_query_preview=vote_query[:50],
+            )
+
+        # Combine results based on query type
+        if is_vote_query and vote_results:
+            # For vote queries, prioritize vote data
+            combined = vote_results + text_results + summary_results + history_results
+        else:
+            # Default: legislative text first, then summaries, then history, then votes
+            combined = text_results + summary_results + history_results + vote_results
 
         # Deduplicate
         if self.config.deduplicate:
