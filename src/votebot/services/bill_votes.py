@@ -193,18 +193,12 @@ class BillVotesService:
         session: str,
         bill_identifier: str,
     ) -> BillVotesResult | None:
-        """Fetch bill and votes from OpenStates API."""
-        # OpenStates only covers state legislatures, not federal
-        if jurisdiction.lower() in ("us", "usa", "federal"):
-            logger.info(
-                "Federal bill detected - OpenStates does not cover Congress",
-                bill_identifier=bill_identifier,
-            )
-            # Try Congress.gov for federal bills
-            return await self._fetch_from_congress_gov(session, bill_identifier)
-
+        """Fetch bill and votes from OpenStates API (supports state and federal bills)."""
         clean_bill_id = bill_identifier.replace(" ", "")
-        url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction}/{session}/{clean_bill_id}"
+
+        # OpenStates now supports federal bills (after Plural Policy acquisition)
+        # Federal jurisdiction uses 'us' and Congress number as session (e.g., '119')
+        url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction.lower()}/{session}/{clean_bill_id}"
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:

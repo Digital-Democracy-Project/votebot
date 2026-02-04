@@ -331,11 +331,12 @@ class LLMService:
         if max_tokens:
             params["max_output_tokens"] = max_tokens
 
-        logger.debug(
+        logger.info(
             "Calling OpenAI Responses API",
             model=self.model,
             web_search_enabled=enable_web_search,
             bill_votes_enabled=enable_bill_votes,
+            tools_count=len(tools) if tools else 0,
             has_previous_response=previous_response_id is not None,
         )
 
@@ -358,7 +359,18 @@ class LLMService:
 
             if not function_calls:
                 # No function calls, we're done
+                logger.info(
+                    "No function calls in response",
+                    iteration=iteration,
+                    bill_votes_enabled=enable_bill_votes,
+                )
                 break
+
+            logger.info(
+                "Function calls detected",
+                iteration=iteration,
+                call_names=[fc["name"] for fc in function_calls],
+            )
 
             # Process function calls
             function_results = []

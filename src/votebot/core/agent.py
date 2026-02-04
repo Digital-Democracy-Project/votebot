@@ -617,6 +617,10 @@ class VoteBotAgent:
         is_vote_query = any(keyword in message_lower for keyword in vote_keywords)
 
         if not is_vote_query:
+            logger.debug(
+                "Bill votes tool not enabled - not a vote query",
+                message_preview=message[:50],
+            )
             return False
 
         # Enable tool if RAG confidence is low (vote info may not be in context)
