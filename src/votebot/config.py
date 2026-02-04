@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     web_search_organization_confidence_threshold: float = 0.7
     tavily_api_key: SecretStr = Field(default=SecretStr(""))
 
+    # Bill Votes Tool (real-time OpenStates lookup for bills not in RAG)
+    bill_votes_tool_enabled: bool = True
+    bill_votes_rag_confidence_threshold: float = 0.4  # Enable tool when RAG confidence is low
+
     # Pinecone
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))
     pinecone_environment: str = "us-east-1"

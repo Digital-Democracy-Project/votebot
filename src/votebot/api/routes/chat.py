@@ -103,6 +103,7 @@ async def chat(
             suppressed=False,
             web_search_used=result.web_search_used,
             web_citations=web_citations,
+            bill_votes_tool_used=result.bill_votes_tool_used,
             metadata=ResponseMetadata(
                 model=settings.openai_model,
                 tokens_used=result.tokens_used,
@@ -118,6 +119,7 @@ async def chat(
             latency_ms=latency_ms,
             confidence=result.confidence,
             citation_count=len(result.citations),
+            bill_votes_tool_used=result.bill_votes_tool_used,
         )
 
         return response

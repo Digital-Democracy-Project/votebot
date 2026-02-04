@@ -11,6 +11,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Context-Aware Responses**: Understands the page context (bill, legislator, general) to provide relevant answers
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
 - **Bill Text Prioritization**: For bill queries, prioritizes actual legislative text over CMS summaries
+- **Bill Votes Tool**: Real-time OpenStates lookups for voting records on bills not in the RAG system
 - **Web Search Fallback**: Automatically searches the web (via Tavily API) when RAG confidence is low
 - **Human Handoff**: Supports seamless handoff to human agents when needed
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, and custom sources
@@ -127,7 +128,9 @@ Process a chat message and return a response.
     }
   ],
   "confidence": 0.85,
-  "requires_human": false
+  "requires_human": false,
+  "web_search_used": false,
+  "bill_votes_tool_used": false
 }
 ```
 
@@ -318,6 +321,46 @@ Recent Conversation:
 💡 Reply in thread to respond | ✅ to resolve
 ```
 
+## Bill Votes Tool
+
+VoteBot includes a real-time bill votes lookup tool that enables the LLM to fetch voting records for bills not in the RAG system. This uses OpenAI's function calling with the Responses API.
+
+### How It Works
+
+1. **Hybrid Vote Strategy**: Bills in the system have votes synced during the normal sync process
+2. **Dynamic Lookup**: When users ask about votes for bills NOT in the system, the LLM can call the `get_bill_votes` function
+3. **OpenStates Integration**: The tool queries OpenStates API for voting records
+4. **Pinecone Caching**: Results are cached in Pinecone for future queries
+
+### Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `BILL_VOTES_TOOL_ENABLED` | Enable the bill votes tool | `true` |
+| `BILL_VOTES_RAG_CONFIDENCE_THRESHOLD` | RAG confidence below which tool is enabled | `0.4` |
+
+### Function Schema
+
+```json
+{
+  "name": "get_bill_votes",
+  "description": "Get voting records for a specific bill from OpenStates",
+  "parameters": {
+    "jurisdiction": "Two-letter state code (e.g., 'fl', 'ca') or 'us' for federal",
+    "session": "Legislative session (e.g., '2025', '2024')",
+    "bill_identifier": "Bill identifier (e.g., 'HB1', 'SB 123')"
+  }
+}
+```
+
+### Example Usage
+
+When a user asks "How did legislators vote on California SB 1047?", VoteBot:
+1. Checks if the bill is in the RAG system
+2. If not found with high confidence, enables the bill votes tool
+3. LLM calls `get_bill_votes(jurisdiction="ca", session="2024", bill_identifier="SB1047")`
+4. Results are formatted and returned to the user
+
 ## Data Ingestion
 
 VoteBot uses a unified sync service for all content types. The primary data sources are:
@@ -426,6 +469,7 @@ votebot/
 │   │   ├── embeddings.py    # Embedding generation
 │   │   ├── vector_store.py  # Pinecone operations
 │   │   ├── web_search.py    # Tavily web search
+│   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service
 │   │   ├── service.py       # UnifiedSyncService
@@ -449,7 +493,9 @@ votebot/
 │       └── change_detection.py
 ├── scripts/
 │   ├── sync.py              # Unified sync CLI
-│   └── seed_data.py         # Development data seeding
+│   ├── seed_data.py         # Development data seeding
+│   ├── test_bill_votes_tool.py  # Bill votes tool tests
+│   └── test_rag_comprehensive.py  # RAG evaluation tests
 ├── tests/
 │   ├── unit/
 │   ├── integration/

@@ -201,6 +201,10 @@ class ChatResponse(BaseModel):
         default_factory=list,
         description="Citations from web search results",
     )
+    bill_votes_tool_used: bool = Field(
+        default=False,
+        description="Whether the bill votes lookup tool was used to fetch voting records",
+    )
     metadata: ResponseMetadata | None = Field(
         None,
         description="Optional metadata about response generation",

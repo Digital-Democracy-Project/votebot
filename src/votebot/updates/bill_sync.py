@@ -642,6 +642,112 @@ class BillSyncService:
 
         return "\n".join(parts)
 
+    def format_bill_votes_chunk(
+        self,
+        bill_data: dict[str, Any],
+        ddp_url: str | None = None,
+    ) -> str | None:
+        """
+        Format bill votes into a dedicated text chunk for RAG.
+
+        This creates a separate votes document for better retrieval when
+        users ask specifically about voting records.
+
+        Args:
+            bill_data: OpenStates bill response
+            ddp_url: Optional DDP URL for the bill page
+
+        Returns:
+            Formatted text chunk, or None if no votes
+        """
+        votes = bill_data.get("votes", [])
+        if not votes:
+            return None
+
+        parts = []
+
+        # Header
+        identifier = bill_data.get("identifier", "Unknown")
+        title = bill_data.get("title", "Unknown Bill")
+        jurisdiction = bill_data.get("jurisdiction", {})
+        jurisdiction_name = jurisdiction.get("name", "Unknown") if isinstance(jurisdiction, dict) else str(jurisdiction)
+
+        if ddp_url:
+            parts.append(f"## Voting Record: [{identifier}]({ddp_url})")
+            parts.append(f"**Bill Title:** [{title}]({ddp_url})")
+        else:
+            parts.append(f"## Voting Record: {identifier}")
+            parts.append(f"**Bill Title:** {title}")
+        parts.append(f"**Jurisdiction:** {jurisdiction_name}")
+
+        # Each vote event with full details
+        for vote in votes:
+            motion = vote.get("motion_text", "Vote")
+            result = vote.get("result", "Unknown")
+            vote_date = vote.get("start_date", "Unknown date")
+            org = vote.get("organization", {})
+            org_name = org.get("name", "Unknown") if isinstance(org, dict) else "Unknown"
+            chamber = org.get("classification", "") if isinstance(org, dict) else ""
+
+            # Count votes
+            counts = vote.get("counts", [])
+            yes_count = next((c.get("value", 0) for c in counts if c.get("option") == "yes"), 0)
+            no_count = next((c.get("value", 0) for c in counts if c.get("option") == "no"), 0)
+            other_count = sum(
+                c.get("value", 0) for c in counts
+                if c.get("option") not in ("yes", "no")
+            )
+
+            parts.append(f"\n### {org_name} - {vote_date}")
+            if chamber:
+                parts.append(f"**Chamber:** {chamber.title()}")
+            parts.append(f"**Motion:** {motion}")
+            parts.append(f"**Result:** {result.upper()} (Yes: {yes_count}, No: {no_count}, Other: {other_count})")
+
+            # Individual votes (with DDP links when available)
+            individual_votes = vote.get("votes", [])
+            if individual_votes:
+                # Group by vote option
+                yes_voters = []
+                no_voters = []
+                other_voters: dict[str, list[str]] = {}
+
+                for v in individual_votes:
+                    option = v.get("option", "").lower()
+                    legislator_id = v.get("legislator_id", "")
+                    voter_name = v.get("voter_name", "Unknown")
+
+                    # Format with DDP link if available
+                    formatted = self._format_voter_with_link(legislator_id, voter_name)
+
+                    if option == "yes":
+                        yes_voters.append(formatted)
+                    elif option == "no":
+                        no_voters.append(formatted)
+                    else:
+                        if option not in other_voters:
+                            other_voters[option] = []
+                        other_voters[option].append(formatted)
+
+                # List all voters (increased limits for vote-specific document)
+                if yes_voters:
+                    parts.append(f"**Voted Yes ({len(yes_voters)}):** {', '.join(yes_voters[:50])}")
+                    if len(yes_voters) > 50:
+                        parts.append(f"  ...and {len(yes_voters) - 50} others")
+
+                if no_voters:
+                    parts.append(f"**Voted No ({len(no_voters)}):** {', '.join(no_voters[:50])}")
+                    if len(no_voters) > 50:
+                        parts.append(f"  ...and {len(no_voters) - 50} others")
+
+                for option, voters in other_voters.items():
+                    display_option = option.replace("_", " ").title()
+                    parts.append(f"**{display_option} ({len(voters)}):** {', '.join(voters[:20])}")
+                    if len(voters) > 20:
+                        parts.append(f"  ...and {len(voters) - 20} others")
+
+        return "\n".join(parts)
+
     def extract_metadata_from_openstates(
         self,
         bill_data: dict[str, Any],
@@ -753,19 +859,49 @@ class BillSyncService:
             extra=extra_metadata,
         )
 
-        # Ingest the document
+        # Ingest the history document
+        total_chunks = 0
         try:
             result = await self.pipeline.ingest_document(
                 content=history_chunk,
                 metadata=metadata,
                 skip_duplicates=False,  # Always update
             )
+            total_chunks += result.chunks_created
+
+            # Also create a dedicated votes document if votes exist
+            votes_chunk = self.format_bill_votes_chunk(bill_data, ddp_url=ddp_url)
+            if votes_chunk:
+                votes_metadata = DocumentMetadata(
+                    document_id=f"bill-votes-{webflow_bill_id}",
+                    document_type="bill-votes",
+                    source=source_name,
+                    title=f"{bill_title} - Voting Record",
+                    jurisdiction=jurisdiction_name,
+                    bill_id=parsed.bill_id,
+                    url=openstates_url,
+                    extra={
+                        **extra_metadata,
+                        "vote_count": len(bill_data.get("votes", [])),
+                    },
+                )
+                votes_result = await self.pipeline.ingest_document(
+                    content=votes_chunk,
+                    metadata=votes_metadata,
+                    skip_duplicates=False,
+                )
+                total_chunks += votes_result.chunks_created
+                logger.debug(
+                    "Bill votes document created",
+                    webflow_bill_id=webflow_bill_id,
+                    vote_chunks=votes_result.chunks_created,
+                )
 
             return BillSyncResult(
                 bill_id=webflow_bill_id,
                 jurisdiction=jurisdiction_name,
                 success=True,
-                chunks_created=result.chunks_created,
+                chunks_created=total_chunks,
             )
 
         except Exception as e:

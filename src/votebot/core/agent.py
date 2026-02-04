@@ -15,7 +15,8 @@ from votebot.api.schemas.chat import (
 from votebot.config import Settings, get_settings
 from votebot.core.prompts import build_system_prompt, format_retrieved_chunks
 from votebot.core.retrieval import RetrievalService
-from votebot.services.llm import LLMService, WebSearchCitation
+from votebot.services.bill_votes import BillVotesService
+from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
 from votebot.services.web_search import WebSearchService, WebSearchResult
 
 logger = structlog.get_logger()
@@ -35,6 +36,8 @@ class AgentResult:
     web_search_used: bool = False
     web_citations: list[WebSearchCitation] | None = None
     response_id: str | None = None  # For stateful conversations
+    bill_votes_tool_used: bool = False
+    bill_votes_result: BillVotesToolResult | None = None
 
 
 @dataclass
@@ -70,6 +73,7 @@ class VoteBotAgent:
         self.llm = LLMService(self.settings)
         self.retrieval = RetrievalService(self.settings)
         self.web_search = WebSearchService(self.settings)
+        self.bill_votes = BillVotesService(self.settings)
 
     async def process_message(
         self,
@@ -137,11 +141,16 @@ class VoteBotAgent:
         # Step 7: Determine if web search should be enabled
         enable_web_search = self._should_use_web_search(rag_confidence, page_context.type, message)
 
-        # Step 8: Generate response (with OpenAI web search if enabled)
+        # Step 7b: Determine if bill votes tool should be enabled
+        enable_bill_votes = self._should_use_bill_votes_tool(rag_confidence, message)
+
+        # Step 8: Generate response (with tools if enabled)
         llm_response = await self.llm.complete(
             messages=messages,
             system_prompt=system_prompt,
             enable_web_search=enable_web_search,
+            enable_bill_votes=enable_bill_votes,
+            bill_votes_service=self.bill_votes if enable_bill_votes else None,
         )
 
         # Step 8b: If OpenAI web search was enabled but didn't return citations,
@@ -202,6 +211,7 @@ class VoteBotAgent:
             confidence=confidence,
             requires_human=requires_human,
             web_search_used=llm_response.web_search_used,
+            bill_votes_tool_used=llm_response.bill_votes_tool_used,
         )
 
         return AgentResult(
@@ -215,6 +225,8 @@ class VoteBotAgent:
             web_search_used=llm_response.web_search_used,
             web_citations=llm_response.web_citations if llm_response.web_search_used else None,
             response_id=llm_response.response_id,
+            bill_votes_tool_used=llm_response.bill_votes_tool_used,
+            bill_votes_result=llm_response.bill_votes_result,
         )
 
     async def process_message_stream(
@@ -565,6 +577,62 @@ class VoteBotAgent:
                 return True
 
         return False
+
+    def _should_use_bill_votes_tool(
+        self,
+        rag_confidence: float,
+        message: str,
+    ) -> bool:
+        """
+        Determine if the bill votes lookup tool should be enabled.
+
+        The tool is enabled when:
+        1. Bill votes tool is enabled in settings
+        2. The message appears to be asking about votes/voting
+        3. RAG confidence is below threshold (vote info may not be in context)
+
+        Args:
+            rag_confidence: Confidence score from RAG retrieval
+            message: The user's message
+
+        Returns:
+            True if bill votes tool should be enabled
+        """
+        if not self.settings.bill_votes_tool_enabled:
+            return False
+
+        # Check if the query is about votes
+        vote_keywords = [
+            "vote", "voted", "voting", "votes",
+            "vote count", "vote tally",
+            "who supported", "who opposed",
+            "who voted yes", "who voted no",
+            "pass", "passed", "fail", "failed",
+            "yea", "nay", "abstain",
+            "roll call", "floor vote",
+            "how did", "did it pass",
+        ]
+
+        message_lower = message.lower()
+        is_vote_query = any(keyword in message_lower for keyword in vote_keywords)
+
+        if not is_vote_query:
+            return False
+
+        # Enable tool if RAG confidence is low (vote info may not be in context)
+        # or if the query explicitly asks about votes
+        threshold = self.settings.bill_votes_rag_confidence_threshold
+        should_enable = rag_confidence < threshold or is_vote_query
+
+        if should_enable:
+            logger.info(
+                "Bill votes tool enabled",
+                rag_confidence=rag_confidence,
+                threshold=threshold,
+                is_vote_query=is_vote_query,
+            )
+
+        return should_enable
 
     def _should_use_web_search(
         self,

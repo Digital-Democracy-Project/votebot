@@ -3,11 +3,16 @@
 Unified sync tool for VoteBot.
 
 This script provides a single entry point for syncing all content types:
-- Bills (from Webflow CMS + OpenStates)
+- Bills (from Webflow CMS + OpenStates, including vote documents)
 - Legislators (from Webflow CMS + OpenStates sponsored bills)
 - Organizations (from Webflow CMS)
 - Webpages (from any URL)
 - Training documents (from local files)
+
+Vote Syncing Strategy:
+- Votes are now synced PER-BILL during bill sync (creates bill-votes-{id} documents)
+- For bills not in our system, use BillVotesService for on-demand lookup with caching
+- This replaces the old per-legislator vote sync which was slow due to API rate limits
 
 Usage:
     # Single item sync
@@ -102,7 +107,10 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # Legislator subcommand
-    legislator_parser = subparsers.add_parser("legislator", help="Sync legislator content")
+    legislator_parser = subparsers.add_parser(
+        "legislator",
+        help="Sync legislator content (votes are now synced with bills)",
+    )
     _add_common_identifier_args(legislator_parser)
     _add_common_sync_args(legislator_parser)
     legislator_parser.add_argument(
@@ -165,7 +173,10 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # All subcommand (batch sync all content types)
-    all_parser = subparsers.add_parser("all", help="Sync all content types (batch mode)")
+    all_parser = subparsers.add_parser(
+        "all",
+        help="Sync all content types (batch mode). Votes are synced with bills.",
+    )
     all_parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -185,7 +196,7 @@ def create_parser() -> argparse.ArgumentParser:
     all_parser.add_argument(
         "--no-openstates",
         action="store_true",
-        help="Skip OpenStates sync for bills",
+        help="Skip OpenStates sync for bills (also skips vote documents)",
     )
     all_parser.add_argument(
         "--no-sponsored-bills",
@@ -308,7 +319,10 @@ async def sync_bill(args) -> int:
 
 
 async def sync_legislator(args) -> int:
-    """Handle legislator sync command."""
+    """Handle legislator sync command.
+
+    Note: Votes are now synced with bills (bill-votes documents), not per-legislator.
+    """
     service = UnifiedSyncService()
 
     if args.batch:
@@ -437,7 +451,10 @@ async def clear_namespace(args) -> int:
 
 
 async def sync_all(args) -> int:
-    """Handle sync all command."""
+    """Handle sync all command.
+
+    Note: Votes are synced with bills (bill-votes documents) when --no-openstates is not set.
+    """
     service = UnifiedSyncService()
     options = SyncOptions(
         include_pdfs=not args.no_pdfs,
@@ -453,7 +470,7 @@ async def sync_all(args) -> int:
     print(f"  Dry run: {args.dry_run}")
     print(f"  Limit: {args.limit if args.limit > 0 else 'unlimited'}")
     print(f"  Include PDFs: {not args.no_pdfs}")
-    print(f"  Include OpenStates: {not args.no_openstates}")
+    print(f"  Include OpenStates (+ votes): {not args.no_openstates}")
     print(f"  Include sponsored bills: {not args.no_sponsored_bills}")
     print(f"  Clear namespace first: {getattr(args, 'clear_namespace', False)}")
     print("=" * 60)

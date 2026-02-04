@@ -169,8 +169,9 @@ class LegislatorHandler:
                 chunks_created += cms_result.chunks_created
                 document_ids.append(doc.metadata.document_id)
 
-            # Sync sponsored bills and/or votes from OpenStates if enabled
-            if openstates_id and (options.include_sponsored_bills or options.include_votes):
+            # Sync sponsored bills from OpenStates if enabled
+            # Note: Vote syncing is now handled during bill sync (bill-votes documents)
+            if openstates_id and options.include_sponsored_bills:
                 legislator_data = {
                     "openstates_id": openstates_id,
                     "name": name,
@@ -182,17 +183,12 @@ class LegislatorHandler:
 
                 result = await self.legislator_sync.sync_legislator(
                     legislator_data,
-                    include_votes=options.include_votes,
-                    vote_session=options.vote_session,
-                    max_vote_bills=options.max_vote_bills,
+                    include_votes=False,  # Votes now sync with bills
                 )
 
                 if result.success:
                     chunks_created += result.chunks_created
-                    if options.include_sponsored_bills:
-                        document_ids.append(f"legislator-bills-{openstates_id}")
-                    if options.include_votes:
-                        document_ids.append(f"legislator-votes-{openstates_id}")
+                    document_ids.append(f"legislator-bills-{openstates_id}")
                 else:
                     errors.append(f"Legislator sync failed: {result.error}")
 
@@ -289,8 +285,9 @@ class LegislatorHandler:
             total_chunks = result.chunks_created
             errors.extend(result.errors)
 
-            # Also sync sponsored bills and/or votes if enabled
-            if options.include_sponsored_bills or options.include_votes:
+            # Also sync sponsored bills if enabled
+            # Note: Vote syncing is now handled during bill sync (bill-votes documents)
+            if options.include_sponsored_bills:
                 # Build legislator data for OpenStates sync
                 legislator_data_list = []
                 for doc in legislators:
@@ -307,9 +304,7 @@ class LegislatorHandler:
                 if legislator_data_list:
                     os_result = await self.legislator_sync.sync_all_legislators(
                         legislator_data_list,
-                        include_votes=options.include_votes,
-                        vote_session=options.vote_session,
-                        max_vote_bills=options.max_vote_bills,
+                        include_votes=False,  # Votes now sync with bills
                     )
                     total_chunks += os_result.chunks_created
                     errors.extend(os_result.errors)

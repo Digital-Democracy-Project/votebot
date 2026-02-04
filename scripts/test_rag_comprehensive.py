@@ -140,6 +140,108 @@ BILL_QUESTION_TEMPLATES = [
     },
 ]
 
+# Out-of-system bill vote tests (tests dynamic OpenStates lookup via BillVotesService)
+# These bills are NOT in our Webflow CMS - requires real-time API lookup
+OUT_OF_SYSTEM_VOTE_TESTS = [
+    {
+        "bill_id": "FL HB 1",
+        "jurisdiction": "Florida",
+        "session": "2024",
+        "description": "Florida 2024 session bill (not in current CMS)",
+        "questions": [
+            "How did legislators vote on Florida HB 1 from the 2024 session?",
+            "Who voted yes on FL HB 1 in 2024?",
+            "Did Florida HB 1 pass in 2024?",
+        ]
+    },
+    {
+        "bill_id": "CA SB 1047",
+        "jurisdiction": "California",
+        "session": "2024",
+        "description": "California AI safety bill (not tracked in DDP)",
+        "questions": [
+            "How did California legislators vote on SB 1047, the AI safety bill?",
+            "What was the vote count on California SB 1047?",
+            "Who opposed SB 1047 in California?",
+        ]
+    },
+    {
+        "bill_id": "TX HB 1",
+        "jurisdiction": "Texas",
+        "session": "2023",
+        "description": "Texas bill from previous session",
+        "questions": [
+            "How did Texas legislators vote on HB 1 in 2023?",
+            "What was the final vote on Texas HB 1?",
+        ]
+    },
+    {
+        "bill_id": "NY S2421",
+        "jurisdiction": "New York",
+        "session": "2024",
+        "description": "New York bill (not in DDP tracking)",
+        "questions": [
+            "Can you tell me how New York senators voted on S2421?",
+            "Did NY S2421 pass? What was the vote breakdown?",
+        ]
+    },
+    {
+        "bill_id": "US HR 2",
+        "jurisdiction": "US Federal",
+        "session": "118",
+        "description": "Federal bill from 118th Congress",
+        "questions": [
+            "How did Congress vote on HR 2 in the 118th Congress?",
+            "Who voted against HR 2 in the House?",
+            "What was the vote count on the Secure the Border Act?",
+        ]
+    },
+]
+
+
+# Vote-specific question templates (tests bill-votes document retrieval)
+VOTE_QUESTION_TEMPLATES = [
+    {
+        "initial": "How did legislators vote on {bill_title}?",
+        "follow_ups": [
+            "Who voted yes on this bill?",
+            "Who voted no?",
+            "Was this a close vote?",
+        ]
+    },
+    {
+        "initial": "What was the vote count on {bill_title}?",
+        "follow_ups": [
+            "Did this bill pass committee?",
+            "Were there any abstentions?",
+            "Which party mostly supported it?",
+        ]
+    },
+    {
+        "initial": "Did {bill_title} pass?",
+        "follow_ups": [
+            "What was the final vote tally?",
+            "Who were the key supporters?",
+            "Were there any surprising votes?",
+        ]
+    },
+    {
+        "initial": "Show me the voting record for {bill_title}",
+        "follow_ups": [
+            "How did the committee vote compare to the floor vote?",
+            "Were there any bipartisan votes?",
+        ]
+    },
+    {
+        "initial": "Who opposed {bill_title}?",
+        "follow_ups": [
+            "What were their reasons for voting no?",
+            "How many Democrats voted against it?",
+            "How many Republicans voted against it?",
+        ]
+    },
+]
+
 
 async def fetch_sample_bills():
     """Fetch sample bills from Webflow CMS."""
@@ -266,6 +368,53 @@ def generate_bill_tests(bills: list) -> list[dict]:
     return tests
 
 
+def generate_vote_tests(bills: list) -> list[dict]:
+    """Generate test cases for bill voting records.
+
+    These tests specifically target the bill-votes documents to verify
+    that legislator voting information is being correctly retrieved.
+    """
+    tests = []
+
+    # Sample a subset of bills for vote tests (not all bills have votes)
+    sample_size = min(20, len(bills))
+    sampled_bills = random.sample(bills, sample_size)
+
+    for bill in sampled_bills:
+        fields = bill.get("fieldData", {})
+        title = fields.get("name", "Unknown Bill")
+        jurisdiction_id = fields.get("jurisdiction", "")
+        jurisdiction_name = JURISDICTIONS.get(jurisdiction_id, jurisdiction_id[:8] + "...")
+
+        # Select a random vote question template
+        template = random.choice(VOTE_QUESTION_TEMPLATES)
+
+        # Format the questions
+        initial = template["initial"].format(
+            bill_title=title,
+            jurisdiction=jurisdiction_name,
+        )
+
+        follow_ups = [
+            q.format(bill_title=title, jurisdiction=jurisdiction_name)
+            for q in template["follow_ups"]
+        ]
+
+        # Randomly select 1-2 follow-ups for vote tests
+        n_follow_ups = random.randint(1, min(2, len(follow_ups)))
+        selected_follow_ups = random.sample(follow_ups, n_follow_ups)
+
+        tests.append({
+            "type": "vote",
+            "jurisdiction": jurisdiction_name,
+            "bill_title": title,
+            "initial": initial,
+            "follow_ups": selected_follow_ups,
+        })
+
+    return tests
+
+
 def generate_ddp_tests() -> list[dict]:
     """Generate DDP general knowledge tests."""
     tests = []
@@ -280,6 +429,42 @@ def generate_ddp_tests() -> list[dict]:
             "bill_title": "DDP Knowledge",
             "initial": q["initial"],
             "follow_ups": selected_follow_ups,
+        })
+
+    return tests
+
+
+def generate_out_of_system_vote_tests() -> list[dict]:
+    """Generate test cases for bills NOT in our Webflow CMS.
+
+    These tests are designed to evaluate whether the LLM can:
+    1. Recognize when a bill is not in the knowledge base
+    2. Use the BillVotesService to dynamically fetch votes from OpenStates
+    3. Provide accurate vote information from the real-time API call
+
+    Note: These tests will show low confidence/no results if the BillVotesService
+    is not yet integrated as an LLM tool.
+    """
+    tests = []
+
+    for bill_test in OUT_OF_SYSTEM_VOTE_TESTS:
+        questions = bill_test["questions"]
+
+        # Use first question as initial, rest as follow-ups
+        initial = questions[0]
+        follow_ups = questions[1:] if len(questions) > 1 else []
+
+        tests.append({
+            "type": "out_of_system_vote",
+            "jurisdiction": bill_test["jurisdiction"],
+            "bill_title": f"{bill_test['bill_id']} ({bill_test['session']})",
+            "initial": initial,
+            "follow_ups": follow_ups,
+            "metadata": {
+                "bill_id": bill_test["bill_id"],
+                "session": bill_test["session"],
+                "description": bill_test["description"],
+            }
         })
 
     return tests
@@ -301,6 +486,16 @@ async def run_chat_test(test: dict, api_url: str, api_key: str) -> TestResult:
             start_time = time.time()
 
             try:
+                # Map test type to page context type
+                # Vote tests use "bill" context since votes are bill-related
+                # Out-of-system vote tests use "general" to simulate asking about unknown bills
+                if test["type"] == "ddp":
+                    page_type = "general"
+                elif test["type"] == "out_of_system_vote":
+                    page_type = "general"  # User wouldn't be on a bill page for unknown bills
+                else:
+                    page_type = "bill"
+
                 response = await client.post(
                     f"{api_url}/votebot/v1/chat",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -309,7 +504,7 @@ async def run_chat_test(test: dict, api_url: str, api_key: str) -> TestResult:
                         "session_id": session_id,
                         "human_active": False,
                         "page_context": {
-                            "type": "general" if test["type"] == "ddp" else "bill",
+                            "type": page_type,
                         }
                     }
                 )
@@ -384,14 +579,18 @@ async def main():
 
     # Generate tests
     bill_tests = generate_bill_tests(selected_bills)
+    vote_tests = generate_vote_tests(selected_bills)
     ddp_tests = generate_ddp_tests()
+    out_of_system_vote_tests = generate_out_of_system_vote_tests()
 
-    all_tests = bill_tests + ddp_tests
+    all_tests = bill_tests + vote_tests + ddp_tests + out_of_system_vote_tests
     random.shuffle(all_tests)
 
     print(f"\nTotal test cases: {len(all_tests)}")
     print(f"  - Bill questions: {len(bill_tests)}")
+    print(f"  - Vote questions: {len(vote_tests)}")
     print(f"  - DDP questions: {len(ddp_tests)}")
+    print(f"  - Out-of-system vote questions: {len(out_of_system_vote_tests)}")
 
     # Run tests
     print("\n" + "=" * 70)
@@ -439,6 +638,22 @@ async def main():
         print(f"  With citations: {sum(all_citations)/len(all_citations)*100:.1f}%")
         print(f"  Avg latency: {sum(all_latencies)/len(all_latencies):.2f}s")
         print(f"  P95 latency: {sorted(all_latencies)[int(len(all_latencies)*0.95)]:.2f}s")
+
+    # Results by test type
+    print(f"\nResults by Test Type:")
+    by_type = {"bill": [], "vote": [], "ddp": [], "out_of_system_vote": []}
+    for i, test in enumerate(all_tests):
+        if results[i].success:
+            by_type[test["type"]].append(results[i])
+
+    for test_type, type_results in by_type.items():
+        if type_results:
+            type_confidences = [c for r in type_results for c in r.confidence_scores]
+            type_citations = [c for r in type_results for c in r.has_citations]
+            avg_conf = sum(type_confidences) / len(type_confidences) if type_confidences else 0
+            citation_rate = sum(type_citations) / len(type_citations) * 100 if type_citations else 0
+            print(f"  {test_type.upper()}: {len(type_results)} tests, "
+                  f"avg confidence: {avg_conf:.2f}, citations: {citation_rate:.0f}%")
 
     # Results by jurisdiction
     print(f"\nResults by Jurisdiction:")
