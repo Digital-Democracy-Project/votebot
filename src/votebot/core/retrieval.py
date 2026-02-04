@@ -296,10 +296,33 @@ class RetrievalService:
         query_lower = query.lower()
         is_vote_query = any(kw in query_lower for kw in vote_keywords)
 
+        # Also detect follow-up questions about legislators when on a bill page
+        # e.g., "how about rick scott?", "what about senator cruz?", "and rubio?"
+        is_legislator_followup = False
+        if page_context and page_context.type == "bill":
+            followup_patterns = ["how about", "what about", "how did", "and ", "what did"]
+            legislator_indicators = ["senator", "rep ", "representative", "congressman", "congresswoman"]
+
+            has_followup_pattern = any(p in query_lower for p in followup_patterns)
+            has_legislator_word = any(l in query_lower for l in legislator_indicators)
+
+            # Check for proper name pattern (capitalized words that could be names)
+            # e.g., "rick scott", "cruz", "pelosi"
+            name_words = [w for w in query.split() if w[0].isupper() and len(w) > 2]
+            has_potential_name = len(name_words) > 0
+
+            is_legislator_followup = has_followup_pattern and (has_legislator_word or has_potential_name)
+
+            if is_legislator_followup:
+                logger.info(
+                    "Detected legislator follow-up query on bill page",
+                    query_preview=query[:50],
+                )
+
         vote_results = []
 
-        # For vote queries, ALWAYS try to get vote data (at least 5 chunks)
-        if is_vote_query:
+        # For vote queries OR legislator follow-ups on bill pages, get vote data
+        if is_vote_query or is_legislator_followup:
             vote_query = query
             if page_context:
                 bill_id = page_context.id or ""
@@ -332,8 +355,8 @@ class RetrievalService:
             )
 
         # Combine results based on query type
-        if is_vote_query and vote_results:
-            # For vote queries, prioritize vote data
+        if (is_vote_query or is_legislator_followup) and vote_results:
+            # For vote queries and legislator follow-ups, prioritize vote data
             combined = vote_results + text_results + summary_results + history_results
         else:
             # Default: legislative text first, then summaries, then history, then votes
