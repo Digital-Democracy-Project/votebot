@@ -5,6 +5,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 ## Table of Contents
 
 - [Legislator Vote Lookups Not Working](#legislator-vote-lookups-not-working)
+- [Poor Search Ranking for Full Name Queries](#poor-search-ranking-for-full-name-queries)
 - [Corrupted Legislator-Votes Documents](#corrupted-legislator-votes-documents)
 - [Missing Data in Search Results](#missing-data-in-search-results)
 - [Federal Legislator Cache Issues](#federal-legislator-cache-issues)
@@ -116,6 +117,7 @@ asyncio.run(test_search("Ashley Moody vote HR1"))
 2. **Corrupted duplicate documents**: Malformed documents ranking higher than valid ones (see next section)
 3. **Missing person ID in bill-votes**: The bill sync didn't include the legislator's OpenStates person ID
 4. **Federal legislator cache outdated**: The cache doesn't include newly appointed legislators
+5. **Last-name-only in document**: Document contains only last name (e.g., "Moody") but user queries with full name ("Ashley Moody") - see [Poor Search Ranking](#poor-search-ranking-for-full-name-queries)
 
 ### Solutions
 
@@ -133,6 +135,112 @@ asyncio.run(test_search("Ashley Moody vote HR1"))
    ```bash
    python -m votebot.updates.bill_sync batch --jurisdiction us --include-openstates
    ```
+
+---
+
+## Poor Search Ranking for Full Name Queries
+
+### Symptom
+The legislator-votes document exists and contains the correct data, but queries using the legislator's full name (e.g., "Ashley Moody vote HR1") don't return the document in top results. Queries using only last name (e.g., "Moody voting record") work fine.
+
+### Example
+```
+Query: "Ashley Moody vote HR1"    -> Document NOT in top 15
+Query: "Moody voting record HR1"  -> Document at position 1
+```
+
+### Root Cause
+Vote records from OpenStates only include last names with party/state (e.g., "Moody (R-FL)"). When legislator-votes documents are built, they inherit this last-name-only format. The document title becomes "Moody (Republican-FL) - Voting Record" instead of "Ashley Moody (Republican-FL) - Voting Record".
+
+Since semantic search relies on text similarity, queries with the full name "Ashley Moody" don't match well against documents that only contain "Moody".
+
+### Diagnostic Steps
+
+#### 1. Check if document has full name
+
+```python
+import asyncio
+from src.votebot.config import get_settings
+from src.votebot.services.vector_store import VectorStoreService
+
+async def check_document_name(person_uuid):
+    settings = get_settings()
+    vs = VectorStoreService(settings)
+
+    doc_id = f'legislator-votes-{person_uuid}-chunk-0'
+    result = vs.index.fetch(ids=[doc_id], namespace=vs.namespace)
+
+    if doc_id in result.vectors:
+        meta = result.vectors[doc_id].metadata
+        title = meta.get('title', '')
+        content = meta.get('content', '')[:200]
+        print(f'Title: {title}')
+        print(f'Content start: {content}')
+
+        # Check if it has only last name
+        if title.startswith('Moody') and 'Ashley' not in title:
+            print('\n⚠️  Document has last-name-only - needs rebuild with name enrichment')
+    else:
+        print('Document not found')
+
+# Ashley Moody's UUID
+asyncio.run(check_document_name("cb582ab6-6a5a-4578-9e44-620c9a6a1f4c"))
+```
+
+#### 2. Compare search rankings for full name vs last name
+
+```python
+async def compare_queries(full_name, last_name, person_uuid):
+    settings = get_settings()
+    vs = VectorStoreService(settings)
+
+    doc_prefix = f'legislator-votes-{person_uuid}'
+
+    for query in [f'{full_name} vote HR1', f'{last_name} voting record HR1']:
+        results = await vs.query(query, top_k=15)
+        position = None
+        for i, r in enumerate(results):
+            if doc_prefix in r.metadata.get('document_id', ''):
+                position = i + 1
+                break
+        print(f'Query "{query}": Position {position if position else "NOT FOUND"}')
+
+asyncio.run(compare_queries("Ashley Moody", "Moody", "cb582ab6-6a5a-4578-9e44-620c9a6a1f4c"))
+```
+
+### Solution
+
+The `build_legislator_votes.py` module enriches legislator names from the federal legislator cache. Rebuild the index to apply name enrichment:
+
+```bash
+# Rebuild legislator-votes documents with full names
+python -m votebot.sync.build_legislator_votes
+```
+
+The rebuild will:
+1. Look up each legislator's person ID in the federal legislator cache
+2. Replace last-name-only entries with full names (e.g., "Moody" → "Ashley Moody")
+3. Include full names in document titles and content
+
+After rebuild, verify the fix:
+```python
+# Should now show full name in title
+asyncio.run(check_document_name("cb582ab6-6a5a-4578-9e44-620c9a6a1f4c"))
+# Expected: "Ashley Moody (Republican-FL) - Voting Record"
+```
+
+### Prevention
+
+The name enrichment feature is built into `build_legislator_votes.py`:
+- Uses `federal_legislator_cache.get_by_person_id()` to look up full names
+- Automatically enriches federal legislators during document creation
+- Reports `name_enrichments` count in build results
+
+Ensure the federal legislator cache is up-to-date before building:
+```bash
+python -m votebot.sync.federal_legislator_cache
+python -m votebot.sync.build_legislator_votes
+```
 
 ---
 

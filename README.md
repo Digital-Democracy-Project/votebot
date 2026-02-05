@@ -411,6 +411,8 @@ VoteBot maintains a reverse index of legislator voting records, enabling queries
 
 3. **Legislator-Votes Documents**: A reverse index built from bill-votes documents, creating per-legislator voting record documents keyed by OpenStates person ID
 
+4. **Name Enrichment**: During legislator-votes document creation, last-name-only entries (e.g., "Moody") are enriched with full names (e.g., "Ashley Moody") from the federal legislator cache. This improves search ranking for full-name queries.
+
 ### CLI Commands
 
 ```bash
@@ -446,6 +448,8 @@ python -m votebot.updates.bill_sync batch --jurisdiction fl --include-openstates
 # 3. Build reverse index for legislator-votes documents
 python -m votebot.sync.build_legislator_votes
 ```
+
+The build output includes a `name_enrichments` count showing how many legislators had their names enriched from the federal cache. For optimal search results, ensure the federal cache is refreshed before building.
 
 ### Document Types
 
