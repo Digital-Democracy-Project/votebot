@@ -21,6 +21,7 @@ from votebot.config import Settings, get_settings
 from votebot.ingestion.metadata import DocumentMetadata
 from votebot.ingestion.pipeline import IngestionPipeline
 from votebot.services.vector_store import VectorStoreService
+from votebot.sync.federal_legislator_cache import get_federal_cache
 
 logger = structlog.get_logger()
 
@@ -605,8 +606,33 @@ class LegislatorVotesBuilder:
         total_chunks = 0
         errors = []
 
+        # Load federal legislator cache to get full names
+        federal_cache = get_federal_cache()
+        name_enrichments = 0
+
         for leg_key, record in legislator_votes.items():
             try:
+                # Enrich with full name from federal legislator cache
+                # Vote records only have last names like "Moody", but we need
+                # full names like "Ashley Moody" for better search matching
+                if record.person_id:
+                    cached_info = federal_cache.get_by_person_id(record.person_id)
+                    if cached_info and cached_info.get("name"):
+                        full_name = cached_info["name"]
+                        if full_name != record.name:
+                            logger.debug(
+                                "Enriching legislator name from cache",
+                                original=record.name,
+                                full_name=full_name,
+                            )
+                            record.name = full_name
+                            name_enrichments += 1
+                            # Also update party/jurisdiction if available
+                            if cached_info.get("party") and not record.party:
+                                record.party = cached_info["party"]
+                            if cached_info.get("state") and not record.jurisdiction:
+                                record.jurisdiction = cached_info["state"]
+
                 # Format the document content
                 content = self._format_legislator_votes_document(record)
 
@@ -682,6 +708,7 @@ class LegislatorVotesBuilder:
             created=created,
             failed=failed,
             total_chunks=total_chunks,
+            name_enrichments=name_enrichments,
         )
 
         return {
@@ -690,6 +717,7 @@ class LegislatorVotesBuilder:
             "documents_created": created,
             "documents_failed": failed,
             "chunks_created": total_chunks,
+            "name_enrichments": name_enrichments,
             "errors": errors[:10] if errors else [],  # Limit error list
         }
 

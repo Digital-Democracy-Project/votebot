@@ -161,6 +161,19 @@ class FederalLegislatorCache:
         self._ensure_loaded()
         return self._cache.copy()
 
+    def get_by_person_id(self, person_id: str) -> dict | None:
+        """
+        Look up legislator info by OpenStates person ID.
+
+        Args:
+            person_id: OpenStates person ID, e.g., "ocd-person/abc123..."
+
+        Returns:
+            Dict with name, party, state, chamber if found, None otherwise
+        """
+        self._ensure_loaded()
+        return self._cache.get(person_id)
+
     async def refresh(self) -> dict:
         """
         Refresh the cache by fetching all US Congress members from OpenStates.
