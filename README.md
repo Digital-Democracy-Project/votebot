@@ -462,6 +462,45 @@ VoteBot uses a unified sync service for all content types. The primary data sour
 - **OpenStates** - Legislative history, votes, actions, and sponsored bills
 - **Congress.gov** - Federal bill text and amendments
 - **PDFs** - Bill text from legislative websites and Google Drive
+- **DDP Website** - Static pages (about, FAQ, etc.) scraped for RAG
+- **Training Docs** - Local text files for agent behavior customization
+
+### Data Linkages
+
+VoteBot maintains bidirectional linkages between content types:
+
+| Relationship | Direction | Content |
+|--------------|-----------|---------|
+| Bill ↔ Organization | Bill → Org | "Organizations Supporting/Opposing This Bill" |
+| Bill ↔ Organization | Org → Bill | "Bills Supported/Opposed" with DDP links |
+| Bill → Legislator | Vote Records | `[ocd-person/uuid]Name (Party-State)` format |
+| Legislator → Bill | Voting Record | `legislator-votes-{person_uuid}` documents |
+
+### Full Rebuild Script
+
+For a complete rebuild of the Pinecone index with all content types:
+
+```bash
+# Full rebuild with prompts
+python scripts/rebuild_pinecone.py
+
+# Non-interactive (auto-confirm all prompts)
+python scripts/rebuild_pinecone.py --yes
+
+# Skip wipe (add to existing data)
+python scripts/rebuild_pinecone.py --skip-wipe
+
+# Specific content types only
+python scripts/rebuild_pinecone.py --content-types bill,legislator
+```
+
+**Sync Order** (recommended for proper data linkages):
+1. `bill` - Creates bill-votes with OpenStates person IDs and org positions
+2. `legislator` - Creates legislator profiles with OpenStates IDs
+3. `organization` - Creates org profiles with bill positions
+4. `webpage` - DDP website pages (about, faq, vote, tally, score, etc.)
+5. `training` - Training documents for agent behavior
+6. `legislator-votes` - Reverse index built from bill-votes (post-sync)
 
 ### Unified Sync CLI
 
