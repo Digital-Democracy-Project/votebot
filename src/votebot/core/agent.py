@@ -121,36 +121,52 @@ class VoteBotAgent:
             ]
         )
 
-        # Step 3: Build page info for prompt
+        # Step 3: If user is disputing/verifying vote info, fetch directly from OpenStates
+        vote_verification_context = ""
+        if self._is_dispute_or_correction(message) and page_context and page_context.type == "bill":
+            vote_verification_context = await self._verify_legislator_vote(
+                message=message,
+                page_context=page_context,
+                conversation_history=conversation_history,
+            )
+            if vote_verification_context:
+                logger.info("Fetched vote verification from OpenStates for non-streaming")
+
+        # Step 4: Build page info for prompt
         page_info = self._extract_page_info(page_context)
 
-        # Step 4: Build system prompt
+        # Step 5: Build system prompt with verification context if available
+        full_context = retrieved_context
+        if vote_verification_context:
+            # Put verification context first - it's the authoritative source
+            full_context = f"{vote_verification_context}\n\n{retrieved_context}"
+
         system_prompt = build_system_prompt(
             page_type=page_context.type,
             page_info=page_info,
             include_rag_context=True,
-            retrieved_context=retrieved_context,
+            retrieved_context=full_context,
         )
 
-        # Step 5: Build messages
+        # Step 7: Build messages
         messages = self._build_messages(message, conversation_history)
 
-        # Step 6: Calculate pre-LLM confidence based on retrieval quality
+        # Step 8: Calculate pre-LLM confidence based on retrieval quality
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
 
-        # Step 7: Determine if web search should be enabled
+        # Step 9: Determine if web search should be enabled
         enable_web_search = self._should_use_web_search(rag_confidence, page_context.type, message)
 
-        # Step 7b: Determine if bill info tool should be enabled
+        # Step 9b: Determine if bill info tool should be enabled
         enable_bill_votes = self._should_use_bill_votes_tool(rag_confidence, message)
 
-        # Step 7c: Enable web search as fallback when bill info tool is enabled
+        # Step 9c: Enable web search as fallback when bill info tool is enabled
         # This allows hybrid lookup: OpenStates first, then web search if not found
         if enable_bill_votes and not enable_web_search:
             enable_web_search = True
             logger.info("Enabling web search as fallback for bill info tool")
 
-        # Step 8: Generate response (with tools if enabled)
+        # Step 10: Generate response (with tools if enabled)
         llm_response = await self.llm.complete(
             messages=messages,
             system_prompt=system_prompt,
@@ -159,7 +175,7 @@ class VoteBotAgent:
             bill_votes_service=self.bill_votes if enable_bill_votes else None,
         )
 
-        # Step 8b: If OpenAI web search was enabled but didn't return citations,
+        # Step 10b: If OpenAI web search was enabled but didn't return citations,
         # fall back to Tavily for supplementary search
         if enable_web_search and not llm_response.web_citations:
             logger.info("OpenAI web search returned no citations, trying Tavily fallback")
@@ -189,13 +205,13 @@ class VoteBotAgent:
                     results_count=len(tavily_results),
                 )
 
-        # Step 9: Extract citations from RAG
+        # Step 11: Extract citations from RAG
         citations = self._extract_citations(
             response=llm_response.content,
             retrieved_chunks=retrieval_result.chunks,
         )
 
-        # Step 10: Calculate final confidence
+        # Step 12: Calculate final confidence
         confidence = self._calculate_confidence(
             response=llm_response.content,
             retrieval_count=retrieval_result.total_retrieved,
@@ -203,7 +219,7 @@ class VoteBotAgent:
             web_search_used=llm_response.web_search_used,
         )
 
-        # Step 11: Check for human handoff
+        # Step 13: Check for human handoff
         requires_human = self._check_human_handoff(
             message=message,
             response=llm_response.content,
@@ -296,15 +312,29 @@ class VoteBotAgent:
             if legislator_info_context:
                 logger.info("Pre-fetched legislator info for streaming")
 
+        # Step 2d: If user is disputing/verifying vote info, fetch directly from OpenStates
+        vote_verification_context = ""
+        if self._is_dispute_or_correction(message) and page_context and page_context.type == "bill":
+            vote_verification_context = await self._verify_legislator_vote(
+                message=message,
+                page_context=page_context,
+                conversation_history=conversation_history,
+            )
+            if vote_verification_context:
+                logger.info("Fetched vote verification from OpenStates")
+
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
 
-        # Combine RAG context with bill info and legislator info
+        # Combine RAG context with bill info, legislator info, and verification
         full_context = retrieved_context
         if bill_info_context:
             full_context = f"{retrieved_context}\n\n{bill_info_context}"
         if legislator_info_context:
             full_context = f"{full_context}\n\n{legislator_info_context}"
+        if vote_verification_context:
+            # Put verification context first - it's the authoritative source
+            full_context = f"{vote_verification_context}\n\n{full_context}"
 
         system_prompt = build_system_prompt(
             page_type=page_context.type,
@@ -759,6 +789,135 @@ class VoteBotAgent:
             logger.error("Error pre-fetching bill info", error=str(e))
             return ""
 
+    async def _verify_legislator_vote(
+        self,
+        message: str,
+        page_context: PageContext,
+        conversation_history: list[dict] | None = None,
+    ) -> str:
+        """
+        Verify a legislator's vote by fetching directly from OpenStates.
+
+        This is triggered when a user disputes or challenges vote information.
+        It bypasses RAG and goes directly to the authoritative source.
+
+        Args:
+            message: The user's message
+            page_context: Context about the current page (bill info)
+            conversation_history: Previous messages to extract context
+
+        Returns:
+            Formatted verification result, or empty string if not applicable
+        """
+        # Extract legislator name from message or conversation
+        legislator_name = self._extract_legislator_name(message)
+        if not legislator_name and conversation_history:
+            # Look in recent conversation for legislator names
+            for msg in reversed(conversation_history[-5:]):
+                content = msg.get("content", "")
+                legislator_name = self._extract_legislator_name(content)
+                if legislator_name:
+                    break
+
+        if not legislator_name:
+            return ""
+
+        # Get bill info from page context
+        bill_identifier = page_context.id if page_context else None
+        jurisdiction = page_context.jurisdiction if page_context else "US"
+
+        if not bill_identifier:
+            return ""
+
+        # Determine session
+        session = getattr(page_context, "session", None)
+        if not session:
+            from datetime import datetime
+            session = str(datetime.now().year)
+
+        logger.info(
+            "Verifying legislator vote from OpenStates",
+            legislator=legislator_name,
+            bill=bill_identifier,
+            jurisdiction=jurisdiction,
+        )
+
+        try:
+            # Use the lookup_legislator_vote method for direct verification
+            result = await self.bill_votes.lookup_legislator_vote(
+                legislator_name=legislator_name,
+                jurisdiction=jurisdiction,
+                session=session,
+                bill_identifier=bill_identifier,
+            )
+
+            if result:
+                # Found the vote - format as authoritative answer
+                parts = [
+                    "## Vote Verification (Direct from OpenStates API)",
+                    "",
+                    f"**Legislator:** {result['legislator']}",
+                    f"**Bill:** {result['bill']}",
+                    f"**Vote:** {result['vote'].upper()}",
+                    f"**Motion:** {result['motion'][:100]}..." if len(result.get('motion', '')) > 100 else f"**Motion:** {result.get('motion', 'N/A')}",
+                    f"**Date:** {result['date']}",
+                    f"**Chamber:** {result['chamber'].title()}",
+                    f"**Result:** {result['result'].upper()}",
+                    "",
+                    "*This information is fetched directly from OpenStates and should be considered authoritative.*",
+                ]
+                return "\n".join(parts)
+            else:
+                # Legislator not found in vote records
+                return f"## Vote Verification\n\n**{legislator_name}** was not found in the vote records for **{bill_identifier}** in OpenStates. This could mean they did not vote on this bill, or the name spelling differs from official records."
+
+        except Exception as e:
+            logger.error("Error verifying legislator vote", error=str(e))
+            return ""
+
+    def _extract_legislator_name(self, text: str) -> str | None:
+        """
+        Extract a potential legislator name from text.
+
+        Args:
+            text: Text to search for names
+
+        Returns:
+            Extracted name or None
+        """
+        # Common words to exclude
+        common_words = {
+            "how", "did", "what", "about", "the", "this", "vote", "on", "and",
+            "senator", "rep", "representative", "congressman", "congresswoman",
+            "she", "he", "they", "is", "a", "us", "u.s.", "that", "way", "no",
+            "there", "can", "be", "sure", "verify", "check", "wrong", "right",
+            "actually", "really", "tell", "me", "all", "who", "why", "when",
+            "does", "bill", "act", "hr", "hb", "sb", "one", "big", "beautiful",
+        }
+
+        # Look for capitalized name patterns (First Last or just Last)
+        words = text.split()
+        name_parts = []
+
+        for i, word in enumerate(words):
+            # Clean the word
+            clean_word = word.strip(".,!?\"'()")
+
+            # Check if it looks like a name (capitalized, not common)
+            if (len(clean_word) > 1 and
+                clean_word[0].isupper() and
+                clean_word.lower() not in common_words and
+                clean_word.isalpha()):
+                name_parts.append(clean_word)
+            elif name_parts:
+                # If we had name parts and hit a non-name, stop
+                break
+
+        if name_parts:
+            return " ".join(name_parts)
+
+        return None
+
     async def _prefetch_legislator_info(self, message: str) -> str:
         """
         Pre-fetch legislator info from OpenStates when a name is mentioned.
@@ -1009,6 +1168,27 @@ class VoteBotAgent:
             "that's not right", "that is not right", "you're wrong",
             "actually,", "actually she", "actually he",
             "no,", "wrong.", "incorrect.",
+            # Strong disagreement
+            "no way", "there's no way", "there is no way",
+            "that can't be", "that cannot be", "can't be right",
+            "doesn't sound right", "doesn't seem right",
+            "i don't believe", "i don't think that's",
+            "bull", "nonsense", "impossible",
+        ]
+
+        # Verification request phrases (user asking to double-check)
+        verification_phrases = [
+            "be sure", "make sure", "to be sure",
+            "double check", "double-check", "doublecheck",
+            "verify", "confirm", "check again",
+            "try again", "look again",
+            "search for", "look up", "look it up",
+            "do a web search", "search the web", "web search",
+            "check your sources", "check the source",
+            "are you sure", "you sure about that",
+            "can you verify", "can you confirm",
+            "check openstates", "check open states",
+            "check congress", "official record",
         ]
 
         # Correction phrases (user stating what they believe is true)
@@ -1017,18 +1197,21 @@ class VoteBotAgent:
             "she's a", "he's a", "they're a",
             "is now a", "is currently a", "is the",
             "was appointed", "was elected", "became",
-            "check again", "try again", "look again",
-            "search for", "look up",
         ]
 
         for phrase in dispute_phrases:
             if phrase in message_lower:
-                logger.info("Dispute detected, triggering web search", phrase=phrase)
+                logger.info("Dispute detected, triggering verification", phrase=phrase)
+                return True
+
+        for phrase in verification_phrases:
+            if phrase in message_lower:
+                logger.info("Verification request detected", phrase=phrase)
                 return True
 
         for phrase in correction_phrases:
             if phrase in message_lower:
-                logger.info("Correction detected, triggering web search", phrase=phrase)
+                logger.info("Correction detected, triggering verification", phrase=phrase)
                 return True
 
         return False
