@@ -224,6 +224,30 @@ The current trigger phrases are in `agent.py:_is_dispute_or_correction()`. If a 
 1. **Check OpenStates API key**: Ensure `OPENSTATES_API_KEY` is set and valid
 2. **Check bill identifier format**: The bill must be in OpenStates (e.g., "HR1" for federal, "HB123" for state)
 3. **Check legislator name extraction**: Names must be capitalized and not common words
+4. **Check session/Congress number**: For federal bills, the session must be the Congress number (e.g., "119" for 119th Congress), not the year. The agent now auto-calculates this for US jurisdiction.
+5. **Check page context**: Ensure the frontend passes `session` in the page context when available
+
+### Known Issues (Fixed)
+
+#### Federal Bills Using Year Instead of Congress Number
+
+**Bug**: The verification code was using the current year (e.g., "2026") as the session for federal bills, but OpenStates API expects the Congress number (e.g., "119").
+
+**Example**: Query to `https://v3.openstates.org/bills/us/2026/HR1` would fail because the correct URL is `https://v3.openstates.org/bills/us/119/HR1`.
+
+**Fix**: The `_verify_legislator_vote` method now calculates the Congress number from the year:
+- 119th Congress: 2025-2027
+- 120th Congress: 2027-2029
+
+#### Name Extraction Failing for Lowercase Input
+
+**Bug**: When users typed "how did ashley moody vote?" (lowercase), the name extraction couldn't find "Ashley Moody" because it only looked for capitalized names.
+
+**Fix**: Added multiple extraction methods:
+1. Pattern match for "X voted Y"
+2. Pattern match for "Name (Party-State)"
+3. Pattern match for "did X vote"
+4. Fallback to capitalized word extraction
 
 ### Prevention
 
