@@ -811,15 +811,45 @@ class VoteBotAgent:
         """
         # Extract legislator name from message or conversation
         legislator_name = self._extract_legislator_name(message)
+
         if not legislator_name and conversation_history:
             # Look in recent conversation for legislator names
-            for msg in reversed(conversation_history[-5:]):
+            # Prioritize user questions (they contain "did X vote" patterns)
+            # then look at assistant responses (they contain "X voted Y" patterns)
+            user_messages = []
+            assistant_messages = []
+
+            for msg in conversation_history[-6:]:
                 content = msg.get("content", "")
+                role = msg.get("role", "")
+                if role == "user":
+                    user_messages.append(content)
+                elif role in ("assistant", "agent"):
+                    assistant_messages.append(content)
+
+            # First try user messages (most likely to have the name they asked about)
+            for content in reversed(user_messages):
                 legislator_name = self._extract_legislator_name(content)
                 if legislator_name:
+                    logger.debug(
+                        "Found legislator name in user message",
+                        name=legislator_name,
+                    )
                     break
 
+            # Then try assistant messages (contains vote results)
+            if not legislator_name:
+                for content in reversed(assistant_messages):
+                    legislator_name = self._extract_legislator_name(content)
+                    if legislator_name:
+                        logger.debug(
+                            "Found legislator name in assistant message",
+                            name=legislator_name,
+                        )
+                        break
+
         if not legislator_name:
+            logger.info("Could not extract legislator name for vote verification")
             return ""
 
         # Get bill info from page context
@@ -833,13 +863,21 @@ class VoteBotAgent:
         session = getattr(page_context, "session", None)
         if not session:
             from datetime import datetime
-            session = str(datetime.now().year)
+            year = datetime.now().year
+            # For federal bills (US jurisdiction), use Congress number instead of year
+            # Congress numbers: 119th = 2025-2027, 118th = 2023-2024, etc.
+            if jurisdiction and jurisdiction.upper() == "US":
+                congress_number = (year - 2025) // 2 + 119
+                session = str(congress_number)
+            else:
+                session = str(year)
 
         logger.info(
             "Verifying legislator vote from OpenStates",
             legislator=legislator_name,
             bill=bill_identifier,
             jurisdiction=jurisdiction,
+            session=session,
         )
 
         try:
@@ -885,7 +923,40 @@ class VoteBotAgent:
         Returns:
             Extracted name or None
         """
-        # Common words to exclude
+        # Try multiple extraction methods in order of specificity
+
+        # Method 1: Look for "X voted Y" pattern (most reliable in vote context)
+        import re
+        vote_pattern = re.search(
+            r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+voted\s+(yes|no|yea|nay)",
+            text,
+            re.IGNORECASE,
+        )
+        if vote_pattern:
+            return vote_pattern.group(1)
+
+        # Method 2: Look for "Name (Party-State)" pattern like "Moody (R-FL)"
+        party_state_pattern = re.search(
+            r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*\([RDI]-[A-Z]{2}\)",
+            text,
+        )
+        if party_state_pattern:
+            return party_state_pattern.group(1)
+
+        # Method 3: Look for "did/how did Name vote" pattern
+        question_pattern = re.search(
+            r"(?:how\s+)?did\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)\s+vote",
+            text,
+            re.IGNORECASE,
+        )
+        if question_pattern:
+            name = question_pattern.group(1)
+            # Filter out common words
+            if name.lower() not in {"she", "he", "they", "the", "this", "that"}:
+                # Title case the name
+                return " ".join(w.capitalize() for w in name.split())
+
+        # Method 4: Capitalized name patterns (First Last or just Last)
         common_words = {
             "how", "did", "what", "about", "the", "this", "vote", "on", "and",
             "senator", "rep", "representative", "congressman", "congresswoman",
@@ -893,15 +964,17 @@ class VoteBotAgent:
             "there", "can", "be", "sure", "verify", "check", "wrong", "right",
             "actually", "really", "tell", "me", "all", "who", "why", "when",
             "does", "bill", "act", "hr", "hb", "sb", "one", "big", "beautiful",
+            "yes", "yea", "nay", "not", "voted", "according", "official",
+            "apologies", "thank", "you", "result", "result:", "your", "let",
+            "sources", "source", "source:", "digital", "democracy", "project",
         }
 
-        # Look for capitalized name patterns (First Last or just Last)
         words = text.split()
         name_parts = []
 
         for i, word in enumerate(words):
             # Clean the word
-            clean_word = word.strip(".,!?\"'()")
+            clean_word = word.strip(".,!?\"'():*#[]")
 
             # Check if it looks like a name (capitalized, not common)
             if (len(clean_word) > 1 and
