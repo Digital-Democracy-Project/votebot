@@ -173,9 +173,11 @@ VoteBot includes automatic vote verification that fetches directly from OpenStat
 - **Search commands**: "do a web search", "check openstates", "look it up"
 
 When triggered, the agent:
-1. Extracts the legislator name from the conversation
-2. Calls `BillVotesService.lookup_legislator_vote()` directly
-3. Returns authoritative data from OpenStates API
+1. Extracts the legislator name from the conversation (handles lowercase input, "X voted Y" patterns, etc.)
+2. Gets the `session-code` from Webflow page context (e.g., "119" for 119th Congress)
+3. Calls `BillVotesService.lookup_legislator_vote()` directly
+4. **Prioritizes final passage votes** over procedural votes (motion to commit, cloture, etc.)
+5. Returns authoritative data from OpenStates API that overrides RAG results
 
 ### Diagnostic Steps
 
@@ -200,15 +202,19 @@ async def verify_vote():
     result = await service.lookup_legislator_vote(
         legislator_name="Moody",
         jurisdiction="US",
-        session="119",  # 119th Congress
+        session="119",  # 119th Congress - use session-code from Webflow
         bill_identifier="HR1",
     )
 
     if result:
         print(f"Legislator: {result['legislator']}")
-        print(f"Vote: {result['vote']}")
-        print(f"Motion: {result['motion']}")
+        print(f"Vote: {result['vote']}")  # Should be YES for final passage
+        print(f"Motion: {result['motion']}")  # Should be final passage, not procedural
         print(f"Date: {result['date']}")
+        # Check if multiple votes were found
+        if result.get('total_votes_on_bill'):
+            print(f"Total votes on bill: {result['total_votes_on_bill']}")
+            print(f"Note: {result.get('note')}")
     else:
         print("Legislator not found in vote records")
 

@@ -422,7 +422,11 @@ VoteBot maintains a reverse index of legislator voting records, enabling queries
 
 4. **Name Enrichment**: During legislator-votes document creation, last-name-only entries (e.g., "Moody") are enriched with full names (e.g., "Ashley Moody") from the federal legislator cache. This improves search ranking for full-name queries.
 
-5. **Vote Verification**: When users challenge or dispute vote information, VoteBot automatically fetches directly from OpenStates API to verify. This is triggered by phrases like "are you sure", "double check", "that's wrong", or "verify". The verification uses `session-code` from Webflow's page context (e.g., "119" for 119th Congress) to query the correct legislative session. The verification result is returned as authoritative data that overrides RAG results.
+5. **Vote Verification**: When users challenge or dispute vote information, VoteBot automatically fetches directly from OpenStates API to verify. This is triggered by phrases like "are you sure", "double check", "that's wrong", or "verify". The verification:
+   - Uses `session-code` from Webflow's page context (e.g., "119" for 119th Congress)
+   - Prioritizes **final passage votes** over procedural votes (motion to commit, cloture, etc.)
+   - Returns authoritative data that overrides RAG results
+   - Notes when a legislator cast multiple votes on a bill
 
 ### CLI Commands
 
