@@ -573,11 +573,24 @@ class BillVotesService:
                 response.raise_for_status()
                 data = response.json()
 
+                logger.info(
+                    "OpenStates API response received",
+                    bill_identifier=bill_identifier,
+                    has_votes=bool(data.get("votes")),
+                    vote_count=len(data.get("votes", [])),
+                )
+
                 # Fetch legislators for party info
                 legislator_parties = await self._get_legislator_parties(jurisdiction, client, headers)
 
                 # Parse the votes with party info
                 votes = self._parse_votes(data.get("votes", []), legislator_parties)
+
+                logger.info(
+                    "Parsed votes from OpenStates",
+                    parsed_vote_count=len(votes),
+                    total_individual_votes=sum(len(v.votes) for v in votes) if votes else 0,
+                )
 
                 return BillVotesResult(
                     bill_id=f"{jurisdiction}-{session}-{clean_bill_id}",
@@ -983,15 +996,40 @@ class BillVotesService:
         """
         result = await self.get_bill_votes(jurisdiction, session, bill_identifier)
         if not result:
+            logger.warning(
+                "No bill votes result from get_bill_votes",
+                legislator_name=legislator_name,
+                jurisdiction=jurisdiction,
+                session=session,
+                bill_identifier=bill_identifier,
+            )
             return None
 
+        # Build search terms: full name, last name, first name
+        # OpenStates often has just "Moody (R-FL)" not "Ashley Moody"
+        legislator_lower = legislator_name.lower().strip()
+        name_parts = legislator_lower.split()
+        search_terms = [legislator_lower]
+        if len(name_parts) > 1:
+            search_terms.append(name_parts[-1])  # Last name
+            search_terms.append(name_parts[0])   # First name
+
+        logger.info(
+            "Searching for legislator in votes",
+            legislator_name=legislator_name,
+            search_terms=search_terms,
+            vote_events=len(result.votes),
+        )
+
         # Collect ALL votes by this legislator
-        legislator_lower = legislator_name.lower()
         legislator_votes = []
 
         for vote in result.votes:
             for record in vote.votes:
-                if legislator_lower in record.legislator_name.lower():
+                record_name_lower = record.legislator_name.lower()
+                # Match if ANY search term is in the record name
+                matched = any(term in record_name_lower for term in search_terms)
+                if matched:
                     legislator_votes.append({
                         "legislator": record.legislator_name,
                         "vote": record.vote,
@@ -1001,6 +1039,12 @@ class BillVotesService:
                         "result": vote.result,
                         "bill": result.bill_identifier,
                     })
+
+        logger.info(
+            "Legislator vote search complete",
+            legislator_name=legislator_name,
+            matches_found=len(legislator_votes),
+        )
 
         if not legislator_votes:
             return None
