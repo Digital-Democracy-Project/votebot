@@ -391,11 +391,12 @@ async def handle_user_message(session_id: str, payload: dict):
     # Build page context
     # Note: session-code from Webflow contains the OpenStates-friendly session
     # (e.g., "119" for 119th Congress, "2025" for state sessions)
+    # Do NOT use session-year, which is just the calendar year
     page_context = PageContext(
         type=page_context_data.get("type", "general"),
         id=page_context_data.get("id"),
         jurisdiction=page_context_data.get("jurisdiction"),
-        session=page_context_data.get("session") or page_context_data.get("session-code"),
+        session=page_context_data.get("session-code"),
         title=page_context_data.get("title"),
         url=page_context_data.get("url"),
         slug=page_context_data.get("slug"),
