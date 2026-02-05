@@ -389,10 +389,13 @@ async def handle_user_message(session_id: str, payload: dict):
             conversation_history.append(msg)
 
     # Build page context
+    # Note: session-code from Webflow contains the OpenStates-friendly session
+    # (e.g., "119" for 119th Congress, "2025" for state sessions)
     page_context = PageContext(
         type=page_context_data.get("type", "general"),
         id=page_context_data.get("id"),
         jurisdiction=page_context_data.get("jurisdiction"),
+        session=page_context_data.get("session") or page_context_data.get("session-code"),
         title=page_context_data.get("title"),
         url=page_context_data.get("url"),
         slug=page_context_data.get("slug"),
@@ -407,6 +410,8 @@ async def handle_user_message(session_id: str, payload: dict):
         webflow_id=page_context.webflow_id,
         slug=page_context.slug,
         bill_id=page_context.id,
+        bill_session=page_context.session,
+        jurisdiction=page_context.jurisdiction,
     )
 
     # Send stream start
