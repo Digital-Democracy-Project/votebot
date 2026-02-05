@@ -104,11 +104,14 @@ class LegislatorVotesBuilder:
         return results
 
     async def _fetch_all_bill_votes(self) -> list[dict]:
-        """Fetch all bill-votes documents from Pinecone."""
-        all_docs = []
+        """Fetch all bill-votes documents from Pinecone.
+
+        Groups chunks by document ID and concatenates their content
+        to reconstruct the full document for parsing.
+        """
+        from collections import defaultdict
 
         # Use Pinecone's list() to get all bill-votes vector IDs
-        # This is more reliable than semantic search for getting ALL documents
         all_ids = []
         for ids in self.vector_store.index.list(
             namespace=self.vector_store.namespace,
@@ -118,8 +121,10 @@ class LegislatorVotesBuilder:
 
         logger.info(f"Found {len(all_ids)} bill-votes vector IDs")
 
-        # Fetch vectors in batches (Pinecone fetch limit is 1000)
+        # Fetch vectors in batches and group by base document ID
+        chunks_by_doc: dict[str, list[tuple[int, str, dict]]] = defaultdict(list)
         batch_size = 100
+
         for i in range(0, len(all_ids), batch_size):
             batch_ids = all_ids[i:i + batch_size]
             fetch_result = self.vector_store.index.fetch(
@@ -131,14 +136,42 @@ class LegislatorVotesBuilder:
                 metadata = vec_data.metadata or {}
                 content = metadata.get("content", "")
 
-                all_docs.append({
-                    "id": vec_id,
-                    "content": content,
-                    "metadata": metadata,
-                })
+                # Extract base document ID and chunk index
+                # Format: bill-votes-{webflow_id}-chunk-{N}
+                if "-chunk-" in vec_id:
+                    base_id, chunk_part = vec_id.rsplit("-chunk-", 1)
+                    try:
+                        chunk_idx = int(chunk_part)
+                    except ValueError:
+                        chunk_idx = 0
+                else:
+                    base_id = vec_id
+                    chunk_idx = 0
+
+                chunks_by_doc[base_id].append((chunk_idx, content, metadata))
 
             if (i + batch_size) % 500 == 0:
-                logger.info(f"Fetched {min(i + batch_size, len(all_ids))}/{len(all_ids)} bill-votes documents")
+                logger.info(f"Fetched {min(i + batch_size, len(all_ids))}/{len(all_ids)} bill-votes vectors")
+
+        # Reconstruct full documents by concatenating chunks in order
+        all_docs = []
+        for base_id, chunks in chunks_by_doc.items():
+            # Sort by chunk index
+            chunks.sort(key=lambda x: x[0])
+
+            # Concatenate content
+            full_content = "\n".join(content for _, content, _ in chunks)
+
+            # Use metadata from first chunk
+            first_metadata = chunks[0][2] if chunks else {}
+
+            all_docs.append({
+                "id": base_id,
+                "content": full_content,
+                "metadata": first_metadata,
+            })
+
+        logger.info(f"Reconstructed {len(all_docs)} complete bill-votes documents from {len(all_ids)} chunks")
 
         return all_docs
 
@@ -404,7 +437,8 @@ class LegislatorVotesBuilder:
 
         # First check for new format with inline person IDs: [ocd-person/uuid]Name (Party-State)
         # Pattern matches: [ocd-person/uuid]Name (Party-State) or [ocd-person/uuid]Name
-        person_id_pattern = r'\[([^\]]+)\]([A-Za-z\'\-\.\s]+?)(?:\s*\(([RDI])-([A-Z]{2})\))?(?=,|\s*$|\.\.\.)'
+        # Also handles malformed double suffix like [id]Name (R-FL) (R-FL)
+        person_id_pattern = r'\[([^\]]+)\]([A-Za-z\'\-\.\s]+?)(?:\s*\(([RDI])-([A-Z]{2})\))+(?=,|\s*$|\.\.\.)'
         person_id_matches = list(re.finditer(person_id_pattern, text))
 
         if person_id_matches:

@@ -787,10 +787,17 @@ class BillSyncService:
 
                     # Build formatted name with available info
                     # Include person ID inline for reverse index (both state and federal)
+                    # Check if voter_name already has party-state suffix (federal votes come as "Name (R-FL)")
+                    import re
+                    has_party_suffix = bool(re.search(r'\([RDI]-[A-Z]{2}\)$', voter_name))
+
                     if person_id and person_id.startswith("ocd-person/"):
                         # Has person ID - include ID in format: [id]Name (Party-State)
-                        if party_abbrev:
-                            # For federal bills, get state from cache; for state bills, use jurisdiction
+                        if has_party_suffix:
+                            # voter_name already has party-state, just add person ID prefix
+                            formatted_with_party = f"[{person_id}]{voter_name}"
+                        elif party_abbrev:
+                            # Need to add party-state suffix
                             if is_federal:
                                 cached_info = self._federal_cache.lookup_with_info(voter_name)
                                 state_code = cached_info.get("state", "") if cached_info else ""
@@ -802,6 +809,9 @@ class BillSyncService:
                                 formatted_with_party = f"[{person_id}]{voter_name} ({party_abbrev})"
                         else:
                             formatted_with_party = f"[{person_id}]{voter_name}"
+                    elif has_party_suffix:
+                        # Already has party-state suffix, use as-is
+                        formatted_with_party = voter_name
                     elif party_abbrev:
                         # No person_id - use Name (Party-State) format
                         state_code = jurisdiction_name.upper()[:2] if len(jurisdiction_name) >= 2 else ""

@@ -11,6 +11,18 @@ from votebot.services.vector_store import SearchResult, VectorStoreService
 
 logger = structlog.get_logger()
 
+# Lazy import to avoid circular imports
+_federal_cache = None
+
+
+def _get_federal_cache():
+    """Get the federal legislator cache (lazy loaded)."""
+    global _federal_cache
+    if _federal_cache is None:
+        from votebot.sync.federal_legislator_cache import get_federal_cache
+        _federal_cache = get_federal_cache()
+    return _federal_cache
+
 
 # Mapping of state names/abbreviations to jurisdiction codes
 STATE_MAPPINGS = {
@@ -320,9 +332,11 @@ class RetrievalService:
                 )
 
         vote_results = []
+        legislator_votes_results = []
 
         # Extract potential legislator name from query for targeted search
         extracted_name = ""
+        legislator_person_id = ""
         if is_legislator_followup and page_context:
             # Extract names (capitalized words that aren't common words)
             common_words = {"how", "did", "what", "about", "the", "this", "vote", "on", "and", "senator", "rep", "representative"}
@@ -330,6 +344,43 @@ class RetrievalService:
             if name_parts:
                 extracted_name = " ".join(name_parts)
                 logger.info("Extracted legislator name for vote search", name=extracted_name)
+
+                # Look up legislator's OpenStates person ID from federal cache
+                try:
+                    cache = _get_federal_cache()
+                    # Try different name formats
+                    cached_info = cache.lookup_with_info(extracted_name)
+                    if cached_info:
+                        legislator_person_id = cached_info.get("person_id", "")
+                        logger.info(
+                            "Found legislator in federal cache",
+                            name=extracted_name,
+                            person_id=legislator_person_id,
+                        )
+                except Exception as e:
+                    logger.warning("Failed to lookup legislator in cache", error=str(e))
+
+        # If we have a legislator person ID, query for their legislator-votes document directly
+        if legislator_person_id:
+            person_uuid = legislator_person_id.replace("ocd-person/", "")
+            doc_id_prefix = f"legislator-votes-{person_uuid}"
+
+            # Query for legislator-votes documents with this person ID
+            legislator_votes_results = await self.vector_store.query(
+                query=f"{extracted_name} voting record votes",
+                top_k=5,
+                filter={"document_type": "legislator-votes"},
+            )
+            # Filter to only include results for this specific legislator
+            legislator_votes_results = [
+                r for r in legislator_votes_results
+                if r.document_id and person_uuid in r.document_id
+            ]
+            logger.info(
+                "Queried for legislator-votes document",
+                person_id=legislator_person_id,
+                results_found=len(legislator_votes_results),
+            )
 
         # For vote queries OR legislator follow-ups on bill pages, get vote data
         if is_vote_query or is_legislator_followup:
@@ -380,9 +431,12 @@ class RetrievalService:
             )
 
         # Combine results based on query type
-        if (is_vote_query or is_legislator_followup) and vote_results:
-            # For vote queries and legislator follow-ups, prioritize vote data
-            combined = vote_results + text_results + summary_results + history_results
+        if (is_vote_query or is_legislator_followup) and (legislator_votes_results or vote_results):
+            # For vote queries and legislator follow-ups, prioritize:
+            # 1. Legislator-votes documents (if we found the specific legislator)
+            # 2. Bill-votes documents
+            # 3. Other content
+            combined = legislator_votes_results + vote_results + text_results + summary_results + history_results
         else:
             # Default: legislative text first, then summaries, then history, then votes
             combined = text_results + summary_results + history_results + vote_results
