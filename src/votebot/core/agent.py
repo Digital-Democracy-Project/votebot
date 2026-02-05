@@ -901,9 +901,16 @@ class VoteBotAgent:
                     f"**Date:** {result['date']}",
                     f"**Chamber:** {result['chamber'].title()}",
                     f"**Result:** {result['result'].upper()}",
-                    "",
-                    "*This information is fetched directly from OpenStates and should be considered authoritative.*",
                 ]
+
+                # Add note about multiple votes if present
+                if result.get("note"):
+                    parts.append("")
+                    parts.append(f"*Note: {result['note']}*")
+
+                parts.append("")
+                parts.append("*This information is fetched directly from OpenStates and should be considered authoritative.*")
+
                 return "\n".join(parts)
             else:
                 # Legislator not found in vote records

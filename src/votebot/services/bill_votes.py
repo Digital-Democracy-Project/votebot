@@ -970,6 +970,8 @@ class BillVotesService:
         """
         Look up how a specific legislator voted on a bill.
 
+        Prioritizes final passage votes over procedural votes.
+
         Args:
             legislator_name: Name of the legislator
             jurisdiction: State code
@@ -983,12 +985,14 @@ class BillVotesService:
         if not result:
             return None
 
-        # Search for the legislator in all votes
+        # Collect ALL votes by this legislator
         legislator_lower = legislator_name.lower()
+        legislator_votes = []
+
         for vote in result.votes:
             for record in vote.votes:
                 if legislator_lower in record.legislator_name.lower():
-                    return {
+                    legislator_votes.append({
                         "legislator": record.legislator_name,
                         "vote": record.vote,
                         "motion": vote.motion_text,
@@ -996,6 +1000,63 @@ class BillVotesService:
                         "chamber": vote.chamber,
                         "result": vote.result,
                         "bill": result.bill_identifier,
-                    }
+                    })
 
-        return None
+        if not legislator_votes:
+            return None
+
+        # If only one vote, return it
+        if len(legislator_votes) == 1:
+            return legislator_votes[0]
+
+        # Prioritize final passage votes over procedural votes
+        # Final passage indicators (case-insensitive)
+        final_passage_keywords = [
+            "final passage",
+            "passage of the bill",
+            "pass the bill",
+            "on passage",
+            "third reading",
+            "concur in senate amendments",
+            "concur in house amendments",
+            "conference report",
+        ]
+
+        # Procedural vote indicators (lower priority)
+        procedural_keywords = [
+            "motion to commit",
+            "motion to recommit",
+            "motion to table",
+            "cloture",
+            "previous question",
+            "rule for consideration",
+            "motion to proceed",
+        ]
+
+        # Score each vote - higher is better (more likely to be final passage)
+        def score_vote(v):
+            motion_lower = (v.get("motion") or "").lower()
+
+            # Final passage gets highest score
+            for keyword in final_passage_keywords:
+                if keyword in motion_lower:
+                    return 100
+
+            # Procedural gets lowest score
+            for keyword in procedural_keywords:
+                if keyword in motion_lower:
+                    return -100
+
+            # Default score based on date (later is usually more important)
+            return 0
+
+        # Sort by score (descending), then by date (descending)
+        legislator_votes.sort(key=lambda v: (score_vote(v), v.get("date", "")), reverse=True)
+
+        # Return the highest priority vote, but include count of total votes
+        best_vote = legislator_votes[0]
+        if len(legislator_votes) > 1:
+            best_vote["total_votes_on_bill"] = len(legislator_votes)
+            best_vote["note"] = f"This legislator cast {len(legislator_votes)} votes on this bill. Showing the final passage vote."
+
+        return best_vote
