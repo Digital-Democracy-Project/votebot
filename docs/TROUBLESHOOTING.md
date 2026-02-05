@@ -183,10 +183,17 @@ When triggered, the agent:
 
 #### 1. Check if verification was triggered
 
-Look in the logs for:
+Look in the logs for these key messages:
 ```
-"Verification request detected" or "Dispute detected, triggering verification"
+"Checking dispute/verification trigger" message=... is_dispute=True/False
+"Dispute detected, attempting vote verification"
+"Vote verification successful" context_length=...
+"Vote verification returned empty" (if name extraction or API lookup failed)
+"Verifying legislator vote from OpenStates" legislator=... bill=... session=...
+"Could not extract legislator name for vote verification" (if name not found in message or history)
 ```
+
+If `is_dispute=False` when you expected verification, the trigger phrase isn't being matched.
 
 #### 2. Test verification manually
 
