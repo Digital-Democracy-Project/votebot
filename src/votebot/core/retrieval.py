@@ -374,7 +374,7 @@ class RetrievalService:
             # Filter to only include results for this specific legislator
             legislator_votes_results = [
                 r for r in legislator_votes_results
-                if r.document_id and person_uuid in r.document_id
+                if r.metadata.get('document_id') and person_uuid in r.metadata.get('document_id', '')
             ]
             logger.info(
                 "Queried for legislator-votes document",
