@@ -425,6 +425,10 @@ python -m votebot.sync.build_legislator_votes
 
 # Dry run to see stats without writing
 python -m votebot.sync.build_legislator_votes --dry-run
+
+# Clean up corrupted documents (from chunk boundary parsing issues)
+python -m votebot.sync.build_legislator_votes --cleanup --dry-run  # Preview
+python -m votebot.sync.build_legislator_votes --cleanup            # Delete corrupted docs
 ```
 
 ### Sync Workflow
@@ -650,6 +654,17 @@ votebot/
 | First Token (streaming) | < 1.5 seconds |
 | Availability | 99.9% uptime |
 | Concurrency | 1,000+ simultaneous |
+
+## Troubleshooting
+
+For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). This includes:
+
+- Legislator vote lookups not working
+- Corrupted legislator-votes documents (chunk boundary parsing issues)
+- Missing data in search results
+- Federal legislator cache issues
+- Pinecone index diagnostics
+- Full index rebuild procedures
 
 ## Contributing
 
