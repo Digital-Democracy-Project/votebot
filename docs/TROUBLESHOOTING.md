@@ -236,20 +236,28 @@ The current trigger phrases are in `agent.py:_is_dispute_or_correction()`. If a 
 
 1. **Check OpenStates API key**: Ensure `OPENSTATES_API_KEY` is set and valid
 2. **Check bill identifier format**: The bill must be in OpenStates (e.g., "HR1" for federal, "HB123" for state)
-3. **Check legislator name extraction**: Names must be capitalized and not common words
-4. **Check session-code from Webflow**: The frontend should pass `session-code` in the page context. This field in Webflow contains the OpenStates-friendly session identifier (e.g., "119" for 119th Congress, "2025" for state sessions). Do NOT use `session-year` which is just the calendar year.
-5. **Check logs for session value**: Look for `bill_session=` in the WebSocket logs to verify the session is being passed
+3. **Check legislator name extraction**: The lookup now searches for last name in addition to full name (e.g., "moody" matches "Moody (R-FL)")
+4. **Check session resolution**: Session can come from multiple sources (see flow below)
+5. **Check logs for session value**: Look for `bill_session=` in the WebSocket logs and `session=` in verification logs
+
+### Session Resolution Flow
+
+The session for OpenStates queries is resolved through this chain:
+
+1. **Widget** calls `/content/resolve` with the DDP URL
+2. **`/content/resolve`** fetches bill from Webflow CMS and extracts `session-code` field
+3. **Widget** sends page_context to WebSocket including `session` from resolve response
+4. **WebSocket handler** accepts both `session` and `session-code` field names
+5. **If session is still null**, the agent calculates Congress number from year as fallback
 
 ### Webflow Page Context Fields
 
-The frontend should pass these fields from Webflow:
-
-| Webflow Field | Maps To | Description |
-|---------------|---------|-------------|
-| `session-code` | `page_context.session` | OpenStates-friendly session (e.g., "119", "2025") |
-| `session-year` | (not used) | Calendar year only - don't use for OpenStates |
-| `jurisdiction` | `page_context.jurisdiction` | State code or "US" for federal |
-| `slug` | `page_context.id` | Bill identifier (e.g., "HR1") |
+| Webflow Field | Resolve Response | WebSocket Accepts | Description |
+|---------------|------------------|-------------------|-------------|
+| `session-code` | `session` | `session` or `session-code` | OpenStates-friendly session (e.g., "119", "2025") |
+| `session-year` | (not used) | (not used) | Calendar year only - don't use for OpenStates |
+| `jurisdiction` | `jurisdiction` | `jurisdiction` | State code or "US" for federal |
+| `slug` | `slug` | `slug` | URL slug for the bill |
 
 ### Known Issues (Fixed)
 
@@ -289,6 +297,38 @@ The frontend should pass these fields from Webflow:
 Final passage keywords (high priority): "final passage", "passage of the bill", "on passage", "third reading", "conference report"
 
 Procedural keywords (low priority): "motion to commit", "motion to recommit", "cloture", "motion to table"
+
+#### Legislator Name Not Matching Vote Records
+
+**Bug**: When searching for "Ashley Moody" in vote records, no match was found because OpenStates stores names as "Moody (R-FL)" (last name with party/state).
+
+**Example**: User asks about "Ashley Moody" → extracted name is "Ashley Moody" → search for "ashley moody" in "moody (r-fl)" fails because it's not a substring.
+
+**Fix**: The `lookup_legislator_vote` method now builds multiple search terms:
+- Full name: "ashley moody"
+- Last name: "moody"
+- First name: "ashley"
+
+If ANY search term matches the vote record name, it's considered a match. This allows "moody" to match "Moody (R-FL)".
+
+#### Session Not Extracted from Webflow CMS
+
+**Bug**: The `/content/resolve` endpoint was looking for `session` or `legislative-session` fields in Webflow, but Webflow uses `session-code`.
+
+**Fix**: The `extract_session` function now checks fields in this order:
+1. `session-code` (Webflow's field name)
+2. `session` (fallback)
+3. `legislative-session` (fallback)
+4. Extract year from slug and calculate Congress number (final fallback)
+
+#### WebSocket Not Accepting Session from Resolve Endpoint
+
+**Bug**: The WebSocket handler only looked for `session-code` in page_context, but `/content/resolve` returns the field as `session`.
+
+**Fix**: WebSocket handler now accepts both field names:
+```python
+session=page_context_data.get("session") or page_context_data.get("session-code")
+```
 
 ### Prevention
 
