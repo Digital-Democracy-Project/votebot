@@ -311,6 +311,9 @@ class RetrievalService:
         # Also detect follow-up questions about legislators when on a bill page
         # e.g., "how about rick scott?", "what about senator cruz?", "and rubio?"
         is_legislator_followup = False
+        extracted_name = ""
+        legislator_person_id = ""
+
         if page_context and page_context.type == "bill":
             followup_patterns = ["how about", "what about", "how did", "and ", "what did"]
             legislator_indicators = ["senator", "rep ", "representative", "congressman", "congresswoman"]
@@ -318,29 +321,67 @@ class RetrievalService:
             has_followup_pattern = any(p in query_lower for p in followup_patterns)
             has_legislator_word = any(l in query_lower for l in legislator_indicators)
 
-            # Check for proper name pattern (capitalized words that could be names)
-            # e.g., "rick scott", "cruz", "pelosi"
-            name_words = [w for w in query.split() if w[0].isupper() and len(w) > 2]
-            has_potential_name = len(name_words) > 0
+            # Extract potential name - works with both capitalized and lowercase
+            # Filter out common query words to find potential names
+            common_words = {"how", "did", "what", "about", "the", "this", "vote", "voted",
+                          "on", "and", "senator", "rep", "representative", "congressman",
+                          "congresswoman", "bill", "it", "they", "their", "a", "an", "for"}
+            words = [w.strip("?.,!") for w in query.split()]
+            potential_name_parts = [w for w in words if w.lower() not in common_words and len(w) > 1]
 
-            is_legislator_followup = has_followup_pattern and (has_legislator_word or has_potential_name)
+            # Try to find a legislator name in the federal cache
+            if potential_name_parts and has_followup_pattern:
+                try:
+                    cache = _get_federal_cache()
+                    # Try different combinations of potential name parts
+                    # First try all parts together, then try individual parts
+                    name_candidates = [
+                        " ".join(potential_name_parts),  # "ashley moody"
+                        potential_name_parts[-1] if potential_name_parts else "",  # "moody" (last name)
+                    ]
+                    # Also try title-cased versions
+                    name_candidates.extend([n.title() for n in name_candidates])
+
+                    for candidate in name_candidates:
+                        if not candidate:
+                            continue
+                        cached_info = cache.lookup_with_info(candidate)
+                        if cached_info:
+                            extracted_name = cached_info.get("name", candidate)
+                            legislator_person_id = cached_info.get("person_id", "")
+                            is_legislator_followup = True
+                            logger.info(
+                                "Found legislator in federal cache",
+                                query_name=candidate,
+                                matched_name=extracted_name,
+                                person_id=legislator_person_id,
+                            )
+                            break
+                except Exception as e:
+                    logger.warning("Failed to lookup legislator in cache", error=str(e))
+
+            # Fall back to original detection if no cache match
+            if not is_legislator_followup:
+                # Check for proper name pattern (capitalized words)
+                name_words = [w for w in query.split() if len(w) > 2 and w[0].isupper()]
+                has_potential_name = len(name_words) > 0
+                is_legislator_followup = has_followup_pattern and (has_legislator_word or has_potential_name)
 
             if is_legislator_followup:
                 logger.info(
                     "Detected legislator follow-up query on bill page",
                     query_preview=query[:50],
+                    extracted_name=extracted_name,
                 )
 
         vote_results = []
         legislator_votes_results = []
 
-        # Extract potential legislator name from query for targeted search
-        extracted_name = ""
-        legislator_person_id = ""
-        if is_legislator_followup and page_context:
+        # If we haven't extracted a name yet but this is a legislator follow-up, try again
+        if is_legislator_followup and not extracted_name and page_context:
             # Extract names (capitalized words that aren't common words)
             common_words = {"how", "did", "what", "about", "the", "this", "vote", "on", "and", "senator", "rep", "representative"}
-            name_parts = [w for w in query.split() if w[0].isupper() and w.lower() not in common_words and len(w) > 1]
+            name_parts = [w for w in query.split() if len(w) > 1 and w[0].isupper() and w.lower() not in common_words]
             if name_parts:
                 extracted_name = " ".join(name_parts)
                 logger.info("Extracted legislator name for vote search", name=extracted_name)
@@ -348,7 +389,6 @@ class RetrievalService:
                 # Look up legislator's OpenStates person ID from federal cache
                 try:
                     cache = _get_federal_cache()
-                    # Try different name formats
                     cached_info = cache.lookup_with_info(extracted_name)
                     if cached_info:
                         legislator_person_id = cached_info.get("person_id", "")
