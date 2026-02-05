@@ -5,6 +5,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 ## Table of Contents
 
 - [Legislator Vote Lookups Not Working](#legislator-vote-lookups-not-working)
+- [Model Contradicts Itself About Votes](#model-contradicts-itself-about-votes)
 - [Poor Search Ranking for Full Name Queries](#poor-search-ranking-for-full-name-queries)
 - [Corrupted Legislator-Votes Documents](#corrupted-legislator-votes-documents)
 - [Missing Data in Search Results](#missing-data-in-search-results)
@@ -135,6 +136,100 @@ asyncio.run(test_search("Ashley Moody vote HR1"))
    ```bash
    python -m votebot.updates.bill_sync batch --jurisdiction us --include-openstates
    ```
+
+---
+
+## Model Contradicts Itself About Votes
+
+### Symptom
+VoteBot gives contradictory answers about a legislator's vote within the same conversation:
+- First response: "Ashley Moody voted No on HR1"
+- Second response: "Ashley Moody is not listed as a member of Congress"
+- Or: "All Republicans voted Yes" followed by claiming a Republican voted No
+
+### Example
+```
+User: "How did Ashley Moody vote on this?"
+Bot: "Ashley Moody voted No on this bill."
+
+User: "Are you sure?"
+Bot: "Ashley Moody is the Attorney General of Florida and does not serve in Congress..."
+```
+
+### Root Causes
+
+1. **Duplicate votes in RAG data**: When a bill has multiple vote events (procedural votes, final passage), the same legislator may appear in both "Voted Yes" and "Voted No" sections for different motions. This confuses the model.
+
+2. **Model hallucination**: When users challenge information, the model may fall back to outdated training data instead of trusting RAG results.
+
+3. **Verification not triggered**: Phrases like "are you sure" or "be sure" may not trigger the verification flow.
+
+### Solution: Vote Verification Feature
+
+VoteBot includes automatic vote verification that fetches directly from OpenStates when users challenge information. This is triggered by phrases like:
+
+- **Dispute phrases**: "that's wrong", "no way", "that can't be", "impossible"
+- **Verification requests**: "be sure", "double check", "verify", "confirm"
+- **Search commands**: "do a web search", "check openstates", "look it up"
+
+When triggered, the agent:
+1. Extracts the legislator name from the conversation
+2. Calls `BillVotesService.lookup_legislator_vote()` directly
+3. Returns authoritative data from OpenStates API
+
+### Diagnostic Steps
+
+#### 1. Check if verification was triggered
+
+Look in the logs for:
+```
+"Verification request detected" or "Dispute detected, triggering verification"
+```
+
+#### 2. Test verification manually
+
+```python
+import asyncio
+from src.votebot.config import get_settings
+from src.votebot.services.bill_votes import BillVotesService
+
+async def verify_vote():
+    settings = get_settings()
+    service = BillVotesService(settings)
+
+    result = await service.lookup_legislator_vote(
+        legislator_name="Moody",
+        jurisdiction="US",
+        session="119",  # 119th Congress
+        bill_identifier="HR1",
+    )
+
+    if result:
+        print(f"Legislator: {result['legislator']}")
+        print(f"Vote: {result['vote']}")
+        print(f"Motion: {result['motion']}")
+        print(f"Date: {result['date']}")
+    else:
+        print("Legislator not found in vote records")
+
+asyncio.run(verify_vote())
+```
+
+#### 3. Check verification trigger phrases
+
+The current trigger phrases are in `agent.py:_is_dispute_or_correction()`. If a phrase isn't triggering verification, it may need to be added to the list.
+
+### If Verification Isn't Working
+
+1. **Check OpenStates API key**: Ensure `OPENSTATES_API_KEY` is set and valid
+2. **Check bill identifier format**: The bill must be in OpenStates (e.g., "HR1" for federal, "HB123" for state)
+3. **Check legislator name extraction**: Names must be capitalized and not common words
+
+### Prevention
+
+The duplicate votes issue can be mitigated by improving the `build_legislator_votes.py` to:
+1. Only include final passage votes (not procedural)
+2. Or clearly label each vote with its motion type
 
 ---
 

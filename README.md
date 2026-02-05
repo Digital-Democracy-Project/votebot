@@ -413,6 +413,8 @@ VoteBot maintains a reverse index of legislator voting records, enabling queries
 
 4. **Name Enrichment**: During legislator-votes document creation, last-name-only entries (e.g., "Moody") are enriched with full names (e.g., "Ashley Moody") from the federal legislator cache. This improves search ranking for full-name queries.
 
+5. **Vote Verification**: When users challenge or dispute vote information, VoteBot automatically fetches directly from OpenStates API to verify. This is triggered by phrases like "are you sure", "double check", "that's wrong", or "verify". The verification result is returned as authoritative data that overrides RAG results.
+
 ### CLI Commands
 
 ```bash
