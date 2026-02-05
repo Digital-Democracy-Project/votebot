@@ -262,6 +262,21 @@ The frontend should pass these fields from Webflow:
 3. Pattern match for "did X vote"
 4. Fallback to capitalized word extraction
 
+#### Verification Returning Procedural Vote Instead of Final Passage
+
+**Bug**: When a legislator cast multiple votes on a bill (e.g., NO on "motion to commit" and YES on final passage), the verification returned the first match (procedural NO) instead of the more important final passage vote (YES).
+
+**Example**: Ashley Moody voted NO on the "Motion to Commit HR 1 to Committee" but YES on final passage. The verification incorrectly reported her as voting NO.
+
+**Fix**: The `lookup_legislator_vote` method now:
+1. Collects ALL votes by the legislator on the bill
+2. Scores each vote to prioritize final passage keywords over procedural keywords
+3. Returns the highest-priority vote with a note indicating multiple votes exist
+
+Final passage keywords (high priority): "final passage", "passage of the bill", "on passage", "third reading", "conference report"
+
+Procedural keywords (low priority): "motion to commit", "motion to recommit", "cloture", "motion to table"
+
 ### Prevention
 
 The duplicate votes issue can be mitigated by improving the `build_legislator_votes.py` to:
