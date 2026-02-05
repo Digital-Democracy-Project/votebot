@@ -123,14 +123,30 @@ class VoteBotAgent:
 
         # Step 3: If user is disputing/verifying vote info, fetch directly from OpenStates
         vote_verification_context = ""
-        if self._is_dispute_or_correction(message) and page_context and page_context.type == "bill":
+        is_dispute = self._is_dispute_or_correction(message)
+        logger.info(
+            "Checking dispute/verification trigger (non-streaming)",
+            message=message[:50],
+            is_dispute=is_dispute,
+            page_type=page_context.type if page_context else None,
+        )
+        if is_dispute and page_context and page_context.type == "bill":
+            logger.info("Dispute detected, attempting vote verification (non-streaming)")
             vote_verification_context = await self._verify_legislator_vote(
                 message=message,
                 page_context=page_context,
                 conversation_history=conversation_history,
             )
             if vote_verification_context:
-                logger.info("Fetched vote verification from OpenStates for non-streaming")
+                logger.info(
+                    "Vote verification successful (non-streaming)",
+                    context_length=len(vote_verification_context),
+                )
+            else:
+                logger.warning(
+                    "Vote verification returned empty (non-streaming)",
+                    message=message[:50],
+                )
 
         # Step 4: Build page info for prompt
         page_info = self._extract_page_info(page_context)
@@ -314,14 +330,30 @@ class VoteBotAgent:
 
         # Step 2d: If user is disputing/verifying vote info, fetch directly from OpenStates
         vote_verification_context = ""
-        if self._is_dispute_or_correction(message) and page_context and page_context.type == "bill":
+        is_dispute = self._is_dispute_or_correction(message)
+        logger.info(
+            "Checking dispute/verification trigger",
+            message=message[:50],
+            is_dispute=is_dispute,
+            page_type=page_context.type if page_context else None,
+        )
+        if is_dispute and page_context and page_context.type == "bill":
+            logger.info("Dispute detected, attempting vote verification")
             vote_verification_context = await self._verify_legislator_vote(
                 message=message,
                 page_context=page_context,
                 conversation_history=conversation_history,
             )
             if vote_verification_context:
-                logger.info("Fetched vote verification from OpenStates")
+                logger.info(
+                    "Vote verification successful",
+                    context_length=len(vote_verification_context),
+                )
+            else:
+                logger.warning(
+                    "Vote verification returned empty - could not find legislator or vote",
+                    message=message[:50],
+                )
 
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
