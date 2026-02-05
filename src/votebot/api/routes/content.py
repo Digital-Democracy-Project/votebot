@@ -207,7 +207,8 @@ async def fetch_webflow_item_by_slug(
 def extract_session(fields: dict, slug: str, jurisdiction: str) -> str:
     """Extract legislative session from CMS fields or slug."""
     # Check if session is explicitly set in CMS
-    session = fields.get("session") or fields.get("legislative-session")
+    # Webflow uses 'session-code' for the OpenStates-friendly session identifier
+    session = fields.get("session-code") or fields.get("session") or fields.get("legislative-session")
     if session:
         return str(session)
 
