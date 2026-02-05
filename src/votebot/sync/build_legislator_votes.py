@@ -59,6 +59,25 @@ class LegislatorVotesBuilder:
     4. Create/update legislator-votes documents
     """
 
+    # Regex pattern to validate OpenStates person IDs (ocd-person/UUID format)
+    VALID_PERSON_ID_PATTERN = re.compile(
+        r'^ocd-person/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+    )
+
+    @classmethod
+    def is_valid_person_id(cls, person_id: str) -> bool:
+        """
+        Validate that a person ID is a properly formatted OpenStates ID.
+
+        Valid format: ocd-person/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        where x is a lowercase hex digit.
+
+        This prevents malformed IDs from chunk boundary parsing issues.
+        """
+        if not person_id:
+            return False
+        return bool(cls.VALID_PERSON_ID_PATTERN.match(person_id))
+
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self.vector_store = VectorStoreService(self.settings)
@@ -263,7 +282,17 @@ class LegislatorVotesBuilder:
 
             # Add to legislator records
             for leg_key, person_id, vote in votes_extracted:
-                # Use person_id as key if available, otherwise use name-based key
+                # Double-check person_id validity (defense in depth)
+                # Use person_id as key only if it's valid, otherwise use name-based key
+                if person_id and not self.is_valid_person_id(person_id):
+                    # Log and skip malformed person IDs (likely chunk boundary artifacts)
+                    logger.debug(
+                        "Skipping malformed person_id",
+                        person_id=person_id[:50] if person_id else "",
+                        leg_key=leg_key,
+                    )
+                    person_id = ""  # Clear invalid ID, fall back to name-based key
+
                 key = person_id if person_id else leg_key
                 if key not in legislator_votes:
                     name, party, state = self._parse_legislator_key(leg_key)
@@ -447,6 +476,13 @@ class LegislatorVotesBuilder:
                 name = match.group(2).strip()
                 party = match.group(3) or ""  # R, D, I
                 state = match.group(4) or ""  # State code
+
+                # Validate person_id format to prevent chunk boundary corruption
+                # Malformed IDs from chunk boundaries look like:
+                # "ocd-person/cb582ab6-6a" (truncated) or "44-620c9a6a1f4c" (partial)
+                if not self.is_valid_person_id(person_id):
+                    # Skip malformed entries - they're artifacts of chunk splitting
+                    continue
 
                 # Use jurisdiction as fallback for state
                 if not state and jurisdiction and jurisdiction.upper() not in ["US", "UNITED STATES"]:
@@ -769,6 +805,101 @@ class LegislatorVotesBuilder:
 
         return "\n".join(parts)
 
+    async def cleanup_corrupted_documents(self, dry_run: bool = False) -> dict:
+        """
+        Remove corrupted legislator-votes documents from Pinecone.
+
+        Corrupted documents are identified by malformed document IDs that don't
+        follow the pattern: legislator-votes-{valid-uuid}
+
+        These are typically caused by chunk boundary parsing issues where
+        person IDs get split across chunks.
+
+        Args:
+            dry_run: If True, only report what would be deleted
+
+        Returns:
+            Dict with cleanup stats
+        """
+        logger.info("Starting cleanup of corrupted legislator-votes documents")
+
+        # Valid document ID pattern: legislator-votes-{uuid} or legislator-votes-{name}-{jurisdiction}
+        # UUID format: 8-4-4-4-12 hex chars
+        valid_uuid_pattern = re.compile(
+            r'^legislator-votes-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(-chunk-\d+)?$'
+        )
+        # Name-based pattern for legacy docs: legislator-votes-{name}-{jurisdiction}
+        valid_name_pattern = re.compile(
+            r'^legislator-votes-[a-z\-]+(-chunk-\d+)?$'
+        )
+
+        # List all legislator-votes vector IDs
+        all_ids = []
+        for ids in self.vector_store.index.list(
+            namespace=self.vector_store.namespace,
+            prefix="legislator-votes-"
+        ):
+            all_ids.extend(ids)
+
+        logger.info(f"Found {len(all_ids)} total legislator-votes vector IDs")
+
+        # Identify corrupted IDs
+        corrupted_ids = []
+        valid_ids = []
+
+        for vec_id in all_ids:
+            if valid_uuid_pattern.match(vec_id) or valid_name_pattern.match(vec_id):
+                valid_ids.append(vec_id)
+            else:
+                corrupted_ids.append(vec_id)
+
+        logger.info(
+            f"Identified {len(corrupted_ids)} corrupted documents, "
+            f"{len(valid_ids)} valid documents"
+        )
+
+        if dry_run:
+            # Report what would be deleted
+            sample_corrupted = corrupted_ids[:20]
+            return {
+                "success": True,
+                "dry_run": True,
+                "total_docs": len(all_ids),
+                "corrupted_docs": len(corrupted_ids),
+                "valid_docs": len(valid_ids),
+                "sample_corrupted": sample_corrupted,
+            }
+
+        # Delete corrupted documents in batches
+        deleted = 0
+        batch_size = 100
+
+        for i in range(0, len(corrupted_ids), batch_size):
+            batch = corrupted_ids[i:i + batch_size]
+            try:
+                self.vector_store.index.delete(
+                    ids=batch,
+                    namespace=self.vector_store.namespace
+                )
+                deleted += len(batch)
+                if deleted % 500 == 0:
+                    logger.info(f"Deleted {deleted}/{len(corrupted_ids)} corrupted documents")
+            except Exception as e:
+                logger.error(f"Failed to delete batch: {e}")
+
+        logger.info(
+            "Cleanup complete",
+            deleted=deleted,
+            remaining_valid=len(valid_ids),
+        )
+
+        return {
+            "success": True,
+            "deleted": deleted,
+            "remaining_valid": len(valid_ids),
+            "corrupted_ids_sample": corrupted_ids[:10] if corrupted_ids else [],
+        }
+
 
 async def main():
     """CLI entry point for building legislator votes."""
@@ -782,13 +913,23 @@ async def main():
         action="store_true",
         help="Don't write to Pinecone, just report stats",
     )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Clean up corrupted legislator-votes documents instead of building",
+    )
 
     args = parser.parse_args()
 
     builder = LegislatorVotesBuilder()
-    results = await builder.build_all(dry_run=args.dry_run)
 
-    print("\n=== Build Results ===")
+    if args.cleanup:
+        results = await builder.cleanup_corrupted_documents(dry_run=args.dry_run)
+        print("\n=== Cleanup Results ===")
+    else:
+        results = await builder.build_all(dry_run=args.dry_run)
+        print("\n=== Build Results ===")
+
     for key, value in results.items():
         print(f"{key}: {value}")
 
