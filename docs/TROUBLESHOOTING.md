@@ -330,6 +330,18 @@ If ANY search term matches the vote record name, it's considered a match. This a
 session=page_context_data.get("session") or page_context_data.get("session-code")
 ```
 
+### Resolution Summary (February 2026)
+
+The "Model Contradicts Itself About Votes" issue is now **RESOLVED**. The complete fix required addressing multiple issues:
+
+1. **Name matching**: Search for last name ("moody") in addition to full name ("ashley moody") when looking up votes in OpenStates records
+2. **Session extraction**: `/content/resolve` now extracts `session-code` from Webflow CMS
+3. **Session passing**: WebSocket accepts both `session` and `session-code` field names
+4. **Vote prioritization**: Returns final passage votes over procedural votes
+5. **Congress number fallback**: Calculates "119" from year if session not provided
+
+**Verified working**: When users say "that's not true" or "check open states", VoteBot now correctly verifies Ashley Moody voted **YES** on HR1 final passage.
+
 ### Prevention
 
 The duplicate votes issue can be mitigated by improving the `build_legislator_votes.py` to:
