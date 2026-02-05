@@ -145,7 +145,7 @@ async def build_legislator_votes() -> dict:
 
     start = time.time()
     builder = LegislatorVotesBuilder()
-    result = await builder.build()
+    result = await builder.build_all()
     elapsed = time.time() - start
 
     print(f"  Legislators processed: {result.get('legislators_processed', 0)}")
