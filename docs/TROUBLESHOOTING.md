@@ -224,8 +224,19 @@ The current trigger phrases are in `agent.py:_is_dispute_or_correction()`. If a 
 1. **Check OpenStates API key**: Ensure `OPENSTATES_API_KEY` is set and valid
 2. **Check bill identifier format**: The bill must be in OpenStates (e.g., "HR1" for federal, "HB123" for state)
 3. **Check legislator name extraction**: Names must be capitalized and not common words
-4. **Check session/Congress number**: For federal bills, the session must be the Congress number (e.g., "119" for 119th Congress), not the year. The agent now auto-calculates this for US jurisdiction.
-5. **Check page context**: Ensure the frontend passes `session` in the page context when available
+4. **Check session-code from Webflow**: The frontend should pass `session-code` in the page context. This field in Webflow contains the OpenStates-friendly session identifier (e.g., "119" for 119th Congress, "2025" for state sessions). Do NOT use `session-year` which is just the calendar year.
+5. **Check logs for session value**: Look for `bill_session=` in the WebSocket logs to verify the session is being passed
+
+### Webflow Page Context Fields
+
+The frontend should pass these fields from Webflow:
+
+| Webflow Field | Maps To | Description |
+|---------------|---------|-------------|
+| `session-code` | `page_context.session` | OpenStates-friendly session (e.g., "119", "2025") |
+| `session-year` | (not used) | Calendar year only - don't use for OpenStates |
+| `jurisdiction` | `page_context.jurisdiction` | State code or "US" for federal |
+| `slug` | `page_context.id` | Bill identifier (e.g., "HR1") |
 
 ### Known Issues (Fixed)
 
@@ -235,9 +246,11 @@ The current trigger phrases are in `agent.py:_is_dispute_or_correction()`. If a 
 
 **Example**: Query to `https://v3.openstates.org/bills/us/2026/HR1` would fail because the correct URL is `https://v3.openstates.org/bills/us/119/HR1`.
 
-**Fix**: The `_verify_legislator_vote` method now calculates the Congress number from the year:
-- 119th Congress: 2025-2027
-- 120th Congress: 2027-2029
+**Fix**:
+1. The WebSocket handler now extracts `session-code` from Webflow and maps it to `page_context.session`
+2. If `session-code` is not provided, the agent calculates the Congress number from the year as a fallback:
+   - 119th Congress: 2025-2027
+   - 120th Congress: 2027-2029
 
 #### Name Extraction Failing for Lowercase Input
 

@@ -114,10 +114,13 @@ Process a chat message and return a response.
   "page_context": {
     "type": "bill",
     "id": "HR-1234",
-    "jurisdiction": "US"
+    "jurisdiction": "US",
+    "session-code": "119"
   }
 }
 ```
+
+> **Note**: The `session-code` field should contain the OpenStates-friendly session identifier from Webflow (e.g., "119" for 119th Congress, "2025" for state legislative sessions). This is used for vote verification lookups.
 
 **Response:**
 ```json
@@ -263,7 +266,13 @@ https://votebot.digitaldemocracyproject.org/?ddp_url=https://digitaldemocracypro
 <script>
     window.DDPChatConfig = {
         wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
-        pageContext: { type: 'bill', id: 'HR 1', title: 'My Bill' },
+        pageContext: {
+            type: 'bill',
+            id: 'HR 1',
+            title: 'My Bill',
+            jurisdiction: 'US',
+            'session-code': '119'  // OpenStates-friendly session from Webflow
+        },
         autoOpen: false,  // Set to true to auto-open on page load
         autoDetect: true  // Auto-detect DDP page context
     };
@@ -413,7 +422,7 @@ VoteBot maintains a reverse index of legislator voting records, enabling queries
 
 4. **Name Enrichment**: During legislator-votes document creation, last-name-only entries (e.g., "Moody") are enriched with full names (e.g., "Ashley Moody") from the federal legislator cache. This improves search ranking for full-name queries.
 
-5. **Vote Verification**: When users challenge or dispute vote information, VoteBot automatically fetches directly from OpenStates API to verify. This is triggered by phrases like "are you sure", "double check", "that's wrong", or "verify". The verification result is returned as authoritative data that overrides RAG results.
+5. **Vote Verification**: When users challenge or dispute vote information, VoteBot automatically fetches directly from OpenStates API to verify. This is triggered by phrases like "are you sure", "double check", "that's wrong", or "verify". The verification uses `session-code` from Webflow's page context (e.g., "119" for 119th Congress) to query the correct legislative session. The verification result is returned as authoritative data that overrides RAG results.
 
 ### CLI Commands
 
