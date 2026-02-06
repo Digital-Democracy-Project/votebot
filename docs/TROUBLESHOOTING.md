@@ -15,6 +15,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Federal Legislator Cache Issues](#federal-legislator-cache-issues)
 - [Pinecone Index Diagnostics](#pinecone-index-diagnostics)
 - [RAG Test Suite Diagnostics](#rag-test-suite-diagnostics)
+  - [Failure Analysis (100-Document Sample)](#failure-analysis-100-document-sample)
 - [Full Index Rebuild Procedure](#full-index-rebuild-procedure)
 
 ---
@@ -994,6 +995,8 @@ The test suite reports:
 
 ### Benchmark Results (February 2026)
 
+**Small sample (10 documents per category, 29 validated tests):**
+
 | Category | Pass Rate | Notes |
 |----------|-----------|-------|
 | Bills | 91% | Title keyword matching, bill info queries |
@@ -1003,13 +1006,105 @@ The test suite reports:
 | Out-of-system votes | N/A | No ground truth — tests dynamic OpenStates lookup |
 | **Overall** | **86%** | Across all validated tests |
 
+**Large sample (100 documents per category, 884 tests, 871 validated):**
+
+| Category | Passed | Total | Rate |
+|----------|--------|-------|------|
+| Bills | 264 | 312 | **85%** |
+| Legislators | 290 | 300 | **97%** |
+| Organizations | 249 | 259 | **96%** |
+| DDP | — | 8 | N/A |
+| Out-of-system votes | — | 5 | N/A |
+| **Overall** | **803** | **871** | **92.2%** |
+
+**By jurisdiction (large sample):**
+
+| Jurisdiction | Passed/Total | Rate |
+|-------------|-------------|------|
+| FL | 216/225 | 96% |
+| US | 110/121 | 91% |
+| AZ | 40/45 | 89% |
+| VA | 60/68 | 88% |
+| WA | 88/104 | 85% |
+| UT | 15/18 | 83% |
+| MI | 21/27 | 78% |
+| MA | 4/4 | 100% |
+
+**Aggregate metrics:** Avg confidence 0.78, avg latency 8.4s, P95 latency 18.5s, citation rate 64.2%.
+
+### Failure Analysis (100-Document Sample)
+
+68 total failures across 4 clusters:
+
+#### Cluster 1: Bill → Org Positions (46 failures, 67.6% of all failures)
+
+**Template**: "Which organizations support/oppose [bill]?"
+**Pass rate for this template**: 66/112 (58.9%) — the weakest template
+
+The retrieval pipeline finds the bill but cannot locate organization position data in Pinecone. Phase 4a org retrieval searches for org docs referencing the bill, but many org chunks are too small (just headers) or don't contain the bill slug in their content.
+
+| Jurisdiction | Failed/Total | Rate |
+|-------------|-------------|------|
+| US | 7/11 | 36% pass |
+| MI | 6/9 | 33% pass |
+| UT | 3/6 | 50% pass |
+| AZ | 4/9 | 56% pass |
+| FL | 2/5 | 60% pass |
+| VA | 8/26 | 69% pass |
+| WA | 16/44 | 64% pass |
+
+**Root cause**: Organization documents are chunked so aggressively that bill position data is in separate chunks (or missing entirely) from the org header. The Phase 4a retrieval finds org documents but the specific chunks containing "Bills Supported/Opposed" sections don't always reference the bill by slug. See [Organization Chunk Data Quality](#organization-chunk-data-quality).
+
+**Fix needed**: Re-ingest organization documents with larger chunks or prepend org name + bill slugs to each chunk. This is a data quality issue, not a retrieval logic issue.
+
+#### Cluster 2: Org → Bills Supported (10 failures, 14.7%)
+
+**Template**: "What bills does [org] support?"
+
+Same root cause as Cluster 1 but in the reverse direction. The org document chunks retrieved by `_retrieve_organization_priority()` contain the org header but not the bill position lists. Even with the all-chunks fetch mitigation, some org documents simply don't have bill position content indexed in Pinecone.
+
+**Fix needed**: Same as Cluster 1 — re-ingestion with better chunking strategy.
+
+#### Cluster 3: Legislator Validation False Failures (10 failures, 14.7%)
+
+Two distinct sub-issues that are **test validation problems, not retrieval problems**:
+
+**Senator district "0" (3 failures)**: US Senators don't have numbered districts, but CMS stores district as "0". The test expects the response to contain "0", but the LLM correctly answers "senators represent the whole state." The response is accurate — the validation is wrong.
+
+**Formal name expansion (7 failures)**: The LLM uses legislators' legal names from training data (e.g., "Robert Charles 'Chuck' Brannan III") while the test expects the CMS short name ("Chuck Brannan"). The `contains` validation fails because "Chuck Brannan" is not a substring of "Robert Charles 'Chuck' Brannan III" — the quotes around the nickname break substring matching.
+
+Examples:
+- Expected "Will Robinson" → Response has "William 'Will' Robinson Jr."
+- Expected "Tyler Sirois" → Response has "Tyler I. Sirois"
+- Expected "Alex Andrade" → Response has "Robert Alexander 'Alex' Andrade"
+- Expected "Ralph E. Massullo, MD" → Response has "Dr. Ralph E. Massullo Jr."
+
+**Fix needed**: Update legislator name validation to use `contains_any` with name parts (first name + last name separately) instead of exact `contains` for the full name string. Also skip district validation for senators (district "0").
+
+#### Cluster 4: Bill Title/Summary Edge Cases (2 failures, 2.9%)
+
+- **HR 4090**: Zero confidence, empty response — bill not in Pinecone index
+- **AZ SB 1070**: LLM answered with the famous 2010 immigration law ("Support Our Law Enforcement and Safe Neighborhoods Act") from training data, overriding the CMS entry which is a different bill
+
+**Fix needed**: These are inherent edge cases. HR 4090 needs re-ingestion. SB 1070 is an LLM training data collision — the bill number was reused for a different bill in a different session.
+
+### Adjusted Pass Rate
+
+Excluding the 10 false failures from Cluster 3 (correct responses flagged as failures due to validation issues), the true pass rate is:
+
+**803 / 861 = 93.3%** (adjusted) vs 92.2% (raw)
+
 ### Common Failure Patterns
 
-1. **Org→Bill relationship** (org support/oppose queries): Organization chunks may not contain bill position data. See [Organization Chunk Data Quality](#organization-chunk-data-quality).
+1. **Bill→Org and Org→Bill relationship queries** (56/68 failures): Organization position data not retrievable from Pinecone due to aggressive chunking. See [Organization Chunk Data Quality](#organization-chunk-data-quality).
 
-2. **Bill title exact match**: The LLM may paraphrase bill titles. The test suite uses `contains_any` with `name_keywords` (bill ID + title keywords, min 2 matches) to handle this.
+2. **Legislator name validation** (7/68 failures): LLM expands short names to legal names. Need `contains_any` validation with name parts.
 
-3. **Org type**: The LLM may describe org types differently than CMS data. The test suite uses `contains_any` with `org_type_keywords` (min 1 match) to handle this.
+3. **Senator district validation** (3/68 failures): CMS stores "0" for senators. Need to skip district validation for at-large representatives.
+
+4. **Bill title exact match**: The LLM may paraphrase bill titles. The test suite uses `contains_any` with `name_keywords` (bill ID + title keywords, min 2 matches) to handle this.
+
+5. **Org type**: The LLM may describe org types differently than CMS data. The test suite uses `contains_any` with `org_type_keywords` (min 1 match) to handle this.
 
 ### Validation Modes
 

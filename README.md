@@ -752,6 +752,17 @@ PYTHONPATH=src python scripts/test_rag_quality.py --dynamic --limit 10
 | `ddp` | None | DDP general knowledge (confidence/citation metrics only) |
 | `out_of_system_votes` | None | Bills NOT in CMS (tests dynamic OpenStates lookup) |
 
+### Benchmark Results (100-Document Sample, February 2026)
+
+| Category | Passed/Total | Rate |
+|----------|-------------|------|
+| Bills | 264/312 | 85% |
+| Legislators | 290/300 | 97% |
+| Organizations | 249/259 | 96% |
+| **Overall** | **803/871** | **92.2%** |
+
+Top jurisdictions: FL 96%, US 91%, AZ 89%, VA 88%, WA 85%. Remaining failures are primarily org→bill relationship queries (Pinecone chunk quality) and test validation false positives (legislator name expansion). See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-sample) for detailed failure analysis.
+
 ## Performance Targets
 
 | Metric | Target |
