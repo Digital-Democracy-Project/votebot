@@ -8,26 +8,29 @@ This script tests the RAG pipeline for organization-related queries:
 3. Runs queries through the RAG pipeline via the API
 4. Reports success rates, confidence, and citation metrics
 
-Usage:
-    python scripts/test_rag_organizations.py [options]
+Supports single-turn (with optional ground truth validation) and multi-turn modes.
 
-Options:
-    --api-url URL      API base URL (default: http://localhost:8000)
-    --limit N          Number of organizations to test (default: 10)
-    --log-level LEVEL  Logging level (default: WARNING)
+Usage:
+    # Standalone single-turn tests
+    python scripts/test_rag_organizations.py --limit 5
+
+    # Multi-turn mode
+    python scripts/test_rag_organizations.py --limit 5 --mode multi
+
+    # Both modes
+    python scripts/test_rag_organizations.py --limit 5 --mode both
 """
 
 import argparse
 import asyncio
-import json
 import random
 import sys
-import time
-from datetime import datetime
+import uuid
 from pathlib import Path
 
-# Add src to path for imports
+# Add src and scripts to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent))
 
 import httpx
 from votebot.config import get_settings
@@ -37,14 +40,18 @@ get_settings.cache_clear()
 
 from votebot.ingestion.metadata import MetadataExtractor
 from votebot.ingestion.sources.webflow import WebflowSource
-from votebot.utils.logging import setup_logging
 
-import structlog
+from rag_test_common import (
+    TestResult,
+    VoteBotTestClient,
+    validate_response,
+    generate_report,
+    print_report,
+    save_report,
+)
 
-logger = structlog.get_logger()
 
-
-# Test questions for organization queries
+# Single-turn question templates (standalone)
 ORGANIZATION_QUESTIONS = [
     "What is {name}?",
     "What are {name}'s policy positions?",
@@ -58,21 +65,13 @@ ORGANIZATION_QUESTIONS = [
 
 
 async def fetch_sample_organizations(limit: int = 10) -> list[dict]:
-    """
-    Fetch sample organizations from Webflow for testing.
-
-    Args:
-        limit: Number of organizations to fetch
-
-    Returns:
-        List of organization dicts with name and metadata
-    """
+    """Fetch sample organizations from Webflow for testing."""
     settings = get_settings()
     metadata_extractor = MetadataExtractor()
     webflow = WebflowSource(settings, metadata_extractor)
 
     organizations = []
-    async for doc in webflow.fetch_organizations(limit=0):  # Fetch all, then sample
+    async for doc in webflow.fetch_organizations(limit=0):
         organizations.append({
             "name": doc.metadata.title,
             "webflow_id": doc.metadata.extra.get("webflow_id", ""),
@@ -81,7 +80,7 @@ async def fetch_sample_organizations(limit: int = 10) -> list[dict]:
             "bills_oppose_count": doc.metadata.extra.get("bills_oppose_count", 0),
         })
 
-    # Prioritize organizations with bill positions for more interesting tests
+    # Prioritize organizations with bill positions
     orgs_with_positions = [
         o for o in organizations
         if o["bills_support_count"] > 0 or o["bills_oppose_count"] > 0
@@ -101,7 +100,6 @@ async def fetch_sample_organizations(limit: int = 10) -> list[dict]:
     if orgs_without_positions:
         selected.extend(random.sample(orgs_without_positions, without_positions_count))
 
-    # If we still need more, fill from whatever is available
     remaining = limit - len(selected)
     if remaining > 0:
         all_remaining = [o for o in organizations if o not in selected]
@@ -111,265 +109,271 @@ async def fetch_sample_organizations(limit: int = 10) -> list[dict]:
     return selected[:limit]
 
 
-async def test_organization_query(
-    client: httpx.AsyncClient,
-    api_url: str,
-    org: dict,
-    question_template: str,
-) -> dict:
-    """
-    Test a single organization query via the API.
-
-    Args:
-        client: httpx AsyncClient
-        api_url: Base URL for API
-        org: Organization dict
-        question_template: Question template with {name} placeholder
-
-    Returns:
-        Test result dict
-    """
-    question = question_template.format(name=org["name"])
-    settings = get_settings()
-
-    start_time = datetime.now()
-    try:
-        response = await client.post(
-            f"{api_url}/votebot/v1/chat",
-            json={
-                "message": question,
-                "session_id": f"test-org-{org['webflow_id'][:8]}",
-                "human_active": False,
-                "page_context": {"type": "general"},
-            },
-            headers={
-                "Authorization": f"Bearer {settings.api_key.get_secret_value()}",
-            },
-            timeout=60.0,
-        )
-
-        latency = (datetime.now() - start_time).total_seconds()
-
-        if response.status_code != 200:
-            return {
-                "org_name": org["name"],
-                "organization_type": org["organization_type"],
-                "question": question,
-                "answer": None,
-                "confidence": 0,
-                "has_citations": False,
-                "citation_count": 0,
-                "latency": latency,
-                "success": False,
-                "error": f"HTTP {response.status_code}: {response.text[:200]}",
-            }
-
-        data = response.json()
-
-        return {
-            "org_name": org["name"],
-            "organization_type": org["organization_type"],
-            "question": question,
-            "answer": (data.get("response") or "")[:500],
-            "confidence": data.get("confidence", 0),
-            "has_citations": bool(data.get("citations")),
-            "citation_count": len(data.get("citations", [])),
-            "latency": latency,
-            "success": True,
-            "error": None,
-        }
-
-    except Exception as e:
-        latency = (datetime.now() - start_time).total_seconds()
-        return {
-            "org_name": org["name"],
-            "organization_type": org["organization_type"],
-            "question": question,
-            "answer": None,
-            "confidence": 0,
-            "has_citations": False,
-            "citation_count": 0,
-            "latency": latency,
-            "success": False,
-            "error": str(e),
-        }
-
-
-async def run_tests(
-    api_url: str,
+async def _run_single_mode_standalone(
+    client: VoteBotTestClient,
     organizations: list[dict],
-    questions: list[str],
-) -> list[dict]:
-    """
-    Run all tests for the given organizations and questions.
-
-    Args:
-        api_url: API base URL
-        organizations: List of organization dicts
-        questions: List of question templates
-
-    Returns:
-        List of test result dicts
-    """
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run single-turn tests without ground truth (standalone mode)."""
     results = []
-    total_tests = len(organizations) * len(questions)
+    total = len(organizations) * len(ORGANIZATION_QUESTIONS)
     completed = 0
 
-    async with httpx.AsyncClient() as client:
-        for org in organizations:
-            org_results = []
-            for question in questions:
-                result = await test_organization_query(client, api_url, org, question)
-                org_results.append(result)
-                results.append(result)
-                completed += 1
+    for org in organizations:
+        for question_template in ORGANIZATION_QUESTIONS:
+            question = question_template.format(name=org["name"])
+            resp = await client.send_message(question)
+            completed += 1
 
-            # Print progress
-            success_count = sum(1 for r in org_results if r["success"])
-            avg_confidence = sum(r["confidence"] for r in org_results) / len(org_results) if org_results else 0
-            citation_rate = sum(1 for r in org_results if r["has_citations"]) / len(org_results) * 100 if org_results else 0
-
-            print(
-                f"[{completed}/{total_tests}] Testing: {org['name'][:40]}\n"
-                f"  {success_count}/{len(questions)} succeeded, "
-                f"avg confidence: {avg_confidence:.2f}, "
-                f"citations: {citation_rate:.0f}%"
+            result = TestResult(
+                test_id=f"org-{org.get('webflow_id', '')[:8]}-{completed}",
+                category="organizations",
+                entity_type="organization",
+                entity_name=org["name"],
+                entity_slug="",
+                prompt=question,
+                response_text=resp["response"],
+                response_preview=resp["response"][:500],
+                confidence=resp["confidence"],
+                has_citations=resp["citation_count"] > 0,
+                citation_count=resp["citation_count"],
+                latency=resp["latency"],
+                passed=None,  # No ground truth
+                data_source="none",
+                success=resp["success"],
+                error=resp["error"],
+                mode="single",
             )
+            results.append(result)
+
+            if verbose:
+                status = "OK" if resp["success"] else "ERR"
+                print(f"  [{status}] {question[:60]}... conf={resp['confidence']:.2f}")
+
+        if verbose:
+            print(f"  [{completed}/{total}] Done: {org['name'][:40]}")
 
     return results
 
 
-def print_summary(results: list[dict]):
-    """Print test summary statistics."""
-    total = len(results)
-    successful = sum(1 for r in results if r["success"])
-    failed = total - successful
+async def _run_single_mode_ground_truth(
+    client: VoteBotTestClient,
+    ground_truth: tuple[list, list, list],
+    limit: int = 0,
+    jurisdiction: str | None = None,
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run single-turn tests with ground truth validation."""
+    from test_rag_quality import DynamicTestGenerator
 
-    print("\n" + "=" * 70)
-    print("TEST SUMMARY")
-    print("=" * 70)
+    _, _, organizations_gt = ground_truth
 
-    print(f"\nTotal queries: {total}")
-    print(f"Successful: {successful} ({successful/total*100:.1f}%)")
-    print(f"Failed: {failed} ({failed/total*100:.1f}%)")
+    if limit > 0:
+        organizations_gt = organizations_gt[:limit]
 
-    if successful > 0:
-        success_results = [r for r in results if r["success"]]
+    if not organizations_gt:
+        print("  No organizations found for ground truth testing")
+        return []
 
-        avg_confidence = sum(r["confidence"] for r in success_results) / len(success_results)
-        high_confidence = sum(1 for r in success_results if r["confidence"] > 0.7)
-        with_citations = sum(1 for r in success_results if r["has_citations"])
-        avg_latency = sum(r["latency"] for r in success_results) / len(success_results)
+    generator = DynamicTestGenerator()
+    test_cases = generator.generate_organization_tests(organizations_gt)
+    print(f"  Generated {len(test_cases)} organization test cases from ground truth")
 
-        print(f"\nPerformance Metrics:")
-        print(f"  Avg confidence: {avg_confidence:.2f}")
-        print(f"  High confidence (>0.7): {high_confidence/len(success_results)*100:.1f}%")
-        print(f"  With citations: {with_citations/len(success_results)*100:.1f}%")
-        print(f"  Avg latency: {avg_latency:.2f}s")
+    results = []
+    for i, tc in enumerate(test_cases):
+        resp = await client.send_message(tc["prompt"])
 
-        # Results by question type
-        print(f"\nResults by Question Type:")
-        for question in ORGANIZATION_QUESTIONS:
-            q_results = [r for r in success_results if question.split("{name}")[0] in r["question"]]
-            if q_results:
-                q_conf = sum(r["confidence"] for r in q_results) / len(q_results)
-                q_citations = sum(1 for r in q_results if r["has_citations"]) / len(q_results) * 100
-                print(f"  \"{question[:45]}...\"")
-                print(f"    {len(q_results)} tests, conf: {q_conf:.2f}, citations: {q_citations:.0f}%")
+        result = TestResult(
+            test_id=tc["id"],
+            category="organizations",
+            entity_type="organization",
+            entity_name=tc.get("prompt", ""),
+            entity_slug=tc.get("entity_slug", ""),
+            prompt=tc["prompt"],
+            response_text=resp["response"],
+            response_preview=resp["response"][:500],
+            confidence=resp["confidence"],
+            has_citations=resp["citation_count"] > 0,
+            citation_count=resp["citation_count"],
+            latency=resp["latency"],
+            expected_data=tc.get("expected_data", []),
+            validation_mode=tc.get("validation", "contains"),
+            data_source=tc.get("data_source", "webflow_cms"),
+            success=resp["success"],
+            error=resp["error"],
+            mode="single",
+        )
 
-        # Results by organization type
-        org_types = set(r["organization_type"] for r in success_results if r["organization_type"])
-        if org_types:
-            print(f"\nResults by Organization Type:")
-            for org_type in sorted(org_types)[:5]:  # Limit to top 5 types
-                type_results = [r for r in success_results if r["organization_type"] == org_type]
-                type_conf = sum(r["confidence"] for r in type_results) / len(type_results)
-                print(f"  {org_type[:40]}: {len(type_results)} queries, avg conf: {type_conf:.2f}")
-
-
-def print_sample_responses(results: list[dict], count: int = 5):
-    """Print sample responses for inspection."""
-    print("\n" + "=" * 70)
-    print("SAMPLE RESPONSES")
-    print("=" * 70)
-
-    # Select diverse samples
-    samples = random.sample(results, min(count, len(results)))
-
-    for result in samples:
-        print(f"\n--- {result['org_name'][:40]} ({result['organization_type'][:30]}) ---")
-        print(f"Q: {result['question']}")
-        if result["success"]:
-            print(f"A: {result['answer'][:300]}...")
-            print(f"[Confidence: {result['confidence']:.2f}, Citations: {result['has_citations']}]")
+        if not resp["success"]:
+            result.passed = False
+        elif tc.get("expected_data"):
+            passed, found, missing = validate_response(
+                resp["response"],
+                tc["expected_data"],
+                tc.get("validation", "contains"),
+                tc.get("min_matches", 1),
+            )
+            result.passed = passed
+            result.found_data = found
+            result.missing_data = missing
         else:
-            print(f"ERROR: {result['error']}")
+            result.passed = None
+
+        results.append(result)
+
+        if verbose:
+            status = "PASS" if result.passed else ("FAIL" if result.passed is False else "N/A")
+            print(f"  [{status}] {tc['id']}: {tc['prompt'][:50]}...")
+
+        if (i + 1) % 10 == 0:
+            print(f"  Progress: {i + 1}/{len(test_cases)} organization tests completed")
+
+        await asyncio.sleep(0.3)
+
+    return results
+
+
+async def _run_multi_mode(
+    client: VoteBotTestClient,
+    organizations: list[dict],
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run multi-turn conversation tests for organizations."""
+    results = []
+
+    for org in organizations:
+        session_id = f"test-org-multi-{uuid.uuid4().hex[:8]}"
+
+        # Select 3-4 random questions for multi-turn conversation
+        n_questions = random.randint(3, min(4, len(ORGANIZATION_QUESTIONS)))
+        selected_templates = random.sample(ORGANIZATION_QUESTIONS, n_questions)
+
+        prompts = [t.format(name=org["name"]) for t in selected_templates]
+
+        if verbose:
+            print(f"\n  Multi-turn: {org['name'][:40]}")
+
+        for turn_idx, prompt in enumerate(prompts):
+            resp = await client.send_message(prompt, session_id=session_id)
+
+            result = TestResult(
+                test_id=f"{session_id}-turn{turn_idx}",
+                category="organizations",
+                entity_type="organization",
+                entity_name=org["name"],
+                prompt=prompt,
+                response_text=resp["response"],
+                response_preview=resp["response"][:500],
+                confidence=resp["confidence"],
+                has_citations=resp["citation_count"] > 0,
+                citation_count=resp["citation_count"],
+                latency=resp["latency"],
+                passed=None,  # Multi-turn: no ground truth
+                data_source="none",
+                turn_index=turn_idx,
+                session_id=session_id,
+                success=resp["success"],
+                error=resp["error"],
+                mode="multi",
+            )
+            results.append(result)
+
+            if verbose:
+                status = "OK" if resp["success"] else "ERR"
+                print(f"    [{status}] Turn {turn_idx}: {prompt[:50]}... conf={resp['confidence']:.2f}")
+
+            if not resp["success"]:
+                break
+
+        if verbose:
+            print(f"    Completed {len(prompts)} turns for: {org['name'][:40]}")
+
+    return results
+
+
+async def run_tests(
+    client: VoteBotTestClient,
+    ground_truth: tuple[list, list, list] | None = None,
+    limit: int = 0,
+    jurisdiction: str | None = None,
+    mode: str = "single",
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run organization tests with unified interface.
+
+    Args:
+        client: VoteBotTestClient instance.
+        ground_truth: Optional (bills_gt, legislators_gt, organizations_gt) tuple.
+        limit: Max organizations to test.
+        jurisdiction: Not used for organizations (they're not jurisdiction-scoped).
+        mode: "single", "multi", or "both".
+        verbose: Print per-test output.
+
+    Returns:
+        List of TestResult objects.
+    """
+    results = []
+
+    if mode in ("single", "both"):
+        if ground_truth and ground_truth[2]:
+            print("\n--- Organization Tests: Single-turn (ground truth) ---")
+            results.extend(await _run_single_mode_ground_truth(
+                client, ground_truth, limit=limit, jurisdiction=jurisdiction, verbose=verbose,
+            ))
+        else:
+            print("\n--- Organization Tests: Single-turn (standalone) ---")
+            effective_limit = limit if limit > 0 else 10
+            organizations = await fetch_sample_organizations(limit=effective_limit)
+            print(f"  Fetched {len(organizations)} organizations for testing")
+            results.extend(await _run_single_mode_standalone(client, organizations, verbose=verbose))
+
+    if mode in ("multi", "both"):
+        print("\n--- Organization Tests: Multi-turn ---")
+        effective_limit = limit if limit > 0 else 10
+        organizations = await fetch_sample_organizations(limit=effective_limit)
+        print(f"  Fetched {len(organizations)} organizations for multi-turn testing")
+        results.extend(await _run_multi_mode(client, organizations, verbose=verbose))
+
+    return results
 
 
 async def main():
-    """Main entry point."""
+    """Main entry point for standalone execution."""
     parser = argparse.ArgumentParser(
         description="Test organization RAG queries in VoteBot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-
-    parser.add_argument(
-        "--api-url",
-        default="http://localhost:8000",
-        help="API base URL (default: http://localhost:8000)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=10,
-        help="Number of organizations to test (default: 10)",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="WARNING",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level (default: WARNING)",
-    )
+    parser.add_argument("--api-url", default="http://localhost:8000",
+                        help="API base URL (default: http://localhost:8000)")
+    parser.add_argument("--limit", type=int, default=10,
+                        help="Number of organizations to test (default: 10)")
+    parser.add_argument("--mode", choices=["single", "multi", "both"], default="single",
+                        help="Test mode (default: single)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
+    parser.add_argument("--output", help="Write results to JSON file")
 
     args = parser.parse_args()
-
-    # Setup logging
-    setup_logging(args.log_level)
 
     print("=" * 70)
     print("VOTEBOT ORGANIZATION RAG TEST")
     print("=" * 70)
 
-    print(f"\nFetching {args.limit} sample organizations from Webflow...")
-    organizations = await fetch_sample_organizations(limit=args.limit)
-    print(f"Found {len(organizations)} organizations")
+    settings = get_settings()
+    client = VoteBotTestClient(args.api_url, settings.api_key.get_secret_value())
 
-    if not organizations:
-        print("No organizations found. Have you run sync_organizations.py?")
-        sys.exit(1)
-
-    # Show organization summary
-    with_positions = sum(
-        1 for o in organizations
-        if o["bills_support_count"] > 0 or o["bills_oppose_count"] > 0
+    results = await run_tests(
+        client=client,
+        ground_truth=None,
+        limit=args.limit,
+        mode=args.mode,
+        verbose=args.verbose,
     )
-    print(f"Organizations with bill positions: {with_positions}/{len(organizations)}")
 
-    print("\n" + "=" * 70)
-    print("RUNNING TESTS")
-    print("=" * 70 + "\n")
+    report = generate_report(results)
+    print_report(report, verbose=args.verbose)
 
-    results = await run_tests(args.api_url, organizations, ORGANIZATION_QUESTIONS)
-
-    # Print summary
-    print_summary(results)
-    print_sample_responses(results)
-
-    # Save detailed results
-    output_file = Path(__file__).parent / "organization_test_results.json"
-    with open(output_file, "w") as f:
-        json.dump(results, f, indent=2, default=str)
-    print(f"\nDetailed results saved to: {output_file}")
+    if args.output:
+        save_report(report, args.output)
 
 
 if __name__ == "__main__":

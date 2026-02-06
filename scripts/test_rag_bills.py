@@ -8,25 +8,30 @@ This script tests the RAG pipeline for bill-related queries:
 3. Runs queries through the RAG pipeline via the API
 4. Reports success rates, confidence, and citation metrics
 
-Usage:
-    python scripts/test_rag_bills.py [options]
+Supports both single-turn (with optional ground truth validation) and
+multi-turn conversation modes.
 
-Options:
-    --api-url URL      API base URL (default: http://localhost:8000)
-    --limit N          Number of bills to test (default: 10)
-    --log-level LEVEL  Logging level (default: WARNING)
+Usage:
+    # Standalone single-turn tests
+    python scripts/test_rag_bills.py --limit 5
+
+    # Multi-turn mode
+    python scripts/test_rag_bills.py --limit 5 --mode multi
+
+    # Both modes
+    python scripts/test_rag_bills.py --limit 5 --mode both
 """
 
 import argparse
 import asyncio
-import json
 import random
 import sys
-from datetime import datetime
+import uuid
 from pathlib import Path
 
-# Add src to path for imports
+# Add src and scripts to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent))
 
 import httpx
 from votebot.config import get_settings
@@ -36,14 +41,18 @@ get_settings.cache_clear()
 
 from votebot.ingestion.metadata import MetadataExtractor
 from votebot.ingestion.sources.webflow import WebflowSource
-from votebot.utils.logging import setup_logging
 
-import structlog
+from rag_test_common import (
+    TestResult,
+    VoteBotTestClient,
+    validate_response,
+    generate_report,
+    print_report,
+    save_report,
+)
 
-logger = structlog.get_logger()
 
-
-# Test questions for bill queries
+# Single-turn question templates (standalone, no ground truth)
 BILL_QUESTIONS = [
     "What is {name}?",
     "What organizations support {name}?",
@@ -54,17 +63,85 @@ BILL_QUESTIONS = [
     "Tell me about the debate around {name}.",
 ]
 
+# Multi-turn question templates (absorbed from test_rag_comprehensive.py)
+BILL_QUESTION_TEMPLATES = [
+    {
+        "initial": "What is {bill_title} about?",
+        "follow_ups": [
+            "What are the main arguments in support of this bill?",
+            "What are the arguments against it?",
+            "What is the current status of this bill?",
+        ]
+    },
+    {
+        "initial": "Can you summarize {bill_title}?",
+        "follow_ups": [
+            "Who sponsored this legislation?",
+            "What committee is it assigned to?",
+        ]
+    },
+    {
+        "initial": "What would change if {bill_title} passes?",
+        "follow_ups": [
+            "Who would be most affected by this bill?",
+            "Are there similar bills in other states?",
+        ]
+    },
+    {
+        "initial": "Tell me about the {jurisdiction} bill on {topic}",
+        "follow_ups": [
+            "What's the bill number?",
+            "Has there been any public debate on this?",
+        ]
+    },
+]
+
+# Vote-specific multi-turn templates (absorbed from test_rag_comprehensive.py)
+VOTE_QUESTION_TEMPLATES = [
+    {
+        "initial": "How did legislators vote on {bill_title}?",
+        "follow_ups": [
+            "Who voted yes on this bill?",
+            "Who voted no?",
+            "Was this a close vote?",
+        ]
+    },
+    {
+        "initial": "What was the vote count on {bill_title}?",
+        "follow_ups": [
+            "Did this bill pass committee?",
+            "Were there any abstentions?",
+            "Which party mostly supported it?",
+        ]
+    },
+    {
+        "initial": "Did {bill_title} pass?",
+        "follow_ups": [
+            "What was the final vote tally?",
+            "Who were the key supporters?",
+            "Were there any surprising votes?",
+        ]
+    },
+    {
+        "initial": "Show me the voting record for {bill_title}",
+        "follow_ups": [
+            "How did the committee vote compare to the floor vote?",
+            "Were there any bipartisan votes?",
+        ]
+    },
+    {
+        "initial": "Who opposed {bill_title}?",
+        "follow_ups": [
+            "What were their reasons for voting no?",
+            "How many Democrats voted against it?",
+            "How many Republicans voted against it?",
+        ]
+    },
+]
+
 
 async def fetch_sample_bills(limit: int = 10) -> list[dict]:
-    """
-    Fetch sample bills from Webflow for testing.
-
-    Args:
-        limit: Number of bills to fetch
-
-    Returns:
-        List of bill dicts with name and metadata
-    """
+    """Fetch sample bills from Webflow for testing."""
     settings = get_settings()
     metadata_extractor = MetadataExtractor()
     webflow = WebflowSource(settings, metadata_extractor)
@@ -72,7 +149,7 @@ async def fetch_sample_bills(limit: int = 10) -> list[dict]:
     bills = []
     async for doc in webflow.fetch(
         collection_id=webflow.bills_collection_id,
-        limit=0,  # Fetch all, then sample
+        limit=0,
         include_pdfs=False,
     ):
         bills.append({
@@ -84,9 +161,10 @@ async def fetch_sample_bills(limit: int = 10) -> list[dict]:
             "status": doc.metadata.extra.get("status", ""),
             "supporting_orgs_count": doc.metadata.extra.get("supporting_orgs_count", 0),
             "opposing_orgs_count": doc.metadata.extra.get("opposing_orgs_count", 0),
+            "jurisdiction": doc.metadata.extra.get("jurisdiction", ""),
         })
 
-    # Prioritize bills with organization positions for more interesting tests
+    # Prioritize bills with organization positions
     bills_with_positions = [
         b for b in bills
         if b["supporting_orgs_count"] > 0 or b["opposing_orgs_count"] > 0
@@ -106,7 +184,6 @@ async def fetch_sample_bills(limit: int = 10) -> list[dict]:
     if bills_without_positions:
         selected.extend(random.sample(bills_without_positions, without_positions_count))
 
-    # If we still need more, fill from whatever is available
     remaining = limit - len(selected)
     if remaining > 0:
         all_remaining = [b for b in bills if b not in selected]
@@ -116,269 +193,293 @@ async def fetch_sample_bills(limit: int = 10) -> list[dict]:
     return selected[:limit]
 
 
-async def test_bill_query(
-    client: httpx.AsyncClient,
-    api_url: str,
-    bill: dict,
-    question_template: str,
-) -> dict:
-    """
-    Test a single bill query via the API.
-
-    Args:
-        client: httpx AsyncClient
-        api_url: Base URL for API
-        bill: Bill dict
-        question_template: Question template with {name} placeholder
-
-    Returns:
-        Test result dict
-    """
-    # Create short name for question (bill prefix + number if available)
-    short_name = f"{bill['bill_prefix']} {bill['bill_number']}".strip()
-    if not short_name:
-        short_name = bill["name"][:50]
-
-    question = question_template.format(name=short_name)
-    settings = get_settings()
-
-    start_time = datetime.now()
-    try:
-        response = await client.post(
-            f"{api_url}/votebot/v1/chat",
-            json={
-                "message": question,
-                "session_id": f"test-bill-{bill['webflow_id'][:8]}",
-                "human_active": False,
-                "page_context": {"type": "general"},
-            },
-            headers={
-                "Authorization": f"Bearer {settings.api_key.get_secret_value()}",
-            },
-            timeout=60.0,
-        )
-
-        latency = (datetime.now() - start_time).total_seconds()
-
-        if response.status_code != 200:
-            return {
-                "bill_name": bill["name"],
-                "bill_id": short_name,
-                "question": question,
-                "answer": None,
-                "confidence": 0,
-                "has_citations": False,
-                "citation_count": 0,
-                "latency": latency,
-                "success": False,
-                "error": f"HTTP {response.status_code}: {response.text[:200]}",
-            }
-
-        data = response.json()
-
-        return {
-            "bill_name": bill["name"],
-            "bill_id": short_name,
-            "question": question,
-            "answer": (data.get("response") or "")[:500],
-            "confidence": data.get("confidence", 0),
-            "has_citations": bool(data.get("citations")),
-            "citation_count": len(data.get("citations", [])),
-            "latency": latency,
-            "success": True,
-            "error": None,
-        }
-
-    except Exception as e:
-        latency = (datetime.now() - start_time).total_seconds()
-        return {
-            "bill_name": bill["name"],
-            "bill_id": short_name,
-            "question": question,
-            "answer": None,
-            "confidence": 0,
-            "has_citations": False,
-            "citation_count": 0,
-            "latency": latency,
-            "success": False,
-            "error": str(e),
-        }
-
-
-async def run_tests(
-    api_url: str,
+async def _run_single_mode_standalone(
+    client: VoteBotTestClient,
     bills: list[dict],
-    questions: list[str],
-) -> list[dict]:
-    """
-    Run all tests for the given bills and questions.
-
-    Args:
-        api_url: API base URL
-        bills: List of bill dicts
-        questions: List of question templates
-
-    Returns:
-        List of test result dicts
-    """
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run single-turn tests without ground truth (standalone mode)."""
     results = []
-    total_tests = len(bills) * len(questions)
+    total = len(bills) * len(BILL_QUESTIONS)
     completed = 0
 
-    async with httpx.AsyncClient() as client:
-        for bill in bills:
-            bill_results = []
-            for question in questions:
-                result = await test_bill_query(client, api_url, bill, question)
-                bill_results.append(result)
-                results.append(result)
-                completed += 1
+    for bill in bills:
+        short_name = f"{bill['bill_prefix']} {bill['bill_number']}".strip()
+        if not short_name:
+            short_name = bill["name"][:50]
 
-            # Print progress
-            success_count = sum(1 for r in bill_results if r["success"])
-            avg_confidence = sum(r["confidence"] for r in bill_results) / len(bill_results) if bill_results else 0
-            citation_rate = sum(1 for r in bill_results if r["has_citations"]) / len(bill_results) * 100 if bill_results else 0
+        for question_template in BILL_QUESTIONS:
+            question = question_template.format(name=short_name)
+            resp = await client.send_message(question)
+            completed += 1
 
-            bill_id = f"{bill['bill_prefix']} {bill['bill_number']}".strip() or bill["name"][:30]
-            print(
-                f"[{completed}/{total_tests}] Testing: {bill_id}\n"
-                f"  {success_count}/{len(questions)} succeeded, "
-                f"avg confidence: {avg_confidence:.2f}, "
-                f"citations: {citation_rate:.0f}%"
+            result = TestResult(
+                test_id=f"bill-{bill.get('webflow_id', '')[:8]}-{completed}",
+                category="bills",
+                entity_type="bill",
+                entity_name=bill["name"],
+                entity_slug=bill.get("slug", ""),
+                prompt=question,
+                response_text=resp["response"],
+                response_preview=resp["response"][:500],
+                confidence=resp["confidence"],
+                has_citations=resp["citation_count"] > 0,
+                citation_count=resp["citation_count"],
+                latency=resp["latency"],
+                passed=None,  # No ground truth
+                data_source="none",
+                success=resp["success"],
+                error=resp["error"],
+                mode="single",
             )
+            results.append(result)
+
+            if verbose:
+                status = "OK" if resp["success"] else "ERR"
+                print(f"  [{status}] {question[:60]}... conf={resp['confidence']:.2f}")
+
+        if verbose:
+            print(f"  [{completed}/{total}] Done: {short_name}")
 
     return results
 
 
-def print_summary(results: list[dict]):
-    """Print test summary statistics."""
-    total = len(results)
-    successful = sum(1 for r in results if r["success"])
-    failed = total - successful
+async def _run_single_mode_ground_truth(
+    client: VoteBotTestClient,
+    ground_truth: tuple[list, list, list],
+    limit: int = 0,
+    jurisdiction: str | None = None,
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run single-turn tests with ground truth validation."""
+    from test_rag_quality import DynamicTestGenerator
 
-    print("\n" + "=" * 70)
-    print("TEST SUMMARY")
-    print("=" * 70)
+    bills_gt, _, _ = ground_truth
 
-    print(f"\nTotal queries: {total}")
-    print(f"Successful: {successful} ({successful/total*100:.1f}%)")
-    print(f"Failed: {failed} ({failed/total*100:.1f}%)")
+    # Filter by jurisdiction if specified
+    if jurisdiction:
+        bills_gt = [b for b in bills_gt if b.jurisdiction == jurisdiction.upper()]
 
-    if successful > 0:
-        success_results = [r for r in results if r["success"]]
+    if limit > 0:
+        bills_gt = bills_gt[:limit]
 
-        avg_confidence = sum(r["confidence"] for r in success_results) / len(success_results)
-        high_confidence = sum(1 for r in success_results if r["confidence"] > 0.7)
-        with_citations = sum(1 for r in success_results if r["has_citations"])
-        avg_latency = sum(r["latency"] for r in success_results) / len(success_results)
+    if not bills_gt:
+        print("  No bills found for ground truth testing")
+        return []
 
-        print(f"\nPerformance Metrics:")
-        print(f"  Avg confidence: {avg_confidence:.2f}")
-        print(f"  High confidence (>0.7): {high_confidence/len(success_results)*100:.1f}%")
-        print(f"  With citations: {with_citations/len(success_results)*100:.1f}%")
-        print(f"  Avg latency: {avg_latency:.2f}s")
+    generator = DynamicTestGenerator()
+    test_cases = generator.generate_bill_tests(bills_gt)
+    print(f"  Generated {len(test_cases)} bill test cases from ground truth")
 
-        # Results by question type
-        print(f"\nResults by Question Type:")
-        for question in BILL_QUESTIONS:
-            q_results = [r for r in success_results if question.split("{name}")[0] in r["question"]]
-            if q_results:
-                q_conf = sum(r["confidence"] for r in q_results) / len(q_results)
-                q_citations = sum(1 for r in q_results if r["has_citations"]) / len(q_results) * 100
-                print(f"  \"{question[:45]}...\"")
-                print(f"    {len(q_results)} tests, conf: {q_conf:.2f}, citations: {q_citations:.0f}%")
+    results = []
+    for i, tc in enumerate(test_cases):
+        resp = await client.send_message(tc["prompt"])
 
+        result = TestResult(
+            test_id=tc["id"],
+            category="bills",
+            entity_type="bill",
+            entity_name=tc.get("prompt", ""),
+            entity_slug=tc.get("entity_slug", ""),
+            prompt=tc["prompt"],
+            response_text=resp["response"],
+            response_preview=resp["response"][:500],
+            confidence=resp["confidence"],
+            has_citations=resp["citation_count"] > 0,
+            citation_count=resp["citation_count"],
+            latency=resp["latency"],
+            expected_data=tc.get("expected_data", []),
+            validation_mode=tc.get("validation", "contains"),
+            data_source=tc.get("data_source", "webflow_cms"),
+            success=resp["success"],
+            error=resp["error"],
+            jurisdiction=tc.get("jurisdiction", ""),
+            mode="single",
+        )
 
-def print_sample_responses(results: list[dict], count: int = 5):
-    """Print sample responses for inspection."""
-    print("\n" + "=" * 70)
-    print("SAMPLE RESPONSES")
-    print("=" * 70)
-
-    # Select diverse samples - try to get org-related questions
-    org_questions = [r for r in results if "organizations" in r["question"].lower() and r["success"]]
-    other_questions = [r for r in results if "organizations" not in r["question"].lower() and r["success"]]
-
-    samples = []
-    if org_questions:
-        samples.extend(random.sample(org_questions, min(3, len(org_questions))))
-    if other_questions:
-        samples.extend(random.sample(other_questions, min(count - len(samples), len(other_questions))))
-
-    for result in samples:
-        print(f"\n--- {result['bill_id']} ---")
-        print(f"Q: {result['question']}")
-        if result["success"]:
-            print(f"A: {result['answer'][:400]}...")
-            print(f"[Confidence: {result['confidence']:.2f}, Citations: {result['citation_count']}]")
+        if not resp["success"]:
+            result.passed = False
+        elif tc.get("expected_data"):
+            passed, found, missing = validate_response(
+                resp["response"],
+                tc["expected_data"],
+                tc.get("validation", "contains"),
+                tc.get("min_matches", 1),
+            )
+            result.passed = passed
+            result.found_data = found
+            result.missing_data = missing
         else:
-            print(f"ERROR: {result['error']}")
+            result.passed = None
+
+        results.append(result)
+
+        if verbose:
+            status = "PASS" if result.passed else ("FAIL" if result.passed is False else "N/A")
+            print(f"  [{status}] {tc['id']}: {tc['prompt'][:50]}...")
+
+        if (i + 1) % 10 == 0:
+            print(f"  Progress: {i + 1}/{len(test_cases)} bill tests completed")
+
+        await asyncio.sleep(0.3)
+
+    return results
+
+
+async def _run_multi_mode(
+    client: VoteBotTestClient,
+    bills: list[dict],
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run multi-turn conversation tests for bills."""
+    results = []
+
+    # Generate multi-turn test cases from bill + vote templates
+    all_templates = BILL_QUESTION_TEMPLATES + VOTE_QUESTION_TEMPLATES
+
+    for bill in bills:
+        title = bill["name"]
+        jurisdiction = bill.get("jurisdiction", "Unknown")
+        topic_words = title.split()[:3]
+        topic = " ".join(topic_words).lower()
+
+        template = random.choice(all_templates)
+        session_id = f"test-bill-multi-{uuid.uuid4().hex[:8]}"
+
+        initial = template["initial"].format(
+            bill_title=title, jurisdiction=jurisdiction, topic=topic,
+        )
+        n_follow_ups = random.randint(1, min(3, len(template["follow_ups"])))
+        follow_ups = random.sample(template["follow_ups"], n_follow_ups)
+
+        prompts = [initial] + [
+            q.format(bill_title=title, jurisdiction=jurisdiction, topic=topic)
+            for q in follow_ups
+        ]
+
+        for turn_idx, prompt in enumerate(prompts):
+            resp = await client.send_message(prompt, session_id=session_id, page_context={"type": "bill"})
+
+            result = TestResult(
+                test_id=f"{session_id}-turn{turn_idx}",
+                category="bills",
+                entity_type="bill",
+                entity_name=title,
+                entity_slug=bill.get("slug", ""),
+                prompt=prompt,
+                response_text=resp["response"],
+                response_preview=resp["response"][:500],
+                confidence=resp["confidence"],
+                has_citations=resp["citation_count"] > 0,
+                citation_count=resp["citation_count"],
+                latency=resp["latency"],
+                passed=None,  # Multi-turn: no ground truth validation
+                data_source="none",
+                turn_index=turn_idx,
+                session_id=session_id,
+                jurisdiction=jurisdiction,
+                success=resp["success"],
+                error=resp["error"],
+                mode="multi",
+            )
+            results.append(result)
+
+            if verbose:
+                status = "OK" if resp["success"] else "ERR"
+                print(f"  [{status}] Turn {turn_idx}: {prompt[:50]}... conf={resp['confidence']:.2f}")
+
+            if not resp["success"]:
+                break  # Stop conversation on error
+
+        if verbose:
+            print(f"  Completed {len(prompts)} turns for: {title[:40]}")
+
+    return results
+
+
+async def run_tests(
+    client: VoteBotTestClient,
+    ground_truth: tuple[list, list, list] | None = None,
+    limit: int = 0,
+    jurisdiction: str | None = None,
+    mode: str = "single",
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run bill tests with unified interface.
+
+    Args:
+        client: VoteBotTestClient instance.
+        ground_truth: Optional (bills_gt, legislators_gt, organizations_gt) tuple.
+        limit: Max bills to test (0 = unlimited for ground truth, 10 default for standalone).
+        jurisdiction: Filter by state code (e.g., "FL").
+        mode: "single", "multi", or "both".
+        verbose: Print per-test output.
+
+    Returns:
+        List of TestResult objects.
+    """
+    results = []
+
+    if mode in ("single", "both"):
+        if ground_truth and ground_truth[0]:
+            print("\n--- Bill Tests: Single-turn (ground truth) ---")
+            results.extend(await _run_single_mode_ground_truth(
+                client, ground_truth, limit=limit, jurisdiction=jurisdiction, verbose=verbose,
+            ))
+        else:
+            print("\n--- Bill Tests: Single-turn (standalone) ---")
+            effective_limit = limit if limit > 0 else 10
+            bills = await fetch_sample_bills(limit=effective_limit)
+            print(f"  Fetched {len(bills)} bills for testing")
+            results.extend(await _run_single_mode_standalone(client, bills, verbose=verbose))
+
+    if mode in ("multi", "both"):
+        print("\n--- Bill Tests: Multi-turn ---")
+        effective_limit = limit if limit > 0 else 10
+        bills = await fetch_sample_bills(limit=effective_limit)
+        print(f"  Fetched {len(bills)} bills for multi-turn testing")
+        results.extend(await _run_multi_mode(client, bills, verbose=verbose))
+
+    return results
 
 
 async def main():
-    """Main entry point."""
+    """Main entry point for standalone execution."""
     parser = argparse.ArgumentParser(
         description="Test bill RAG queries in VoteBot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-
-    parser.add_argument(
-        "--api-url",
-        default="http://localhost:8000",
-        help="API base URL (default: http://localhost:8000)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=10,
-        help="Number of bills to test (default: 10)",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="WARNING",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level (default: WARNING)",
-    )
+    parser.add_argument("--api-url", default="http://localhost:8000",
+                        help="API base URL (default: http://localhost:8000)")
+    parser.add_argument("--limit", type=int, default=10,
+                        help="Number of bills to test (default: 10)")
+    parser.add_argument("--mode", choices=["single", "multi", "both"], default="single",
+                        help="Test mode (default: single)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
+    parser.add_argument("--output", help="Write results to JSON file")
 
     args = parser.parse_args()
-
-    # Setup logging
-    setup_logging(args.log_level)
 
     print("=" * 70)
     print("VOTEBOT BILL RAG TEST")
     print("=" * 70)
 
-    print(f"\nFetching {args.limit} sample bills from Webflow...")
-    bills = await fetch_sample_bills(limit=args.limit)
-    print(f"Found {len(bills)} bills")
+    settings = get_settings()
+    client = VoteBotTestClient(args.api_url, settings.api_key.get_secret_value())
 
-    if not bills:
-        print("No bills found. Have you run sync_bills.py?")
-        sys.exit(1)
-
-    # Show bill summary
-    with_positions = sum(
-        1 for b in bills
-        if b["supporting_orgs_count"] > 0 or b["opposing_orgs_count"] > 0
+    results = await run_tests(
+        client=client,
+        ground_truth=None,  # Standalone mode - no ground truth
+        limit=args.limit,
+        mode=args.mode,
+        verbose=args.verbose,
     )
-    print(f"Bills with organization positions: {with_positions}/{len(bills)}")
 
-    print("\n" + "=" * 70)
-    print("RUNNING TESTS")
-    print("=" * 70 + "\n")
+    report = generate_report(results)
+    print_report(report, verbose=args.verbose)
 
-    results = await run_tests(args.api_url, bills, BILL_QUESTIONS)
-
-    # Print summary
-    print_summary(results)
-    print_sample_responses(results)
-
-    # Save detailed results
-    output_file = Path(__file__).parent / "bill_test_results.json"
-    with open(output_file, "w") as f:
-        json.dump(results, f, indent=2, default=str)
-    print(f"\nDetailed results saved to: {output_file}")
+    if args.output:
+        save_report(report, args.output)
 
 
 if __name__ == "__main__":

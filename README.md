@@ -654,7 +654,13 @@ votebot/
 │   ├── sync.py              # Unified sync CLI
 │   ├── seed_data.py         # Development data seeding
 │   ├── test_bill_votes_tool.py  # Bill votes tool tests
-│   └── test_rag_comprehensive.py  # RAG evaluation tests
+│   ├── rag_test_common.py       # Shared test infra (TestResult, VoteBotTestClient, reporting)
+│   ├── rag_ground_truth.py      # Ground truth fetcher (Webflow CMS + OpenStates)
+│   ├── test_rag_comprehensive.py # Orchestrated RAG test suite (delegates to modules)
+│   ├── test_rag_quality.py      # Quality tests (static YAML + dynamic ground truth)
+│   ├── test_rag_bills.py        # Bill-focused RAG tests
+│   ├── test_rag_legislators.py  # Legislator-focused RAG tests (with page_context)
+│   └── test_rag_organizations.py # Organization-focused RAG tests
 ├── tests/
 │   ├── unit/
 │   ├── integration/
@@ -664,6 +670,86 @@ votebot/
     ├── dist/                # Built widget (ddp-chat.min.js)
     └── test.html            # Local testing page
 ```
+
+## RAG Test Suite
+
+VoteBot includes an orchestrated RAG test suite that validates response quality across all content types.
+
+### Architecture
+
+```
+test_rag_comprehensive.py  (orchestrator — CLI, ground truth, delegates, unified report)
+  ├── rag_test_common.py       (shared TestResult, TestReport, VoteBotTestClient, validation)
+  ├── test_rag_bills.py        (bill-focused tests, single + multi-turn)
+  ├── test_rag_legislators.py  (legislator tests with page_context)
+  ├── test_rag_organizations.py (organization-focused tests)
+  ├── rag_ground_truth.py      (ground truth fetcher from Webflow CMS + OpenStates)
+  └── test_rag_quality.py      (static YAML tests + dynamic ground truth validation)
+```
+
+Each focused script is independently runnable via `__main__` and exports a unified `run_tests()` interface.
+
+### Running the Full Suite
+
+```bash
+# Run all categories (bills, legislators, organizations, DDP, out-of-system votes)
+PYTHONPATH=src python scripts/test_rag_comprehensive.py
+
+# Run specific categories
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --category bills --category legislators
+
+# Multi-turn conversations
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --mode both --limit 5
+
+# With ground truth enrichment from OpenStates
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --with-openstates --limit 10
+
+# Save JSON report
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --output test_report.json
+
+# Dry run to see test plan
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --dry-run
+```
+
+### Running Individual Modules
+
+```bash
+# Bill tests (standalone)
+PYTHONPATH=src python scripts/test_rag_bills.py --limit 5 --mode single
+
+# Legislator tests (preserves page_context)
+PYTHONPATH=src python scripts/test_rag_legislators.py --sample-size 5 --mode both
+
+# Organization tests
+PYTHONPATH=src python scripts/test_rag_organizations.py --limit 5
+
+# Quality tests (static YAML + dynamic ground truth)
+PYTHONPATH=src python scripts/test_rag_quality.py --dynamic --limit 10
+```
+
+### CLI Options (Orchestrator)
+
+| Option | Description |
+|--------|-------------|
+| `--category CAT` | Category to test (repeatable): bills, legislators, organizations, ddp, out_of_system_votes |
+| `--mode MODE` | single, multi, or both (default: single) |
+| `--limit N` | Max entities per category (default: 10) |
+| `--jurisdiction CODE` | Filter by state code (e.g., FL, VA) |
+| `--with-openstates` | Enrich ground truth with OpenStates data |
+| `--api-url URL` | VoteBot API URL (default: http://localhost:8000) |
+| `--output FILE` | JSON report output path |
+| `--verbose` | Per-test detailed output |
+| `--dry-run` | Show test plan without executing |
+
+### Test Categories
+
+| Category | Ground Truth | Description |
+|----------|-------------|-------------|
+| `bills` | Webflow CMS | Bill queries with optional ground truth validation |
+| `legislators` | Webflow CMS | Legislator queries with page_context (critical for scoped retrieval) |
+| `organizations` | Webflow CMS | Organization profile and position queries |
+| `ddp` | None | DDP general knowledge (confidence/citation metrics only) |
+| `out_of_system_votes` | None | Bills NOT in CMS (tests dynamic OpenStates lookup) |
 
 ## Performance Targets
 

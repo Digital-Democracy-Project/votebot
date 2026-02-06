@@ -1,54 +1,54 @@
 #!/usr/bin/env python3
-"""Comprehensive RAG test with multi-turn conversations."""
+"""
+Orchestrated RAG Test Suite for VoteBot.
 
+Establishes ground truth from Webflow CMS (+ optional OpenStates), delegates
+to focused test modules (bills, legislators, organizations, DDP, out-of-system
+votes), and produces a unified report with metrics broken down by category.
+
+Usage:
+    # Run all categories with defaults
+    python scripts/test_rag_comprehensive.py
+
+    # Run specific categories
+    python scripts/test_rag_comprehensive.py --category bills --category legislators
+
+    # Run with multi-turn conversations
+    python scripts/test_rag_comprehensive.py --mode both --limit 5
+
+    # Run with ground truth and OpenStates enrichment
+    python scripts/test_rag_comprehensive.py --with-openstates --limit 10
+
+    # Dry run to see test plan
+    python scripts/test_rag_comprehensive.py --dry-run
+
+    # Save JSON report
+    python scripts/test_rag_comprehensive.py --output test_report.json
+"""
+
+import argparse
 import asyncio
-import json
 import random
 import sys
+import uuid
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Optional
 
-# Add src to path for imports
+# Add src and scripts to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent))
 
-import httpx
-from votebot.config import get_settings
-
-# Clear settings cache
-get_settings.cache_clear()
-settings = get_settings()
-
-# Jurisdiction ID to name mapping
-JURISDICTIONS = {
-    "655288ef928edb128306745f": "Florida",
-    "65810f6b889af86635a71b49": "US Federal",
-    "691294466973f77ba7924c9b": "Washington",
-    "6912910d68fa6adb1b2b630f": "Virginia",
-    "6912929f5ec63fd925b99c10": "Michigan",
-    "6912928fd6eec8ac6bccb2c8": "Massachusetts",
-    "69129425a577496525c8e52a": "Utah",
-    "6912916752bfa901425f1e76": "Arizona",
-    "69129146d6eec8ac6bcc8280": "Alabama",
-}
+from rag_test_common import (
+    TestResult,
+    VoteBotTestClient,
+    fetch_ground_truth,
+    generate_report,
+    print_report,
+    save_report,
+)
 
 
-@dataclass
-class TestResult:
-    """Result of a single test."""
-    test_id: str
-    jurisdiction: str
-    bill_title: str
-    prompts: list[str]
-    responses: list[str]
-    has_citations: list[bool]
-    confidence_scores: list[float]
-    latencies: list[float]
-    success: bool
-    error: Optional[str] = None
+# ── DDP General Knowledge Questions ──────────────────────────────────────────
 
-
-# DDP General Knowledge Questions with follow-ups
 DDP_QUESTIONS = [
     {
         "initial": "What is the Digital Democracy Project?",
@@ -107,41 +107,9 @@ DDP_QUESTIONS = [
     },
 ]
 
-# Bill-specific question templates
-BILL_QUESTION_TEMPLATES = [
-    {
-        "initial": "What is {bill_title} about?",
-        "follow_ups": [
-            "What are the main arguments in support of this bill?",
-            "What are the arguments against it?",
-            "What is the current status of this bill?",
-        ]
-    },
-    {
-        "initial": "Can you summarize {bill_title}?",
-        "follow_ups": [
-            "Who sponsored this legislation?",
-            "What committee is it assigned to?",
-        ]
-    },
-    {
-        "initial": "What would change if {bill_title} passes?",
-        "follow_ups": [
-            "Who would be most affected by this bill?",
-            "Are there similar bills in other states?",
-        ]
-    },
-    {
-        "initial": "Tell me about the {jurisdiction} bill on {topic}",
-        "follow_ups": [
-            "What's the bill number?",
-            "Has there been any public debate on this?",
-        ]
-    },
-]
 
-# Out-of-system bill vote tests (tests dynamic OpenStates lookup via BillVotesService)
-# These bills are NOT in our Webflow CMS - requires real-time API lookup
+# ── Out-of-System Vote Tests ─────────────────────────────────────────────────
+
 OUT_OF_SYSTEM_VOTE_TESTS = [
     {
         "bill_id": "FL HB 1",
@@ -199,507 +167,278 @@ OUT_OF_SYSTEM_VOTE_TESTS = [
 ]
 
 
-# Vote-specific question templates (tests bill-votes document retrieval)
-VOTE_QUESTION_TEMPLATES = [
-    {
-        "initial": "How did legislators vote on {bill_title}?",
-        "follow_ups": [
-            "Who voted yes on this bill?",
-            "Who voted no?",
-            "Was this a close vote?",
-        ]
-    },
-    {
-        "initial": "What was the vote count on {bill_title}?",
-        "follow_ups": [
-            "Did this bill pass committee?",
-            "Were there any abstentions?",
-            "Which party mostly supported it?",
-        ]
-    },
-    {
-        "initial": "Did {bill_title} pass?",
-        "follow_ups": [
-            "What was the final vote tally?",
-            "Who were the key supporters?",
-            "Were there any surprising votes?",
-        ]
-    },
-    {
-        "initial": "Show me the voting record for {bill_title}",
-        "follow_ups": [
-            "How did the committee vote compare to the floor vote?",
-            "Were there any bipartisan votes?",
-        ]
-    },
-    {
-        "initial": "Who opposed {bill_title}?",
-        "follow_ups": [
-            "What were their reasons for voting no?",
-            "How many Democrats voted against it?",
-            "How many Republicans voted against it?",
-        ]
-    },
-]
+# ── DDP and Out-of-System Test Runners ───────────────────────────────────────
 
+async def run_ddp_tests(
+    client: VoteBotTestClient,
+    mode: str = "single",
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run DDP general knowledge tests."""
+    print("\n--- DDP Tests ---")
+    results = []
 
-async def fetch_sample_bills():
-    """Fetch sample bills from Webflow CMS."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        headers = {
-            "Authorization": f"Bearer {settings.webflow_api_key.get_secret_value()}",
-            "accept": "application/json",
-        }
+    for q_set in DDP_QUESTIONS:
+        session_id = f"test-ddp-{uuid.uuid4().hex[:8]}"
 
-        all_bills = []
-        offset = 0
+        if mode == "single":
+            # Single-turn: just the initial question
+            prompts = [q_set["initial"]]
+        else:
+            # Multi-turn: initial + follow-ups
+            n_follow_ups = random.randint(1, min(3, len(q_set["follow_ups"])))
+            follow_ups = random.sample(q_set["follow_ups"], n_follow_ups)
+            prompts = [q_set["initial"]] + follow_ups
 
-        # Fetch all bills
-        while True:
-            response = await client.get(
-                f"https://api.webflow.com/v2/collections/{settings.webflow_bills_collection_id}/items",
-                headers=headers,
-                params={"limit": 100, "offset": offset}
+        for turn_idx, prompt in enumerate(prompts):
+            resp = await client.send_message(
+                prompt, session_id=session_id, page_context={"type": "general"},
             )
 
-            if response.status_code != 200:
+            result = TestResult(
+                test_id=f"{session_id}-turn{turn_idx}",
+                category="ddp",
+                entity_type="ddp",
+                entity_name="DDP Knowledge",
+                prompt=prompt,
+                response_text=resp["response"],
+                response_preview=resp["response"][:500],
+                confidence=resp["confidence"],
+                has_citations=resp["citation_count"] > 0,
+                citation_count=resp["citation_count"],
+                latency=resp["latency"],
+                passed=None,  # No CMS ground truth for DDP
+                data_source="none",
+                turn_index=turn_idx,
+                session_id=session_id,
+                jurisdiction="General",
+                success=resp["success"],
+                error=resp["error"],
+                mode="multi" if len(prompts) > 1 else "single",
+            )
+            results.append(result)
+
+            if verbose:
+                status = "OK" if resp["success"] else "ERR"
+                print(f"  [{status}] {prompt[:60]}... conf={resp['confidence']:.2f}")
+
+            if not resp["success"]:
                 break
 
-            data = response.json()
-            items = data.get("items", [])
-
-            if not items:
-                break
-
-            all_bills.extend(items)
-            offset += 100
-
-            if len(items) < 100:
-                break
-
-        return all_bills
+    print(f"  Completed {len(results)} DDP test queries")
+    return results
 
 
-def select_bills_by_jurisdiction(bills: list, sample_size: int = 50) -> list:
-    """Select a stratified sample of bills across jurisdictions."""
-    by_jurisdiction = {}
-
-    for bill in bills:
-        fields = bill.get("fieldData", {})
-        jurisdiction_id = fields.get("jurisdiction")
-
-        if jurisdiction_id not in by_jurisdiction:
-            by_jurisdiction[jurisdiction_id] = []
-        by_jurisdiction[jurisdiction_id].append(bill)
-
-    # Calculate how many to sample from each jurisdiction
-    selected = []
-    jurisdictions_with_bills = [j for j in by_jurisdiction if by_jurisdiction[j]]
-
-    if not jurisdictions_with_bills:
-        return []
-
-    # Prioritize jurisdictions we have names for
-    priority_jurisdictions = [j for j in jurisdictions_with_bills if j in JURISDICTIONS]
-    other_jurisdictions = [j for j in jurisdictions_with_bills if j not in JURISDICTIONS]
-
-    # Allocate samples
-    per_priority = sample_size // (len(priority_jurisdictions) + 1) if priority_jurisdictions else 0
-
-    for jurisdiction_id in priority_jurisdictions:
-        bills_in_j = by_jurisdiction[jurisdiction_id]
-        n_sample = min(per_priority, len(bills_in_j))
-        selected.extend(random.sample(bills_in_j, n_sample))
-
-    # Fill remaining with other jurisdictions
-    remaining = sample_size - len(selected)
-    if remaining > 0 and other_jurisdictions:
-        other_bills = []
-        for j in other_jurisdictions:
-            other_bills.extend(by_jurisdiction[j])
-        if other_bills:
-            selected.extend(random.sample(other_bills, min(remaining, len(other_bills))))
-
-    return selected
-
-
-def generate_bill_tests(bills: list) -> list[dict]:
-    """Generate test cases for bills."""
-    tests = []
-
-    for bill in bills:
-        fields = bill.get("fieldData", {})
-        title = fields.get("name", "Unknown Bill")
-        jurisdiction_id = fields.get("jurisdiction", "")
-        jurisdiction_name = JURISDICTIONS.get(jurisdiction_id, jurisdiction_id[:8] + "...")
-        description = fields.get("description", "")
-
-        # Extract topic from title or description
-        topic_words = title.split()[:3]
-        topic = " ".join(topic_words).lower()
-
-        # Select a random question template
-        template = random.choice(BILL_QUESTION_TEMPLATES)
-
-        # Format the questions
-        initial = template["initial"].format(
-            bill_title=title,
-            jurisdiction=jurisdiction_name,
-            topic=topic
-        )
-
-        follow_ups = [
-            q.format(bill_title=title, jurisdiction=jurisdiction_name, topic=topic)
-            for q in template["follow_ups"]
-        ]
-
-        # Randomly select 1-3 follow-ups
-        n_follow_ups = random.randint(1, min(3, len(follow_ups)))
-        selected_follow_ups = random.sample(follow_ups, n_follow_ups)
-
-        tests.append({
-            "type": "bill",
-            "jurisdiction": jurisdiction_name,
-            "bill_title": title,
-            "initial": initial,
-            "follow_ups": selected_follow_ups,
-        })
-
-    return tests
-
-
-def generate_vote_tests(bills: list) -> list[dict]:
-    """Generate test cases for bill voting records.
-
-    These tests specifically target the bill-votes documents to verify
-    that legislator voting information is being correctly retrieved.
-    """
-    tests = []
-
-    # Sample a subset of bills for vote tests (not all bills have votes)
-    sample_size = min(20, len(bills))
-    sampled_bills = random.sample(bills, sample_size)
-
-    for bill in sampled_bills:
-        fields = bill.get("fieldData", {})
-        title = fields.get("name", "Unknown Bill")
-        jurisdiction_id = fields.get("jurisdiction", "")
-        jurisdiction_name = JURISDICTIONS.get(jurisdiction_id, jurisdiction_id[:8] + "...")
-
-        # Select a random vote question template
-        template = random.choice(VOTE_QUESTION_TEMPLATES)
-
-        # Format the questions
-        initial = template["initial"].format(
-            bill_title=title,
-            jurisdiction=jurisdiction_name,
-        )
-
-        follow_ups = [
-            q.format(bill_title=title, jurisdiction=jurisdiction_name)
-            for q in template["follow_ups"]
-        ]
-
-        # Randomly select 1-2 follow-ups for vote tests
-        n_follow_ups = random.randint(1, min(2, len(follow_ups)))
-        selected_follow_ups = random.sample(follow_ups, n_follow_ups)
-
-        tests.append({
-            "type": "vote",
-            "jurisdiction": jurisdiction_name,
-            "bill_title": title,
-            "initial": initial,
-            "follow_ups": selected_follow_ups,
-        })
-
-    return tests
-
-
-def generate_ddp_tests() -> list[dict]:
-    """Generate DDP general knowledge tests."""
-    tests = []
-
-    for q in DDP_QUESTIONS:
-        n_follow_ups = random.randint(1, min(3, len(q["follow_ups"])))
-        selected_follow_ups = random.sample(q["follow_ups"], n_follow_ups)
-
-        tests.append({
-            "type": "ddp",
-            "jurisdiction": "General",
-            "bill_title": "DDP Knowledge",
-            "initial": q["initial"],
-            "follow_ups": selected_follow_ups,
-        })
-
-    return tests
-
-
-def generate_out_of_system_vote_tests() -> list[dict]:
-    """Generate test cases for bills NOT in our Webflow CMS.
-
-    These tests are designed to evaluate whether the LLM can:
-    1. Recognize when a bill is not in the knowledge base
-    2. Use the BillVotesService to dynamically fetch votes from OpenStates
-    3. Provide accurate vote information from the real-time API call
-
-    Note: These tests will show low confidence/no results if the BillVotesService
-    is not yet integrated as an LLM tool.
-    """
-    tests = []
+async def run_out_of_system_vote_tests(
+    client: VoteBotTestClient,
+    mode: str = "single",
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run tests for bills NOT in Webflow CMS (dynamic OpenStates lookup)."""
+    print("\n--- Out-of-System Vote Tests ---")
+    results = []
 
     for bill_test in OUT_OF_SYSTEM_VOTE_TESTS:
+        session_id = f"test-oos-{uuid.uuid4().hex[:8]}"
         questions = bill_test["questions"]
 
-        # Use first question as initial, rest as follow-ups
-        initial = questions[0]
-        follow_ups = questions[1:] if len(questions) > 1 else []
+        if mode == "single":
+            prompts = [questions[0]]
+        else:
+            prompts = questions
 
-        tests.append({
-            "type": "out_of_system_vote",
-            "jurisdiction": bill_test["jurisdiction"],
-            "bill_title": f"{bill_test['bill_id']} ({bill_test['session']})",
-            "initial": initial,
-            "follow_ups": follow_ups,
-            "metadata": {
-                "bill_id": bill_test["bill_id"],
-                "session": bill_test["session"],
-                "description": bill_test["description"],
-            }
-        })
+        bill_label = f"{bill_test['bill_id']} ({bill_test['session']})"
 
-    return tests
+        for turn_idx, prompt in enumerate(prompts):
+            resp = await client.send_message(
+                prompt, session_id=session_id, page_context={"type": "general"},
+            )
+
+            result = TestResult(
+                test_id=f"{session_id}-turn{turn_idx}",
+                category="out_of_system_votes",
+                entity_type="out_of_system_vote",
+                entity_name=bill_label,
+                prompt=prompt,
+                response_text=resp["response"],
+                response_preview=resp["response"][:500],
+                confidence=resp["confidence"],
+                has_citations=resp["citation_count"] > 0,
+                citation_count=resp["citation_count"],
+                latency=resp["latency"],
+                passed=None,  # No CMS ground truth
+                data_source="none",
+                turn_index=turn_idx,
+                session_id=session_id,
+                jurisdiction=bill_test["jurisdiction"],
+                success=resp["success"],
+                error=resp["error"],
+                mode="multi" if len(prompts) > 1 else "single",
+            )
+            results.append(result)
+
+            if verbose:
+                status = "OK" if resp["success"] else "ERR"
+                print(f"  [{status}] {prompt[:60]}... conf={resp['confidence']:.2f}")
+
+            if not resp["success"]:
+                break
+
+    print(f"  Completed {len(results)} out-of-system vote test queries")
+    return results
 
 
-async def run_chat_test(test: dict, api_url: str, api_key: str) -> TestResult:
-    """Run a multi-turn chat test."""
-    import time
+# ── CLI and Orchestration ────────────────────────────────────────────────────
 
-    session_id = f"test-{random.randint(10000, 99999)}"
-    prompts = [test["initial"]] + test["follow_ups"]
-    responses = []
-    has_citations = []
-    confidence_scores = []
-    latencies = []
+ALL_CATEGORIES = ["bills", "legislators", "organizations", "ddp", "out_of_system_votes"]
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for i, prompt in enumerate(prompts):
-            start_time = time.time()
 
-            try:
-                # Map test type to page context type
-                # Vote tests use "bill" context since votes are bill-related
-                # Out-of-system vote tests use "general" to simulate asking about unknown bills
-                if test["type"] == "ddp":
-                    page_type = "general"
-                elif test["type"] == "out_of_system_vote":
-                    page_type = "general"  # User wouldn't be on a bill page for unknown bills
-                else:
-                    page_type = "bill"
-
-                response = await client.post(
-                    f"{api_url}/votebot/v1/chat",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "message": prompt,
-                        "session_id": session_id,
-                        "human_active": False,
-                        "page_context": {
-                            "type": page_type,
-                        }
-                    }
-                )
-
-                latency = time.time() - start_time
-                latencies.append(latency)
-
-                if response.status_code != 200:
-                    return TestResult(
-                        test_id=session_id,
-                        jurisdiction=test["jurisdiction"],
-                        bill_title=test["bill_title"],
-                        prompts=prompts[:i+1],
-                        responses=responses,
-                        has_citations=has_citations,
-                        confidence_scores=confidence_scores,
-                        latencies=latencies,
-                        success=False,
-                        error=f"HTTP {response.status_code}: {response.text[:200]}"
-                    )
-
-                data = response.json()
-                responses.append(data.get("response", ""))
-                has_citations.append(len(data.get("citations", [])) > 0)
-                confidence_scores.append(data.get("confidence", 0.0))
-
-            except Exception as e:
-                return TestResult(
-                    test_id=session_id,
-                    jurisdiction=test["jurisdiction"],
-                    bill_title=test["bill_title"],
-                    prompts=prompts[:i+1],
-                    responses=responses,
-                    has_citations=has_citations,
-                    confidence_scores=confidence_scores,
-                    latencies=latencies,
-                    success=False,
-                    error=str(e)
-                )
-
-    return TestResult(
-        test_id=session_id,
-        jurisdiction=test["jurisdiction"],
-        bill_title=test["bill_title"],
-        prompts=prompts,
-        responses=responses,
-        has_citations=has_citations,
-        confidence_scores=confidence_scores,
-        latencies=latencies,
-        success=True
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Orchestrated RAG Test Suite for VoteBot",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
+    parser.add_argument(
+        "--category", action="append", dest="categories",
+        choices=ALL_CATEGORIES,
+        help="Category to test (repeatable; default: all)",
+    )
+    parser.add_argument(
+        "--mode", choices=["single", "multi", "both"], default="single",
+        help="Test mode: single, multi, or both (default: single)",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=10,
+        help="Max entities per category (default: 10)",
+    )
+    parser.add_argument(
+        "--jurisdiction",
+        help="Filter by state code (e.g., FL, VA)",
+    )
+    parser.add_argument(
+        "--with-openstates", action="store_true",
+        help="Enrich ground truth with OpenStates data",
+    )
+    parser.add_argument(
+        "--api-url", default="http://localhost:8000",
+        help="VoteBot API URL (default: http://localhost:8000)",
+    )
+    parser.add_argument(
+        "--output",
+        help="JSON report output path",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Per-test output",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Show test plan without executing",
+    )
+    return parser.parse_args()
 
 
 async def main():
-    """Run comprehensive RAG tests."""
+    args = parse_args()
+    categories = args.categories or ALL_CATEGORIES
+
     print("=" * 70)
-    print("VOTEBOT COMPREHENSIVE RAG TEST")
+    print("VOTEBOT ORCHESTRATED RAG TEST SUITE")
     print("=" * 70)
+    print(f"  Categories: {', '.join(categories)}")
+    print(f"  Mode: {args.mode}")
+    print(f"  Limit: {args.limit} per category")
+    if args.jurisdiction:
+        print(f"  Jurisdiction: {args.jurisdiction}")
+    if args.with_openstates:
+        print(f"  OpenStates enrichment: enabled")
 
-    # Configuration
-    api_url = "http://localhost:8000"
-    api_key = settings.api_key.get_secret_value()
+    if args.dry_run:
+        print("\n[DRY RUN] Would run tests for categories:", ", ".join(categories))
+        needs_gt = set(categories) & {"bills", "legislators", "organizations"}
+        if needs_gt:
+            print(f"  Ground truth fetch: {', '.join(needs_gt)}")
+        if "ddp" in categories:
+            print(f"  DDP tests: {len(DDP_QUESTIONS)} question sets")
+        if "out_of_system_votes" in categories:
+            print(f"  Out-of-system vote tests: {len(OUT_OF_SYSTEM_VOTE_TESTS)} bill tests")
+        return 0
 
-    # Fetch bills
-    print("\nFetching bills from Webflow CMS...")
-    all_bills = await fetch_sample_bills()
-    print(f"Total bills available: {len(all_bills)}")
+    # Load API key from settings
+    from votebot.config import get_settings
+    get_settings.cache_clear()
+    settings = get_settings()
+    client = VoteBotTestClient(args.api_url, settings.api_key.get_secret_value())
 
-    # Select stratified sample
-    selected_bills = select_bills_by_jurisdiction(all_bills, sample_size=50)
-    print(f"Selected {len(selected_bills)} bills for testing")
+    # ── Phase 1: Establish ground truth ──────────────────────────────────
+    ground_truth = None
+    needs_ground_truth = set(categories) & {"bills", "legislators", "organizations"}
 
-    # Generate tests
-    bill_tests = generate_bill_tests(selected_bills)
-    vote_tests = generate_vote_tests(selected_bills)
-    ddp_tests = generate_ddp_tests()
-    out_of_system_vote_tests = generate_out_of_system_vote_tests()
+    if needs_ground_truth:
+        print("\n" + "=" * 70)
+        print("PHASE 1: FETCHING GROUND TRUTH")
+        print("=" * 70)
 
-    all_tests = bill_tests + vote_tests + ddp_tests + out_of_system_vote_tests
-    random.shuffle(all_tests)
+        entity_types = list(needs_ground_truth)
+        ground_truth = await fetch_ground_truth(
+            limit=args.limit,
+            jurisdiction=args.jurisdiction,
+            entity_types=entity_types,
+            with_openstates=args.with_openstates,
+        )
 
-    print(f"\nTotal test cases: {len(all_tests)}")
-    print(f"  - Bill questions: {len(bill_tests)}")
-    print(f"  - Vote questions: {len(vote_tests)}")
-    print(f"  - DDP questions: {len(ddp_tests)}")
-    print(f"  - Out-of-system vote questions: {len(out_of_system_vote_tests)}")
-
-    # Run tests
+    # ── Phase 2: Run tests by category ───────────────────────────────────
     print("\n" + "=" * 70)
-    print("RUNNING TESTS")
+    print("PHASE 2: RUNNING TESTS")
     print("=" * 70)
 
-    results = []
-    for i, test in enumerate(all_tests):
-        print(f"\n[{i+1}/{len(all_tests)}] {test['type'].upper()}: {test['bill_title'][:50]}...")
-        print(f"  Initial: {test['initial'][:60]}...")
+    all_results: list[TestResult] = []
 
-        result = await run_chat_test(test, api_url, api_key)
-        results.append(result)
+    if "bills" in categories:
+        from test_rag_bills import run_tests as run_bill_tests
+        all_results.extend(await run_bill_tests(
+            client, ground_truth=ground_truth, limit=args.limit,
+            jurisdiction=args.jurisdiction, mode=args.mode, verbose=args.verbose,
+        ))
 
-        if result.success:
-            avg_confidence = sum(result.confidence_scores) / len(result.confidence_scores) if result.confidence_scores else 0
-            avg_latency = sum(result.latencies) / len(result.latencies) if result.latencies else 0
-            citations_pct = sum(result.has_citations) / len(result.has_citations) * 100 if result.has_citations else 0
+    if "legislators" in categories:
+        from test_rag_legislators import run_tests as run_legislator_tests
+        all_results.extend(await run_legislator_tests(
+            client, ground_truth=ground_truth, limit=args.limit,
+            jurisdiction=args.jurisdiction, mode=args.mode, verbose=args.verbose,
+        ))
 
-            print(f"  ✓ {len(result.prompts)} turns, avg confidence: {avg_confidence:.2f}, "
-                  f"citations: {citations_pct:.0f}%, avg latency: {avg_latency:.1f}s")
-        else:
-            print(f"  ✗ FAILED: {result.error[:60]}...")
+    if "organizations" in categories:
+        from test_rag_organizations import run_tests as run_org_tests
+        all_results.extend(await run_org_tests(
+            client, ground_truth=ground_truth, limit=args.limit,
+            jurisdiction=args.jurisdiction, mode=args.mode, verbose=args.verbose,
+        ))
 
-    # Summary
+    if "ddp" in categories:
+        all_results.extend(await run_ddp_tests(
+            client, mode=args.mode, verbose=args.verbose,
+        ))
+
+    if "out_of_system_votes" in categories:
+        all_results.extend(await run_out_of_system_vote_tests(
+            client, mode=args.mode, verbose=args.verbose,
+        ))
+
+    # ── Phase 3: Unified report ──────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("TEST SUMMARY")
+    print("PHASE 3: UNIFIED REPORT")
     print("=" * 70)
 
-    successful = [r for r in results if r.success]
-    failed = [r for r in results if not r.success]
+    report = generate_report(all_results)
+    print_report(report, verbose=args.verbose)
 
-    print(f"\nTotal tests: {len(results)}")
-    print(f"Successful: {len(successful)} ({len(successful)/len(results)*100:.1f}%)")
-    print(f"Failed: {len(failed)} ({len(failed)/len(results)*100:.1f}%)")
+    if args.output:
+        save_report(report, args.output)
 
-    if successful:
-        all_confidences = [c for r in successful for c in r.confidence_scores]
-        all_latencies = [l for r in successful for l in r.latencies]
-        all_citations = [c for r in successful for c in r.has_citations]
-
-        print(f"\nPerformance Metrics:")
-        print(f"  Avg confidence: {sum(all_confidences)/len(all_confidences):.2f}")
-        print(f"  High confidence (>0.7): {sum(1 for c in all_confidences if c > 0.7)/len(all_confidences)*100:.1f}%")
-        print(f"  With citations: {sum(all_citations)/len(all_citations)*100:.1f}%")
-        print(f"  Avg latency: {sum(all_latencies)/len(all_latencies):.2f}s")
-        print(f"  P95 latency: {sorted(all_latencies)[int(len(all_latencies)*0.95)]:.2f}s")
-
-    # Results by test type
-    print(f"\nResults by Test Type:")
-    by_type = {"bill": [], "vote": [], "ddp": [], "out_of_system_vote": []}
-    for i, test in enumerate(all_tests):
-        if results[i].success:
-            by_type[test["type"]].append(results[i])
-
-    for test_type, type_results in by_type.items():
-        if type_results:
-            type_confidences = [c for r in type_results for c in r.confidence_scores]
-            type_citations = [c for r in type_results for c in r.has_citations]
-            avg_conf = sum(type_confidences) / len(type_confidences) if type_confidences else 0
-            citation_rate = sum(type_citations) / len(type_citations) * 100 if type_citations else 0
-            print(f"  {test_type.upper()}: {len(type_results)} tests, "
-                  f"avg confidence: {avg_conf:.2f}, citations: {citation_rate:.0f}%")
-
-    # Results by jurisdiction
-    print(f"\nResults by Jurisdiction:")
-    by_jurisdiction = {}
-    for r in successful:
-        j = r.jurisdiction
-        if j not in by_jurisdiction:
-            by_jurisdiction[j] = []
-        by_jurisdiction[j].append(r)
-
-    for j, j_results in sorted(by_jurisdiction.items()):
-        j_confidences = [c for r in j_results for c in r.confidence_scores]
-        avg_conf = sum(j_confidences) / len(j_confidences) if j_confidences else 0
-        print(f"  {j}: {len(j_results)} tests, avg confidence: {avg_conf:.2f}")
-
-    # Save detailed results
-    output_file = Path(__file__).parent / "test_results.json"
-    with open(output_file, "w") as f:
-        json.dump([{
-            "test_id": r.test_id,
-            "jurisdiction": r.jurisdiction,
-            "bill_title": r.bill_title,
-            "prompts": r.prompts,
-            "responses": r.responses,
-            "has_citations": r.has_citations,
-            "confidence_scores": r.confidence_scores,
-            "latencies": r.latencies,
-            "success": r.success,
-            "error": r.error,
-        } for r in results], f, indent=2)
-
-    print(f"\nDetailed results saved to: {output_file}")
-
-    # Show sample conversations
-    print("\n" + "=" * 70)
-    print("SAMPLE CONVERSATIONS")
-    print("=" * 70)
-
-    samples = random.sample(successful, min(3, len(successful)))
-    for r in samples:
-        print(f"\n--- {r.jurisdiction}: {r.bill_title[:50]} ---")
-        for i, (prompt, response) in enumerate(zip(r.prompts, r.responses)):
-            print(f"\nUser: {prompt}")
-            print(f"Bot: {response[:300]}..." if len(response) > 300 else f"Bot: {response}")
-            print(f"[Confidence: {r.confidence_scores[i]:.2f}, Citations: {r.has_citations[i]}]")
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

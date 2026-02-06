@@ -10,27 +10,30 @@ when provided with legislator page context, including:
 - Contact information
 - Party and chamber information
 
-Usage:
-    python scripts/test_rag_legislators.py [options]
+Supports single-turn (with optional ground truth validation) and multi-turn modes.
 
-Options:
-    --api-url URL      API base URL (default: http://localhost:8000)
-    --sample-size N    Number of legislators to test (default: 10)
-    --verbose          Show full responses
+Usage:
+    # Standalone single-turn tests
+    python scripts/test_rag_legislators.py --sample-size 5
+
+    # Multi-turn mode
+    python scripts/test_rag_legislators.py --sample-size 5 --mode multi
+
+    # Both modes
+    python scripts/test_rag_legislators.py --sample-size 5 --mode both
 """
 
 import argparse
 import asyncio
-import json
 import random
 import sys
 import time
-from dataclasses import dataclass
+import uuid
 from pathlib import Path
-from typing import Optional
 
-# Add src to path for imports
+# Add src and scripts to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent))
 
 import httpx
 from votebot.config import get_settings
@@ -38,6 +41,16 @@ from votebot.config import get_settings
 # Clear settings cache
 get_settings.cache_clear()
 settings = get_settings()
+
+from rag_test_common import (
+    TestResult,
+    VoteBotTestClient,
+    validate_response,
+    generate_report,
+    print_report,
+    save_report,
+)
+
 
 # Global jurisdiction mapping (populated by fetch_jurisdiction_mapping)
 JURISDICTION_MAP: dict[str, str] = {}
@@ -73,27 +86,11 @@ async def fetch_jurisdiction_mapping() -> dict[str, str]:
         for item in data.get("items", []):
             item_id = item.get("id", "")
             fields = item.get("fieldData", {})
-            # Try to get state code from name or slug
             state_code = fields.get("slug", "").upper()[:2]
             if len(state_code) == 2:
                 JURISDICTION_MAP[item_id] = state_code
 
     return JURISDICTION_MAP
-
-
-@dataclass
-class TestResult:
-    """Result of a single legislator test."""
-    legislator_name: str
-    legislator_id: str
-    jurisdiction: str
-    question: str
-    response: str
-    confidence: float
-    has_citations: bool
-    latency: float
-    success: bool
-    error: Optional[str] = None
 
 
 # Test questions for legislator pages
@@ -142,15 +139,7 @@ LEGISLATOR_QUESTIONS = [
 
 
 async def fetch_sample_legislators(sample_size: int = 10) -> list[dict]:
-    """
-    Fetch sample legislators from Webflow CMS.
-
-    Args:
-        sample_size: Number of legislators to sample
-
-    Returns:
-        List of legislator items from Webflow
-    """
+    """Fetch sample legislators from Webflow CMS."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         headers = {
             "Authorization": f"Bearer {settings.webflow_api_key.get_secret_value()}",
@@ -165,7 +154,6 @@ async def fetch_sample_legislators(sample_size: int = 10) -> list[dict]:
         all_legislators = []
         offset = 0
 
-        # Fetch all legislators
         while True:
             response = await client.get(
                 f"https://api.webflow.com/v2/collections/{collection_id}/items",
@@ -197,11 +185,10 @@ async def fetch_sample_legislators(sample_size: int = 10) -> list[dict]:
 
         print(f"Found {len(legislators_with_id)} legislators with OpenStates IDs")
 
-        # Sample from different jurisdictions if possible
         if len(legislators_with_id) <= sample_size:
             return legislators_with_id
 
-        # Group by jurisdiction and sample
+        # Group by jurisdiction and sample proportionally
         by_jurisdiction = {}
         for leg in legislators_with_id:
             j = leg.get("fieldData", {}).get("jurisdiction", "unknown")
@@ -209,7 +196,6 @@ async def fetch_sample_legislators(sample_size: int = 10) -> list[dict]:
                 by_jurisdiction[j] = []
             by_jurisdiction[j].append(leg)
 
-        # Sample proportionally
         sampled = []
         remaining = sample_size
         jurisdictions = list(by_jurisdiction.keys())
@@ -224,175 +210,296 @@ async def fetch_sample_legislators(sample_size: int = 10) -> list[dict]:
         return sampled[:sample_size]
 
 
-async def query_legislator_context(
-    legislator_id: str,
-    jurisdiction: str,
-    question: str,
-    api_url: str,
-    api_key: str,
-) -> dict:
+def _resolve_jurisdiction(jurisdiction_ref) -> str:
+    """Resolve a Webflow jurisdiction reference to a state code."""
+    if isinstance(jurisdiction_ref, str) and len(jurisdiction_ref) > 2:
+        return JURISDICTION_MAP.get(jurisdiction_ref, "US")
+    elif isinstance(jurisdiction_ref, str) and len(jurisdiction_ref) == 2:
+        return jurisdiction_ref.upper()
+    return "US"
+
+
+def _build_page_context(legislator_id: str, jurisdiction: str) -> dict:
+    """Build the critical legislator page context for API calls.
+
+    This page context is unique to legislator tests and enables the API
+    to scope retrieval to the specific legislator.
     """
-    Send a query with legislator page context.
-
-    Args:
-        legislator_id: OpenStates person ID
-        jurisdiction: State code
-        question: Question to ask
-        api_url: API base URL
-        api_key: API key
-
-    Returns:
-        API response dict
-    """
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            f"{api_url}/votebot/v1/chat",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "message": question,
-                "session_id": f"test-leg-{random.randint(10000, 99999)}",
-                "human_active": False,
-                "page_context": {
-                    "type": "legislator",
-                    "id": legislator_id,
-                    "jurisdiction": jurisdiction,
-                },
-            },
-        )
-
-        if response.status_code != 200:
-            return {
-                "error": f"HTTP {response.status_code}: {response.text[:200]}",
-                "success": False,
-            }
-
-        data = response.json()
-        data["success"] = True
-        return data
+    return {
+        "type": "legislator",
+        "id": legislator_id,
+        "jurisdiction": jurisdiction,
+    }
 
 
-async def run_legislator_test(
-    legislator: dict,
-    api_url: str,
-    api_key: str,
+async def _run_single_mode_standalone(
+    client: VoteBotTestClient,
+    legislators: list[dict],
     verbose: bool = False,
 ) -> list[TestResult]:
-    """
-    Run all test questions for a single legislator.
+    """Run single-turn tests using LEGISLATOR_QUESTIONS with page_context."""
+    results = []
+
+    for i, legislator in enumerate(legislators):
+        fields = legislator.get("fieldData", {})
+        name = fields.get("name", "Unknown")
+        legislator_id = fields.get("openstatesid", "")
+        jurisdiction_ref = fields.get("jurisdiction", "")
+        jurisdiction = _resolve_jurisdiction(jurisdiction_ref)
+        page_context = _build_page_context(legislator_id, jurisdiction)
+
+        if verbose:
+            print(f"\n  [{i + 1}/{len(legislators)}] Testing: {name} ({jurisdiction})")
+
+        for q_info in LEGISLATOR_QUESTIONS:
+            question = q_info["question"]
+            start_time = time.time()
+
+            resp = await client.send_message(question, page_context=page_context)
+            latency = time.time() - start_time
+
+            result = TestResult(
+                test_id=f"leg-{legislator_id[:8]}-{q_info['description'][:10]}",
+                category="legislators",
+                entity_type="legislator",
+                entity_name=name,
+                entity_slug=fields.get("slug", ""),
+                prompt=question,
+                response_text=resp["response"],
+                response_preview=resp["response"][:500],
+                confidence=resp["confidence"],
+                has_citations=resp["citation_count"] > 0,
+                citation_count=resp["citation_count"],
+                latency=resp["latency"],
+                passed=None,  # No ground truth in standalone
+                data_source="none",
+                jurisdiction=jurisdiction,
+                success=resp["success"],
+                error=resp["error"],
+                mode="single",
+            )
+            results.append(result)
+
+            if verbose:
+                status = "OK" if resp["success"] else "ERR"
+                print(f"    [{status}] {question[:50]}... conf={resp['confidence']:.2f}")
+
+    return results
+
+
+async def _run_single_mode_ground_truth(
+    client: VoteBotTestClient,
+    ground_truth: tuple[list, list, list],
+    limit: int = 0,
+    jurisdiction: str | None = None,
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run single-turn tests with ground truth validation and page_context."""
+    from test_rag_quality import DynamicTestGenerator
+
+    _, legislators_gt, _ = ground_truth
+
+    if jurisdiction:
+        legislators_gt = [l for l in legislators_gt if l.jurisdiction == jurisdiction.upper()]
+
+    if limit > 0:
+        legislators_gt = legislators_gt[:limit]
+
+    if not legislators_gt:
+        print("  No legislators found for ground truth testing")
+        return []
+
+    generator = DynamicTestGenerator()
+    test_cases = generator.generate_legislator_tests(legislators_gt)
+    print(f"  Generated {len(test_cases)} legislator test cases from ground truth")
+
+    results = []
+    for i, tc in enumerate(test_cases):
+        # Build page_context from ground truth data
+        page_context = _build_page_context(
+            tc.get("openstates_id", ""),
+            tc.get("jurisdiction", "US"),
+        )
+
+        resp = await client.send_message(tc["prompt"], page_context=page_context)
+
+        result = TestResult(
+            test_id=tc["id"],
+            category="legislators",
+            entity_type="legislator",
+            entity_name=tc.get("prompt", ""),
+            entity_slug=tc.get("entity_slug", ""),
+            prompt=tc["prompt"],
+            response_text=resp["response"],
+            response_preview=resp["response"][:500],
+            confidence=resp["confidence"],
+            has_citations=resp["citation_count"] > 0,
+            citation_count=resp["citation_count"],
+            latency=resp["latency"],
+            expected_data=tc.get("expected_data", []),
+            validation_mode=tc.get("validation", "contains"),
+            data_source=tc.get("data_source", "webflow_cms"),
+            success=resp["success"],
+            error=resp["error"],
+            jurisdiction=tc.get("jurisdiction", ""),
+            mode="single",
+        )
+
+        if not resp["success"]:
+            result.passed = False
+        elif tc.get("expected_data"):
+            passed, found, missing = validate_response(
+                resp["response"],
+                tc["expected_data"],
+                tc.get("validation", "contains"),
+                tc.get("min_matches", 1),
+            )
+            result.passed = passed
+            result.found_data = found
+            result.missing_data = missing
+        else:
+            result.passed = None
+
+        results.append(result)
+
+        if verbose:
+            status = "PASS" if result.passed else ("FAIL" if result.passed is False else "N/A")
+            print(f"  [{status}] {tc['id']}: {tc['prompt'][:50]}...")
+
+        if (i + 1) % 10 == 0:
+            print(f"  Progress: {i + 1}/{len(test_cases)} legislator tests completed")
+
+        await asyncio.sleep(0.3)
+
+    return results
+
+
+async def _run_multi_mode(
+    client: VoteBotTestClient,
+    legislators: list[dict],
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run multi-turn conversation tests for legislators with page_context."""
+    results = []
+
+    for i, legislator in enumerate(legislators):
+        fields = legislator.get("fieldData", {})
+        name = fields.get("name", "Unknown")
+        legislator_id = fields.get("openstatesid", "")
+        jurisdiction_ref = fields.get("jurisdiction", "")
+        jurisdiction = _resolve_jurisdiction(jurisdiction_ref)
+        page_context = _build_page_context(legislator_id, jurisdiction)
+        session_id = f"test-leg-multi-{uuid.uuid4().hex[:8]}"
+
+        # Select 3-4 random questions for multi-turn conversation
+        n_questions = random.randint(3, min(4, len(LEGISLATOR_QUESTIONS)))
+        selected = random.sample(LEGISLATOR_QUESTIONS, n_questions)
+
+        if verbose:
+            print(f"\n  [{i + 1}/{len(legislators)}] Multi-turn: {name} ({jurisdiction})")
+
+        for turn_idx, q_info in enumerate(selected):
+            question = q_info["question"]
+            resp = await client.send_message(question, session_id=session_id, page_context=page_context)
+
+            result = TestResult(
+                test_id=f"{session_id}-turn{turn_idx}",
+                category="legislators",
+                entity_type="legislator",
+                entity_name=name,
+                entity_slug=fields.get("slug", ""),
+                prompt=question,
+                response_text=resp["response"],
+                response_preview=resp["response"][:500],
+                confidence=resp["confidence"],
+                has_citations=resp["citation_count"] > 0,
+                citation_count=resp["citation_count"],
+                latency=resp["latency"],
+                passed=None,  # Multi-turn: no ground truth
+                data_source="none",
+                turn_index=turn_idx,
+                session_id=session_id,
+                jurisdiction=jurisdiction,
+                success=resp["success"],
+                error=resp["error"],
+                mode="multi",
+            )
+            results.append(result)
+
+            if verbose:
+                status = "OK" if resp["success"] else "ERR"
+                print(f"    [{status}] Turn {turn_idx}: {question[:50]}... conf={resp['confidence']:.2f}")
+
+            if not resp["success"]:
+                break
+
+        if verbose:
+            print(f"    Completed {len(selected)} turns for: {name}")
+
+    return results
+
+
+async def run_tests(
+    client: VoteBotTestClient,
+    ground_truth: tuple[list, list, list] | None = None,
+    limit: int = 0,
+    jurisdiction: str | None = None,
+    mode: str = "single",
+    verbose: bool = False,
+) -> list[TestResult]:
+    """Run legislator tests with unified interface.
 
     Args:
-        legislator: Webflow legislator item
-        api_url: API base URL
-        api_key: API key
-        verbose: Whether to print full responses
+        client: VoteBotTestClient instance.
+        ground_truth: Optional (bills_gt, legislators_gt, organizations_gt) tuple.
+        limit: Max legislators to test.
+        jurisdiction: Filter by state code.
+        mode: "single", "multi", or "both".
+        verbose: Print per-test output.
 
     Returns:
-        List of TestResult objects
+        List of TestResult objects.
     """
-    fields = legislator.get("fieldData", {})
-    name = fields.get("name", "Unknown")
-    legislator_id = fields.get("openstatesid", "")
-    jurisdiction_ref = fields.get("jurisdiction", "")
-
-    # Resolve jurisdiction reference ID to state code
-    if isinstance(jurisdiction_ref, str) and len(jurisdiction_ref) > 2:
-        jurisdiction = JURISDICTION_MAP.get(jurisdiction_ref, "US")
-    elif isinstance(jurisdiction_ref, str) and len(jurisdiction_ref) == 2:
-        jurisdiction = jurisdiction_ref.upper()
-    else:
-        jurisdiction = "US"
+    # Ensure jurisdiction mapping is loaded for page_context resolution
+    await fetch_jurisdiction_mapping()
 
     results = []
 
-    for q_info in LEGISLATOR_QUESTIONS:
-        question = q_info["question"]
-        start_time = time.time()
-
-        try:
-            response = await query_legislator_context(
-                legislator_id=legislator_id,
-                jurisdiction=jurisdiction,
-                question=question,
-                api_url=api_url,
-                api_key=api_key,
-            )
-
-            latency = time.time() - start_time
-
-            if not response.get("success"):
-                results.append(TestResult(
-                    legislator_name=name,
-                    legislator_id=legislator_id,
-                    jurisdiction=jurisdiction,
-                    question=question,
-                    response="",
-                    confidence=0.0,
-                    has_citations=False,
-                    latency=latency,
-                    success=False,
-                    error=response.get("error", "Unknown error"),
-                ))
-                continue
-
-            response_text = response.get("response", "")
-            confidence = response.get("confidence", 0.0)
-            citations = response.get("citations", [])
-
-            results.append(TestResult(
-                legislator_name=name,
-                legislator_id=legislator_id,
-                jurisdiction=jurisdiction,
-                question=question,
-                response=response_text,
-                confidence=confidence,
-                has_citations=len(citations) > 0,
-                latency=latency,
-                success=True,
+    if mode in ("single", "both"):
+        if ground_truth and ground_truth[1]:
+            print("\n--- Legislator Tests: Single-turn (ground truth) ---")
+            results.extend(await _run_single_mode_ground_truth(
+                client, ground_truth, limit=limit, jurisdiction=jurisdiction, verbose=verbose,
             ))
+        else:
+            print("\n--- Legislator Tests: Single-turn (standalone) ---")
+            effective_limit = limit if limit > 0 else 10
+            legislators = await fetch_sample_legislators(effective_limit)
+            print(f"  Fetched {len(legislators)} legislators for testing")
+            results.extend(await _run_single_mode_standalone(client, legislators, verbose=verbose))
 
-            if verbose:
-                print(f"\n  Q: {question}")
-                print(f"  A: {response_text[:200]}...")
-                print(f"  Confidence: {confidence:.2f}, Citations: {len(citations)}")
-
-        except Exception as e:
-            results.append(TestResult(
-                legislator_name=name,
-                legislator_id=legislator_id,
-                jurisdiction=jurisdiction,
-                question=question,
-                response="",
-                confidence=0.0,
-                has_citations=False,
-                latency=time.time() - start_time,
-                success=False,
-                error=str(e),
-            ))
+    if mode in ("multi", "both"):
+        print("\n--- Legislator Tests: Multi-turn ---")
+        effective_limit = limit if limit > 0 else 10
+        legislators = await fetch_sample_legislators(effective_limit)
+        print(f"  Fetched {len(legislators)} legislators for multi-turn testing")
+        results.extend(await _run_multi_mode(client, legislators, verbose=verbose))
 
     return results
 
 
 async def main():
-    """Run legislator RAG tests."""
+    """Run legislator RAG tests (standalone)."""
     parser = argparse.ArgumentParser(
         description="Test RAG retrieval for legislator pages",
     )
-    parser.add_argument(
-        "--api-url",
-        default="http://localhost:8000",
-        help="API base URL",
-    )
-    parser.add_argument(
-        "--sample-size",
-        type=int,
-        default=10,
-        help="Number of legislators to test",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Show full responses",
-    )
+    parser.add_argument("--api-url", default="http://localhost:8000", help="API base URL")
+    parser.add_argument("--sample-size", type=int, default=10,
+                        help="Number of legislators to test")
+    parser.add_argument("--mode", choices=["single", "multi", "both"], default="single",
+                        help="Test mode (default: single)")
+    parser.add_argument("--verbose", action="store_true", help="Show full responses")
+    parser.add_argument("--output", help="Write results to JSON file")
 
     args = parser.parse_args()
     api_key = settings.api_key.get_secret_value()
@@ -401,137 +508,26 @@ async def main():
     print("VOTEBOT LEGISLATOR RAG TEST")
     print("=" * 70)
 
-    # Fetch jurisdiction mapping first
-    print("\nFetching jurisdiction mapping...")
-    await fetch_jurisdiction_mapping()
-    print(f"Loaded {len(JURISDICTION_MAP)} jurisdiction mappings")
+    client = VoteBotTestClient(args.api_url, api_key)
 
-    # Fetch sample legislators
-    print(f"\nFetching {args.sample_size} sample legislators from Webflow...")
-    legislators = await fetch_sample_legislators(args.sample_size)
+    results = await run_tests(
+        client=client,
+        ground_truth=None,
+        limit=args.sample_size,
+        mode=args.mode,
+        verbose=args.verbose,
+    )
 
-    if not legislators:
-        print("No legislators found. Ensure legislators are synced to Webflow.")
-        sys.exit(1)
+    report = generate_report(results)
+    print_report(report, verbose=args.verbose)
 
-    print(f"Selected {len(legislators)} legislators for testing")
-
-    # Run tests
-    print("\n" + "=" * 70)
-    print("RUNNING TESTS")
-    print("=" * 70)
-
-    all_results = []
-
-    for i, legislator in enumerate(legislators):
-        name = legislator.get("fieldData", {}).get("name", "Unknown")
-        print(f"\n[{i + 1}/{len(legislators)}] Testing: {name}")
-
-        results = await run_legislator_test(
-            legislator,
-            args.api_url,
-            api_key,
-            verbose=args.verbose,
-        )
-        all_results.extend(results)
-
-        # Summary for this legislator
-        successful = [r for r in results if r.success]
-        if successful:
-            avg_conf = sum(r.confidence for r in successful) / len(successful)
-            citations_pct = sum(1 for r in successful if r.has_citations) / len(successful) * 100
-            print(f"  {len(successful)}/{len(results)} succeeded, "
-                  f"avg confidence: {avg_conf:.2f}, citations: {citations_pct:.0f}%")
-        else:
-            print(f"  All {len(results)} tests failed")
-
-    # Overall summary
-    print("\n" + "=" * 70)
-    print("TEST SUMMARY")
-    print("=" * 70)
-
-    successful = [r for r in all_results if r.success]
-    failed = [r for r in all_results if not r.success]
-
-    print(f"\nTotal queries: {len(all_results)}")
-    print(f"Successful: {len(successful)} ({len(successful)/len(all_results)*100:.1f}%)")
-    print(f"Failed: {len(failed)} ({len(failed)/len(all_results)*100:.1f}%)")
-
-    if successful:
-        all_confidences = [r.confidence for r in successful]
-        all_latencies = [r.latency for r in successful]
-        citations_count = sum(1 for r in successful if r.has_citations)
-
-        print(f"\nPerformance Metrics:")
-        print(f"  Avg confidence: {sum(all_confidences)/len(all_confidences):.2f}")
-        print(f"  High confidence (>0.7): {sum(1 for c in all_confidences if c > 0.7)/len(all_confidences)*100:.1f}%")
-        print(f"  With citations: {citations_count/len(successful)*100:.1f}%")
-        print(f"  Avg latency: {sum(all_latencies)/len(all_latencies):.2f}s")
-
-    # Results by question type
-    print(f"\nResults by Question Type:")
-    by_question = {}
-    for r in successful:
-        q = r.question
-        if q not in by_question:
-            by_question[q] = []
-        by_question[q].append(r)
-
-    for q, q_results in by_question.items():
-        avg_conf = sum(r.confidence for r in q_results) / len(q_results)
-        citations_pct = sum(1 for r in q_results if r.has_citations) / len(q_results) * 100
-        print(f"  \"{q[:40]}...\"")
-        print(f"    {len(q_results)} tests, conf: {avg_conf:.2f}, citations: {citations_pct:.0f}%")
-
-    # Results by jurisdiction
-    print(f"\nResults by Jurisdiction:")
-    by_jurisdiction = {}
-    for r in successful:
-        j = r.jurisdiction
-        if j not in by_jurisdiction:
-            by_jurisdiction[j] = []
-        by_jurisdiction[j].append(r)
-
-    for j, j_results in sorted(by_jurisdiction.items()):
-        avg_conf = sum(r.confidence for r in j_results) / len(j_results)
-        print(f"  {j}: {len(j_results)} queries, avg confidence: {avg_conf:.2f}")
-
-    # Save detailed results
-    output_file = Path(__file__).parent / "legislator_test_results.json"
-    with open(output_file, "w") as f:
-        json.dump([{
-            "legislator_name": r.legislator_name,
-            "legislator_id": r.legislator_id,
-            "jurisdiction": r.jurisdiction,
-            "question": r.question,
-            "response": r.response,
-            "confidence": r.confidence,
-            "has_citations": r.has_citations,
-            "latency": r.latency,
-            "success": r.success,
-            "error": r.error,
-        } for r in all_results], f, indent=2)
-
-    print(f"\nDetailed results saved to: {output_file}")
-
-    # Show sample responses
-    if successful:
-        print("\n" + "=" * 70)
-        print("SAMPLE RESPONSES")
-        print("=" * 70)
-
-        samples = random.sample(successful, min(5, len(successful)))
-        for r in samples:
-            print(f"\n--- {r.legislator_name} ({r.jurisdiction}) ---")
-            print(f"Q: {r.question}")
-            response_preview = r.response[:300] + "..." if len(r.response) > 300 else r.response
-            print(f"A: {response_preview}")
-            print(f"[Confidence: {r.confidence:.2f}, Citations: {r.has_citations}]")
+    if args.output:
+        save_report(report, args.output)
 
     # Exit with error code if too many failures
-    failure_rate = len(failed) / len(all_results)
-    if failure_rate > 0.5:
-        print(f"\nWARNING: High failure rate ({failure_rate*100:.0f}%)")
+    failure_count = sum(1 for r in results if not r.success)
+    if results and failure_count / len(results) > 0.5:
+        print(f"\nWARNING: High failure rate ({failure_count / len(results) * 100:.0f}%)")
         sys.exit(1)
 
 

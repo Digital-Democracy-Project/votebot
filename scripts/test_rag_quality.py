@@ -43,84 +43,47 @@ Options:
 
 import argparse
 import asyncio
-import json
-import os
 import sys
-import uuid
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import httpx
 import yaml
-from dotenv import load_dotenv
 
 # Add src and scripts to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
+from rag_test_common import (
+    TestResult,
+    TestReport,
+    VoteBotTestClient,
+    validate_response,
+    fetch_ground_truth,
+    generate_report,
+    print_report,
+    save_report,
+)
 from rag_ground_truth import (
-    GroundTruthFetcher,
     BillGroundTruth,
     LegislatorGroundTruth,
     OrganizationGroundTruth,
 )
 
 
-@dataclass
-class TestResult:
-    """Result of a single test case."""
-
-    test_id: str
-    prompt: str
-    category: str
-    data_source: str
-    passed: bool
-    expected_data: list[str]
-    found_data: list[str] = field(default_factory=list)
-    missing_data: list[str] = field(default_factory=list)
-    response_preview: str = ""
-    error: str | None = None
-    confidence: float = 0.0
-    sources: list[str] = field(default_factory=list)
-    entity_type: str = ""
-    entity_slug: str = ""
-
-
-@dataclass
-class TestReport:
-    """Aggregate test report."""
-
-    timestamp: str
-    total_tests: int
-    passed: int
-    failed: int
-    errors: int
-    pass_rate: float
-    results_by_category: dict[str, dict] = field(default_factory=dict)
-    results_by_source: dict[str, dict] = field(default_factory=dict)
-    results_by_entity_type: dict[str, dict] = field(default_factory=dict)
-    all_results: list[TestResult] = field(default_factory=list)
-
-
 class DynamicTestGenerator:
     """Generates test cases from Webflow CMS ground truth."""
 
     def __init__(self, templates_path: str | None = None):
-        """Initialize with optional templates file."""
         self.templates_path = templates_path
         self.templates = self._load_templates()
 
     def _load_templates(self) -> dict:
-        """Load test templates from YAML."""
         if self.templates_path and Path(self.templates_path).exists():
             with open(self.templates_path, "r") as f:
                 return yaml.safe_load(f) or {}
         return self._default_templates()
 
     def _default_templates(self) -> dict:
-        """Default test templates if no file provided."""
         return {
             "bill_templates": [
                 {
@@ -215,12 +178,10 @@ class DynamicTestGenerator:
 
         for bill in bills:
             for template in templates:
-                # Check condition
                 condition = template.get("condition")
                 if condition and not getattr(bill, condition, False):
                     continue
 
-                # Build test case
                 test_id = template["id"].format(slug=bill.slug)
                 prompt = template["prompt"].format(
                     jurisdiction=bill.jurisdiction,
@@ -230,7 +191,6 @@ class DynamicTestGenerator:
                     slug=bill.slug,
                 )
 
-                # Get ground truth data
                 ground_truth_field = template.get("ground_truth_field", "")
                 expected_data = self._get_ground_truth_value(bill, ground_truth_field)
 
@@ -244,6 +204,7 @@ class DynamicTestGenerator:
                     "min_matches": template.get("min_matches", 1),
                     "entity_type": "bill",
                     "entity_slug": bill.slug,
+                    "jurisdiction": bill.jurisdiction,
                 })
 
         return test_cases
@@ -283,6 +244,9 @@ class DynamicTestGenerator:
                     "min_matches": template.get("min_matches", 1),
                     "entity_type": "legislator",
                     "entity_slug": legislator.slug,
+                    "jurisdiction": legislator.jurisdiction,
+                    # Preserve legislator-specific context for page_context
+                    "openstates_id": legislator.openstates_id,
                 })
 
         return test_cases
@@ -326,7 +290,6 @@ class DynamicTestGenerator:
         if not field_name:
             return []
 
-        # Handle method calls (e.g., description_keywords)
         if field_name.endswith("_keywords"):
             method = getattr(entity, field_name, None)
             if callable(method):
@@ -343,19 +306,9 @@ class DynamicTestGenerator:
 class RAGQualityTester:
     """Test runner for RAG quality validation."""
 
-    def __init__(
-        self,
-        api_url: str = "http://localhost:8000",
-        api_key: str | None = None,
-    ):
-        self.api_url = api_url.rstrip("/")
-        self.api_key = api_key or self._load_api_key()
+    def __init__(self, api_url: str = "http://localhost:8000", api_key: str | None = None):
+        self.client = VoteBotTestClient(api_url, api_key)
         self.results: list[TestResult] = []
-
-    def _load_api_key(self) -> str:
-        """Load API key from environment or .env file."""
-        load_dotenv()
-        return os.environ.get("VOTEBOT_API_KEY") or os.environ.get("API_KEY", "test-key")
 
     def load_test_cases(self, yaml_path: str) -> list[dict]:
         """Load test cases from YAML file."""
@@ -384,61 +337,55 @@ class RAGQualityTester:
         expected_data = test_case.get("expected_data", [])
         category = test_case.get("category", "unknown")
         data_source = test_case.get("data_source", "unknown")
-        validation = test_case.get("validation", "contains")
+        validation_mode = test_case.get("validation", "contains")
         min_matches = test_case.get("min_matches", 1)
+
+        # Build page context (legislators get special treatment)
+        page_context = {"type": "general"}
+        if test_case.get("openstates_id"):
+            page_context = {
+                "type": "legislator",
+                "id": test_case["openstates_id"],
+                "jurisdiction": test_case.get("jurisdiction", "US"),
+            }
+
+        resp = await self.client.send_message(prompt, page_context=page_context)
 
         result = TestResult(
             test_id=test_id,
-            prompt=prompt,
             category=category,
-            data_source=data_source,
-            passed=False,
-            expected_data=expected_data,
             entity_type=test_case.get("entity_type", ""),
             entity_slug=test_case.get("entity_slug", ""),
+            prompt=prompt,
+            response_text=resp["response"],
+            response_preview=resp["response"][:500],
+            confidence=resp["confidence"],
+            has_citations=resp["citation_count"] > 0,
+            citation_count=resp["citation_count"],
+            latency=resp["latency"],
+            expected_data=expected_data,
+            validation_mode=validation_mode,
+            data_source=data_source,
+            success=resp["success"],
+            error=resp["error"],
+            jurisdiction=test_case.get("jurisdiction", ""),
+            mode="single",
         )
 
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                session_id = f"rag-test-{uuid.uuid4().hex[:8]}"
-
-                response = await client.post(
-                    f"{self.api_url}/votebot/v1/chat",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "message": prompt,
-                        "session_id": session_id,
-                        "page_context": {"type": "general"},
-                    },
-                )
-
-                if response.status_code != 200:
-                    result.error = f"API error: {response.status_code} - {response.text[:200]}"
-                    return result
-
-                data = response.json()
-                response_text = data.get("response", "").lower()
-                result.response_preview = response_text[:500]
-                result.confidence = data.get("confidence", 0.0)
-                result.sources = [s.get("source", "") for s in data.get("sources", [])]
-
-                # Validate based on validation type
-                result.passed = self._validate_response(
-                    response_text,
-                    expected_data,
-                    validation,
-                    min_matches,
-                    result,
-                )
-
-        except Exception as e:
-            result.error = str(e)
+        if not resp["success"]:
+            result.passed = False
+        elif expected_data:
+            passed, found, missing = validate_response(
+                resp["response"], expected_data, validation_mode, min_matches,
+            )
+            result.passed = passed
+            result.found_data = found
+            result.missing_data = missing
+        else:
+            result.passed = None  # No ground truth to validate against
 
         if verbose:
-            status = "PASS" if result.passed else "FAIL"
+            status = "PASS" if result.passed else ("FAIL" if result.passed is False else "N/A")
             print(f"  [{status}] {test_id}: {prompt[:50]}...")
             if result.missing_data:
                 print(f"       Missing: {result.missing_data}")
@@ -446,54 +393,6 @@ class RAGQualityTester:
                 print(f"       Error: {result.error}")
 
         return result
-
-    def _validate_response(
-        self,
-        response_text: str,
-        expected_data: list[str],
-        validation: str,
-        min_matches: int,
-        result: TestResult,
-    ) -> bool:
-        """Validate response against expected data."""
-        if validation == "contains":
-            # All expected items must be in response
-            for expected in expected_data:
-                expected_lower = expected.lower()
-                if expected_lower in response_text:
-                    result.found_data.append(expected)
-                else:
-                    result.missing_data.append(expected)
-            return len(result.missing_data) == 0
-
-        elif validation == "contains_any":
-            # At least min_matches items must be in response
-            for expected in expected_data:
-                expected_lower = expected.lower()
-                if expected_lower in response_text:
-                    result.found_data.append(expected)
-                else:
-                    result.missing_data.append(expected)
-            return len(result.found_data) >= min_matches
-
-        elif validation == "keywords":
-            # At least min_matches keywords must be in response
-            for expected in expected_data:
-                expected_lower = expected.lower()
-                if expected_lower in response_text:
-                    result.found_data.append(expected)
-                else:
-                    result.missing_data.append(expected)
-            return len(result.found_data) >= min_matches
-
-        else:
-            # Default: all must match
-            for expected in expected_data:
-                if expected.lower() in response_text:
-                    result.found_data.append(expected)
-                else:
-                    result.missing_data.append(expected)
-            return len(result.missing_data) == 0
 
     async def run_all_tests(
         self,
@@ -517,117 +416,14 @@ class RAGQualityTester:
             result = await self.run_single_test(test_case, verbose)
             results.append(result)
 
-            # Progress indicator every 10 tests
             if (i + 1) % 10 == 0:
                 print(f"  Progress: {i + 1}/{len(test_cases)} tests completed")
 
-            # Rate limiting
             await asyncio.sleep(0.5)
 
-        report = self._generate_report(results)
-        self._print_summary(report)
+        report = generate_report(results)
+        print_report(report, verbose=verbose)
         return report
-
-    def _generate_report(self, results: list[TestResult]) -> TestReport:
-        """Generate aggregate report from results."""
-        passed = sum(1 for r in results if r.passed)
-        failed = sum(1 for r in results if not r.passed and not r.error)
-        errors = sum(1 for r in results if r.error)
-
-        # Group by category
-        by_category: dict[str, dict] = {}
-        for r in results:
-            if r.category not in by_category:
-                by_category[r.category] = {"total": 0, "passed": 0, "failed": 0}
-            by_category[r.category]["total"] += 1
-            if r.passed:
-                by_category[r.category]["passed"] += 1
-            else:
-                by_category[r.category]["failed"] += 1
-
-        # Group by data source
-        by_source: dict[str, dict] = {}
-        for r in results:
-            if r.data_source not in by_source:
-                by_source[r.data_source] = {"total": 0, "passed": 0, "failed": 0}
-            by_source[r.data_source]["total"] += 1
-            if r.passed:
-                by_source[r.data_source]["passed"] += 1
-            else:
-                by_source[r.data_source]["failed"] += 1
-
-        # Group by entity type
-        by_entity: dict[str, dict] = {}
-        for r in results:
-            if r.entity_type not in by_entity:
-                by_entity[r.entity_type] = {"total": 0, "passed": 0, "failed": 0}
-            by_entity[r.entity_type]["total"] += 1
-            if r.passed:
-                by_entity[r.entity_type]["passed"] += 1
-            else:
-                by_entity[r.entity_type]["failed"] += 1
-
-        return TestReport(
-            timestamp=datetime.now().isoformat(),
-            total_tests=len(results),
-            passed=passed,
-            failed=failed,
-            errors=errors,
-            pass_rate=passed / len(results) * 100 if results else 0,
-            results_by_category=by_category,
-            results_by_source=by_source,
-            results_by_entity_type=by_entity,
-            all_results=results,
-        )
-
-    def _print_summary(self, report: TestReport) -> None:
-        """Print test summary to console."""
-        print("\n" + "=" * 60)
-        print("RAG QUALITY TEST SUMMARY")
-        print("=" * 60)
-        print(f"  Timestamp: {report.timestamp}")
-        print(f"  Total Tests: {report.total_tests}")
-        print(f"  Passed: {report.passed}")
-        print(f"  Failed: {report.failed}")
-        print(f"  Errors: {report.errors}")
-        print(f"  Pass Rate: {report.pass_rate:.1f}%")
-
-        print("\n--- Results by Category ---")
-        for cat, stats in sorted(report.results_by_category.items()):
-            rate = stats["passed"] / stats["total"] * 100 if stats["total"] else 0
-            print(f"  {cat}: {stats['passed']}/{stats['total']} ({rate:.0f}%)")
-
-        print("\n--- Results by Entity Type ---")
-        for entity, stats in sorted(report.results_by_entity_type.items()):
-            rate = stats["passed"] / stats["total"] * 100 if stats["total"] else 0
-            print(f"  {entity}: {stats['passed']}/{stats['total']} ({rate:.0f}%)")
-
-        print("\n--- Results by Data Source ---")
-        for src, stats in sorted(report.results_by_source.items()):
-            rate = stats["passed"] / stats["total"] * 100 if stats["total"] else 0
-            print(f"  {src}: {stats['passed']}/{stats['total']} ({rate:.0f}%)")
-
-        # Show failed tests
-        failed_tests = [r for r in report.all_results if not r.passed]
-        if failed_tests:
-            print("\n--- Failed Tests (first 15) ---")
-            for r in failed_tests[:15]:
-                print(f"  [{r.test_id}] {r.prompt[:50]}...")
-                if r.missing_data:
-                    print(f"    Missing: {r.missing_data[:5]}")
-                if r.error:
-                    print(f"    Error: {r.error[:100]}")
-            if len(failed_tests) > 15:
-                print(f"  ... and {len(failed_tests) - 15} more")
-
-        print("=" * 60)
-
-    def save_report(self, report: TestReport, output_path: str) -> None:
-        """Save report to JSON file."""
-        report_dict = asdict(report)
-        with open(output_path, "w") as f:
-            json.dump(report_dict, f, indent=2, default=str)
-        print(f"\nReport saved to: {output_path}")
 
 
 def print_test_cases(test_cases: list[dict]) -> None:
@@ -648,52 +444,6 @@ def print_test_cases(test_cases: list[dict]) -> None:
     print(f"Total: {len(test_cases)} test cases")
 
 
-async def fetch_ground_truth(
-    limit: int = 0,
-    jurisdiction: str | None = None,
-    entity_types: list[str] | None = None,
-    with_openstates: bool = False,
-) -> tuple[list[BillGroundTruth], list[LegislatorGroundTruth], list[OrganizationGroundTruth]]:
-    """Fetch ground truth data from Webflow CMS."""
-    load_dotenv()
-
-    fetcher = GroundTruthFetcher(
-        webflow_api_key=os.environ["WEBFLOW_API_KEY"],
-        bills_collection_id=os.environ["WEBFLOW_BILLS_COLLECTION_ID"],
-        legislators_collection_id=os.environ["WEBFLOW_LEGISLATORS_COLLECTION_ID"],
-        organizations_collection_id=os.environ["WEBFLOW_ORGANIZATIONS_COLLECTION_ID"],
-        jurisdiction_collection_id=os.environ["WEBFLOW_JURISDICTION_COLLECTION_ID"],
-        openstates_api_key=os.environ.get("OPENSTATES_API_KEY") if with_openstates else None,
-    )
-
-    entity_types = entity_types or ["bills", "legislators", "organizations"]
-
-    bills = []
-    legislators = []
-    organizations = []
-
-    if "bills" in entity_types:
-        print("Fetching bills from Webflow CMS...")
-        bills = await fetcher.fetch_all_bills(limit=limit, jurisdiction=jurisdiction)
-        print(f"  Fetched {len(bills)} bills")
-
-    if "legislators" in entity_types:
-        print("Fetching legislators from Webflow CMS...")
-        legislators = await fetcher.fetch_all_legislators(limit=limit, jurisdiction=jurisdiction)
-        print(f"  Fetched {len(legislators)} legislators")
-
-    if "organizations" in entity_types:
-        print("Fetching organizations from Webflow CMS...")
-        organizations = await fetcher.fetch_all_organizations(limit=limit)
-        print(f"  Fetched {len(organizations)} organizations")
-
-    if with_openstates and (bills or legislators):
-        print("Enriching with OpenStates data...")
-        await fetcher.enrich_with_openstates(bills, legislators)
-
-    return bills, legislators, organizations
-
-
 async def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -702,86 +452,32 @@ async def main():
         epilog=__doc__,
     )
 
-    # Mode selection
     mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
-        "--static",
-        action="store_true",
-        help="Run static YAML tests only",
-    )
-    mode_group.add_argument(
-        "--dynamic",
-        action="store_true",
-        help="Run dynamic tests from Webflow ground truth",
-    )
-    mode_group.add_argument(
-        "--all",
-        action="store_true",
-        help="Run both static and dynamic tests",
-    )
+    mode_group.add_argument("--static", action="store_true", help="Run static YAML tests only")
+    mode_group.add_argument("--dynamic", action="store_true", help="Run dynamic tests from Webflow ground truth")
+    mode_group.add_argument("--all", action="store_true", help="Run both static and dynamic tests")
 
-    # Dynamic test options
-    parser.add_argument(
-        "--entity-type",
-        choices=["bills", "legislators", "organizations"],
-        action="append",
-        dest="entity_types",
-        help="Filter dynamic tests by entity type (can specify multiple)",
-    )
-    parser.add_argument(
-        "--jurisdiction",
-        help="Filter by jurisdiction (e.g., FL, VA, WA)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=0,
-        help="Limit entities per type for dynamic tests (0 = unlimited)",
-    )
-    parser.add_argument(
-        "--with-openstates",
-        action="store_true",
-        help="Enrich ground truth with OpenStates data",
-    )
-
-    # Common options
-    parser.add_argument(
-        "--api-url",
-        default="http://localhost:8000",
-        help="VoteBot API URL (default: http://localhost:8000)",
-    )
-    parser.add_argument(
-        "--category",
-        help="Run only tests in this category",
-    )
-    parser.add_argument(
-        "--output",
-        help="Write results to JSON file",
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Show detailed output",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show test cases without running",
-    )
-    parser.add_argument(
-        "--prompts-file",
-        default="tests/rag_test_prompts.yaml",
-        help="Path to static test prompts YAML file",
-    )
-    parser.add_argument(
-        "--templates-file",
-        default="tests/rag_test_templates.yaml",
-        help="Path to dynamic test templates YAML file",
-    )
+    parser.add_argument("--entity-type", choices=["bills", "legislators", "organizations"],
+                        action="append", dest="entity_types",
+                        help="Filter dynamic tests by entity type (can specify multiple)")
+    parser.add_argument("--jurisdiction", help="Filter by jurisdiction (e.g., FL, VA, WA)")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Limit entities per type for dynamic tests (0 = unlimited)")
+    parser.add_argument("--with-openstates", action="store_true",
+                        help="Enrich ground truth with OpenStates data")
+    parser.add_argument("--api-url", default="http://localhost:8000",
+                        help="VoteBot API URL (default: http://localhost:8000)")
+    parser.add_argument("--category", help="Run only tests in this category")
+    parser.add_argument("--output", help="Write results to JSON file")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
+    parser.add_argument("--dry-run", action="store_true", help="Show test cases without running")
+    parser.add_argument("--prompts-file", default="tests/rag_test_prompts.yaml",
+                        help="Path to static test prompts YAML file")
+    parser.add_argument("--templates-file", default="tests/rag_test_templates.yaml",
+                        help="Path to dynamic test templates YAML file")
 
     args = parser.parse_args()
 
-    # Default to static tests if no mode specified
     if not args.static and not args.dynamic and not args.all:
         args.static = True
 
@@ -851,11 +547,9 @@ async def main():
         verbose=args.verbose,
     )
 
-    # Save report if output specified
     if args.output:
-        tester.save_report(report, args.output)
+        save_report(report, args.output)
 
-    # Exit with appropriate code
     return 0 if report.pass_rate >= 80 else 1
 
 
