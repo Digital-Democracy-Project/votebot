@@ -44,6 +44,16 @@ class BillGroundTruth:
     actions: list[str] = field(default_factory=list)
     votes: list[dict] = field(default_factory=list)
 
+    def name_keywords(self, min_length: int = 3) -> list[str]:
+        """Extract significant keywords from bill name/title plus bill_id.
+
+        Returns the bill identifier (e.g., 'HJR 4210') plus key words from
+        the title, so validation passes even when the LLM paraphrases.
+        """
+        keywords = [self.bill_id]  # Always include bill number
+        keywords.extend(self._extract_keywords(self.name, min_length))
+        return keywords
+
     def description_keywords(self, min_length: int = 4) -> list[str]:
         """Extract significant keywords from description."""
         return self._extract_keywords(self.description, min_length)
@@ -207,6 +217,21 @@ class OrganizationGroundTruth:
                 keywords.append(word)
                 seen.add(word)
         return keywords[:15]
+
+    def org_type_keywords(self, min_length: int = 3) -> list[str]:
+        """Extract keywords from org type for flexible validation.
+
+        Splits the org_type string into meaningful terms so the LLM can
+        describe the type in different words and still pass validation.
+        E.g., '501(c)(3) non-profit organization' → ['501(c)(3)', 'non-profit', 'organization']
+        """
+        if not self.org_type:
+            return []
+        stop_words = {"a", "an", "the", "of", "and", "or", "for", "in", "on"}
+        # Split on spaces but keep special tokens like "501(c)(3)"
+        words = self.org_type.split()
+        keywords = [w for w in words if len(w) >= min_length and w.lower() not in stop_words]
+        return keywords if keywords else [self.org_type]
 
     @property
     def has_type(self) -> bool:

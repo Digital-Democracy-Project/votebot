@@ -10,7 +10,8 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 
 - **Context-Aware Responses**: Understands the page context (bill, legislator, general) to provide relevant answers
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
-- **Bill Text Prioritization**: For bill queries, prioritizes actual legislative text over CMS summaries
+- **Multi-Phase Retrieval**: For bill queries, prioritizes legislative text over CMS summaries, with dedicated phases for organization positions and vote records
+- **Organization-Aware Retrieval**: Automatically detects organization-focused queries and prioritizes org documents, fetching all related chunks for complete bill position data
 - **Bill Info Tool**: Real-time OpenStates lookups for full bill details (status, sponsors, votes) on bills not in the RAG system
   - Automatic jurisdiction detection from message text ("Virginia HB 2724" → VA)
   - Session year fallback (tries current year, then previous 2 years)
@@ -767,9 +768,13 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 
 - Legislator vote lookups not working
 - Corrupted legislator-votes documents (chunk boundary parsing issues)
+- Organization retrieval issues (bill positions, org type detection)
+- Bill identifier extraction (HJR, SJR, HCR, SCR patterns)
+- Organization chunk data quality (aggressive chunking)
 - Missing data in search results
 - Federal legislator cache issues
 - Pinecone index diagnostics
+- RAG test suite diagnostics and benchmarks
 - Full index rebuild procedures
 
 ## Contributing

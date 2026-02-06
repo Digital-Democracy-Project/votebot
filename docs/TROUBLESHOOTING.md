@@ -7,10 +7,14 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Legislator Vote Lookups Not Working](#legislator-vote-lookups-not-working)
 - [Model Contradicts Itself About Votes](#model-contradicts-itself-about-votes)
 - [Poor Search Ranking for Full Name Queries](#poor-search-ranking-for-full-name-queries)
+- [Organization Retrieval Issues](#organization-retrieval-issues)
+- [Bill Identifier Extraction (HJR/SJR/HCR/SCR)](#bill-identifier-extraction-hjrsjrhcrscr)
+- [Organization Chunk Data Quality](#organization-chunk-data-quality)
 - [Corrupted Legislator-Votes Documents](#corrupted-legislator-votes-documents)
 - [Missing Data in Search Results](#missing-data-in-search-results)
 - [Federal Legislator Cache Issues](#federal-legislator-cache-issues)
 - [Pinecone Index Diagnostics](#pinecone-index-diagnostics)
+- [RAG Test Suite Diagnostics](#rag-test-suite-diagnostics)
 - [Full Index Rebuild Procedure](#full-index-rebuild-procedure)
 
 ---
@@ -456,6 +460,173 @@ python -m votebot.sync.build_legislator_votes
 
 ---
 
+## Organization Retrieval Issues
+
+### Symptom
+VoteBot fails to answer questions about organization positions on bills, or returns incorrect organization types. Common failure patterns:
+
+1. **Bill→Org queries**: "Which organizations support HB 123?" returns generic info instead of org positions
+2. **Org type queries**: "What type of organization is ACLU?" returns paraphrased or incorrect type
+3. **Org→Bill queries**: "What bills does Veterans for All Voters support?" returns incomplete or no results
+
+### Root Causes
+
+#### Bill→Org: Retrieval pipeline filters out org data
+When a bill identifier is detected in a query, the retrieval pipeline activates bill-priority mode, which searches only for `document_type="bill"`, `"bill-text"`, `"bill-history"`, and `"bill-votes"`. Organization documents are excluded by these filters.
+
+**Fix (implemented February 2026)**: Added Phase 4a (organization retrieval) to `_retrieve_bill_with_text_priority()` in `retrieval.py`. This phase:
+1. Detects org-related keywords in bill queries (e.g., "organizations", "support", "oppose", "position")
+2. Searches `document_type="organization"` without the bill slug filter
+3. Builds a query from the bill's slug words for semantic matching
+4. Post-filters results to prioritize org chunks that reference the specific bill by slug
+
+#### Org type: Unfiltered semantic search
+Generic queries about an organization (e.g., "What type of organization is X?") go through the default semantic search, which may return random documents instead of the target org's profile.
+
+**Fix (implemented February 2026)**: Added `_is_organization_query()` detection and `_retrieve_organization_priority()` to `retrieval.py`. This:
+1. Detects org-focused queries by checking for strong indicators ("organization", "nonprofit", "501(c)")
+2. Routes to a dedicated retrieval path that searches `document_type="organization"` first
+3. Fetches ALL chunks for the top matching org by `document_id` to capture bill positions in separate chunks
+
+#### Org→Bill: Pinecone data quality
+Organization documents in Pinecone are chunked aggressively. The org header (name, type, description) often ends up in one chunk (~25 characters), while bill positions are in separate chunks. Some bill positions may be missing entirely from the index.
+
+**Status**: Partially mitigated by fetching all chunks for the target org. Full fix requires re-ingestion with larger chunks or org name prepended to each chunk. See [Organization Chunk Data Quality](#organization-chunk-data-quality).
+
+### Diagnostic Steps
+
+#### 1. Check if org documents exist for an organization
+
+```python
+import asyncio
+from src.votebot.config import get_settings
+from src.votebot.services.vector_store import VectorStoreService
+
+async def check_org(org_name):
+    settings = get_settings()
+    vs = VectorStoreService(settings)
+
+    results = await vs.query(
+        f'{org_name} organization profile',
+        top_k=5,
+        filter={'document_type': 'organization'}
+    )
+    for r in results:
+        doc_id = r.metadata.get('document_id', '')
+        print(f'{r.score:.3f} | {doc_id}')
+        print(f'  Content ({len(r.content)} chars): {r.content[:200]}...')
+
+asyncio.run(check_org("ACLU"))
+```
+
+#### 2. Check chunk sizes for an organization
+
+```python
+async def check_org_chunks(org_slug):
+    settings = get_settings()
+    vs = VectorStoreService(settings)
+
+    all_ids = []
+    for ids in vs.index.list(namespace=vs.namespace, prefix=f'organization-{org_slug}'):
+        all_ids.extend(ids)
+
+    print(f'Total chunks for {org_slug}: {len(all_ids)}')
+    if all_ids:
+        result = vs.index.fetch(ids=all_ids[:10], namespace=vs.namespace)
+        for doc_id, vec in result.vectors.items():
+            content = vec.metadata.get('content', '')
+            print(f'  {doc_id}: {len(content)} chars')
+            if len(content) < 50:
+                print(f'    ⚠️ Very small chunk: "{content}"')
+
+asyncio.run(check_org_chunks("aclu"))
+```
+
+### Test Validation
+
+The RAG test suite uses `contains_any` validation with `min_matches` for org-related fields:
+- **Org type**: `contains_any` with `org_type_keywords` (min_matches: 1) — tolerates LLM paraphrasing
+- **Bill title**: `contains_any` with `name_keywords` (min_matches: 2) — matches keyword subsets
+
+---
+
+## Bill Identifier Extraction (HJR/SJR/HCR/SCR)
+
+### Symptom
+Queries about joint or concurrent resolutions (e.g., "Tell me about HJR 7") fail to trigger bill-priority retrieval. The system treats them as general queries instead.
+
+### Root Cause
+The bill extraction regex in `retrieval.py` originally only matched common patterns like HB, SB, HR, HJ, SJ. Joint resolutions (`HJR`, `SJR`) and concurrent resolutions (`HCR`, `SCR`) were not included.
+
+### Fix (February 2026)
+Updated the regex pattern in `_extract_bill_identifier()` to include longer patterns **before** shorter ones (important for correct matching):
+
+```python
+pattern1 = r'\b(H\.?J\.?R\.?|S\.?J\.?R\.?|H\.?C\.?R\.?|S\.?C\.?R\.?|H\.?B\.?|S\.?B\.?|H\.?R\.?|S\.?|H\.?J\.?|S\.?J\.?)\s*(\d+)\b'
+```
+
+Key points:
+- `HJR`, `SJR`, `HCR`, `SCR` patterns are listed **before** shorter `HJ`, `SJ` patterns
+- This prevents `HJR 7` from matching as `HJ` + `R7` instead of `HJR` + `7`
+- Supports dotted variants: `H.J.R. 7`, `S.C.R. 12`, etc.
+
+### Verification
+```bash
+# Test with a joint resolution query
+PYTHONPATH=src python -c "
+import asyncio
+from votebot.core.retrieval import RetrievalService
+from votebot.config import get_settings
+
+settings = get_settings()
+rs = RetrievalService(settings)
+result = rs._extract_bill_identifier('Tell me about HJR 7')
+print(f'Extracted: {result}')
+# Expected: ('HJR', '7')
+"
+```
+
+---
+
+## Organization Chunk Data Quality
+
+### Symptom
+Organization documents in Pinecone have very small chunks (sometimes only 25 characters) containing just the org header, while bill positions are in separate chunks or missing entirely.
+
+### Example
+```
+Chunk 0: "# Veterans for All Voters"  (25 chars — just the header)
+Chunk 1: "## Bills Supported\n- One Big Beautiful Bill Act..."  (if it exists)
+```
+
+When a query like "What bills does Veterans for All Voters support?" retrieves only the header chunk, there's no bill position data to answer from.
+
+### Root Cause
+The text chunking pipeline (`ingestion/chunking.py`) splits on markdown headers. For organizations with short descriptions, the first chunk contains only the `# Organization Name` header. Bill position lists end up in subsequent chunks that may not rank highly in semantic search.
+
+### Current Mitigation
+The `_retrieve_organization_priority()` method in `retrieval.py` mitigates this by:
+1. Finding the top-matching org document
+2. Fetching ALL chunks for that org by `document_id` prefix
+3. Including all chunks in the context, not just the semantically closest ones
+
+### Long-Term Fix
+Re-ingest organization documents with one of these strategies:
+1. **Larger chunk size**: Increase minimum chunk size so header + description + bill positions stay together
+2. **Prepend org name**: Add the organization name to every chunk so they're all semantically linked
+3. **Structured metadata**: Store bill positions as metadata rather than chunk content
+
+To re-ingest:
+```bash
+# Re-sync all organizations
+python scripts/sync.py organization --batch --clear-namespace
+
+# Or rebuild the full index
+python scripts/rebuild_pinecone.py --content-types organization --yes
+```
+
+---
+
 ## Corrupted Legislator-Votes Documents
 
 ### Symptom
@@ -791,6 +962,75 @@ async def test_queries():
             print(f'✗ "{query[:40]}..." -> No results')
 
 asyncio.run(test_queries())
+```
+
+---
+
+## RAG Test Suite Diagnostics
+
+### Overview
+
+The RAG test suite validates response quality across all content types. Use it to measure the impact of retrieval changes and identify regression areas.
+
+### Running a Quick Diagnostic
+
+```bash
+# Run against a random sample (no API server needed locally — Pinecone is cloud-hosted)
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --limit 5 --verbose
+
+# Run specific category to isolate issues
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --category bills --limit 10
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --category organizations --limit 10
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --category legislators --limit 10
+```
+
+### Interpreting Results
+
+The test suite reports:
+- **Pass rate**: Percentage of validated tests that passed (tests with `passed=None` are not counted)
+- **Confidence**: Average LLM confidence score across all responses
+- **Citations**: Percentage of responses that included citations
+- **Latency**: Average and P95 response times
+
+### Benchmark Results (February 2026)
+
+| Category | Pass Rate | Notes |
+|----------|-----------|-------|
+| Bills | 91% | Title keyword matching, bill info queries |
+| Legislators | 100% | With page_context (critical for scoped retrieval) |
+| Organizations | 67% | Org→bill relationship queries still limited by chunk quality |
+| DDP | N/A | No ground truth — confidence/citation metrics only |
+| Out-of-system votes | N/A | No ground truth — tests dynamic OpenStates lookup |
+| **Overall** | **86%** | Across all validated tests |
+
+### Common Failure Patterns
+
+1. **Org→Bill relationship** (org support/oppose queries): Organization chunks may not contain bill position data. See [Organization Chunk Data Quality](#organization-chunk-data-quality).
+
+2. **Bill title exact match**: The LLM may paraphrase bill titles. The test suite uses `contains_any` with `name_keywords` (bill ID + title keywords, min 2 matches) to handle this.
+
+3. **Org type**: The LLM may describe org types differently than CMS data. The test suite uses `contains_any` with `org_type_keywords` (min 1 match) to handle this.
+
+### Validation Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `contains` | All expected values must appear in response | Exact data (bill ID, jurisdiction) |
+| `contains_any` | At least N of the expected values must appear | Paraphrased data (titles, org types) |
+| `keywords` | At least N keywords must match | Fuzzy matching |
+
+### Adding Custom Tests
+
+Static tests are defined in `tests/rag_test_prompts.yaml`. Dynamic tests are generated from Webflow CMS ground truth via `scripts/test_rag_quality.py`.
+
+To add a new static test:
+```yaml
+- prompt: "What type of organization is the ACLU?"
+  expected:
+    validation_mode: contains_any
+    expected_values: ["nonprofit", "civil liberties", "advocacy"]
+    min_matches: 1
+  category: organizations
 ```
 
 ---

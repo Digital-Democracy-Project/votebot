@@ -176,6 +176,13 @@ class RetrievalService:
                 max_chunks=max_chunks,
                 page_context=effective_context,
             )
+        elif self._is_organization_query(query):
+            # Organization-focused retrieval: prioritize org documents
+            final_results = await self._retrieve_organization_priority(
+                query=query,
+                filters=filters,
+                max_chunks=max_chunks,
+            )
         else:
             # Standard retrieval for non-bill queries
             results = await self.vector_store.query(
@@ -303,9 +310,69 @@ class RetrievalService:
                 history_query_preview=history_query[:50],
             )
 
-        # Phase 4: Get vote records if query is about voting
-        vote_keywords = ["vote", "voted", "voting", "votes", "who supported", "who opposed", "pass", "passed", "fail", "failed"]
+        # Phase 4a: Get organization positions if query is about org support/opposition
+        org_keywords = [
+            "organization", "organizations", "org ", "orgs ",
+            "who supports", "who support", "who opposes", "who oppose",
+            "which groups", "which organizations",
+            "support", "oppose", "backed", "backs", "endorses", "against",
+        ]
         query_lower = query.lower()
+        is_org_query = any(kw in query_lower for kw in org_keywords)
+        org_results = []
+
+        if is_org_query:
+            remaining_org_slots = max(3, max_chunks - len(text_results) - len(summary_results) - len(history_results))
+
+            # Build query combining bill info with org-related terms
+            # Use the bill slug/title to find org chunks that reference this bill
+            org_query = query
+            if page_context:
+                bill_title = page_context.title or ""
+                bill_slug = page_context.slug or ""
+                # Use slug keywords for better matching (org chunks contain bill DDP URLs with slug)
+                slug_words = bill_slug.replace("-", " ") if bill_slug else ""
+                if bill_title or slug_words:
+                    org_query = f"{bill_title} {slug_words} support oppose bill positions"
+
+            org_results = await self.vector_store.query(
+                query=org_query,
+                top_k=remaining_org_slots * 2,
+                filter={"document_type": "organization"},
+            )
+            org_results = [
+                r for r in org_results if r.score >= self.config.similarity_threshold
+            ]
+
+            # Post-filter: prioritize org chunks that actually mention this bill
+            if page_context and org_results:
+                bill_slug = (page_context.slug or "").lower()
+                bill_title_lower = (page_context.title or "").lower()
+                # Separate chunks that reference this specific bill from generic ones
+                relevant = []
+                other = []
+                for r in org_results:
+                    content_lower = (r.content or "").lower()
+                    if (bill_slug and bill_slug in content_lower) or \
+                       (bill_title_lower and bill_title_lower in content_lower):
+                        relevant.append(r)
+                    else:
+                        other.append(r)
+                org_results = relevant + other
+                logger.info(
+                    "Org results filtered by bill reference",
+                    relevant_count=len(relevant),
+                    other_count=len(other),
+                )
+
+            logger.info(
+                "Bill text retrieval phase 4a (organizations)",
+                org_chunks_found=len(org_results),
+                org_query_preview=org_query[:50],
+            )
+
+        # Phase 4b: Get vote records if query is about voting
+        vote_keywords = ["vote", "voted", "voting", "votes", "who supported", "who opposed", "pass", "passed", "fail", "failed"]
         is_vote_query = any(kw in query_lower for kw in vote_keywords)
 
         # Also detect follow-up questions about legislators when on a bill page
@@ -476,10 +543,13 @@ class RetrievalService:
             # 1. Legislator-votes documents (if we found the specific legislator)
             # 2. Bill-votes documents
             # 3. Other content
-            combined = legislator_votes_results + vote_results + text_results + summary_results + history_results
+            combined = legislator_votes_results + vote_results + text_results + summary_results + history_results + org_results
+        elif is_org_query and org_results:
+            # For org queries, prioritize org data alongside bill summaries
+            combined = org_results + summary_results + text_results + history_results + vote_results
         else:
-            # Default: legislative text first, then summaries, then history, then votes
-            combined = text_results + summary_results + history_results + vote_results
+            # Default: legislative text first, then summaries, then history, then votes, then orgs
+            combined = text_results + summary_results + history_results + vote_results + org_results
 
         # Deduplicate
         if self.config.deduplicate:
@@ -596,8 +666,8 @@ class RetrievalService:
                 break
 
         # Patterns to match bill identifiers
-        # Pattern 1: Standard bill format (HB 363, SB 123, HR 1004, S 302)
-        pattern1 = r'\b(H\.?B\.?|S\.?B\.?|H\.?R\.?|S\.?|H\.?J\.?|S\.?J\.?)\s*(\d+)\b'
+        # Pattern 1: Standard bill format (HB 363, SB 123, HR 1004, S 302, HJR 4210, SJR 100)
+        pattern1 = r'\b(H\.?J\.?R\.?|S\.?J\.?R\.?|H\.?C\.?R\.?|S\.?C\.?R\.?|H\.?B\.?|S\.?B\.?|H\.?R\.?|S\.?|H\.?J\.?|S\.?J\.?)\s*(\d+)\b'
 
         # Pattern 2: Full names (House Bill 363, Senate Bill 123)
         pattern2 = r'\b(house|senate)\s+(?:bill|resolution|joint\s+resolution)\s*(\d+)\b'
@@ -718,6 +788,123 @@ class RetrievalService:
             jurisdiction=bill_info.jurisdiction,
         )
         return None
+
+    def _is_organization_query(self, query: str) -> bool:
+        """Detect if the query is primarily about an organization."""
+        query_lower = query.lower()
+
+        # Patterns that indicate an org-focused query
+        org_patterns = [
+            "what type of organization",
+            "what kind of organization",
+            "tell me about",  # Often followed by org name
+            "what bills does",  # "What bills does X support?"
+            "what is ",  # "What is X?" could be org
+            "who is ",
+        ]
+
+        # Check for org-related phrases combined with non-bill-number queries
+        # If the query also contains a bill identifier, let the bill pipeline handle it
+        has_bill_id = self._extract_bill_from_query(query) is not None
+        if has_bill_id:
+            return False
+
+        # Strong org indicators
+        strong_indicators = [
+            "organization", "organisations", "nonprofit", "non-profit",
+            "501(c)", "advocacy group", "committee",
+        ]
+        if any(ind in query_lower for ind in strong_indicators):
+            return True
+
+        # Check for org query patterns
+        for pattern in org_patterns:
+            if pattern in query_lower:
+                return True
+
+        return False
+
+    async def _retrieve_organization_priority(
+        self,
+        query: str,
+        filters: dict,
+        max_chunks: int,
+    ) -> list[SearchResult]:
+        """
+        Retrieve with priority for organization documents.
+
+        Phase 1: Search organization documents semantically
+        Phase 2: If a specific org is identified, fetch ALL its chunks
+                 (bill positions may be in a different chunk than the header)
+        Phase 3: Fill remaining slots with general results
+
+        Args:
+            query: The search query
+            filters: Base filters
+            max_chunks: Maximum chunks to return
+
+        Returns:
+            List of SearchResult prioritizing organization content
+        """
+        # Phase 1: Search organization documents
+        org_results = await self.vector_store.query(
+            query=query,
+            top_k=max_chunks,
+            filter={"document_type": "organization"},
+        )
+        org_results = [
+            r for r in org_results if r.score >= self.config.similarity_threshold
+        ]
+
+        logger.info(
+            "Organization retrieval phase 1",
+            org_chunks_found=len(org_results),
+        )
+
+        # Phase 2: If top result is a specific org, fetch ALL chunks for that org
+        # This ensures bill positions (which may be in a different chunk) are included
+        if org_results:
+            top_doc_id = org_results[0].metadata.get("document_id", "")
+            if top_doc_id:
+                # Search for more chunks with a query focused on bill positions
+                bill_position_results = await self.vector_store.query(
+                    query=f"bill positions supported opposed bills",
+                    top_k=5,
+                    filter={"document_type": "organization", "document_id": top_doc_id},
+                )
+                # Add any new chunks not already in results
+                existing_ids = {r.id for r in org_results}
+                for r in bill_position_results:
+                    if r.id not in existing_ids:
+                        org_results.append(r)
+                        existing_ids.add(r.id)
+
+                logger.info(
+                    "Organization retrieval phase 2 (all chunks)",
+                    org_doc_id=top_doc_id,
+                    total_org_chunks=len(org_results),
+                )
+
+        # Phase 3: Fill remaining slots with general results
+        remaining_slots = max_chunks - len(org_results)
+        general_results = []
+
+        if remaining_slots > 0:
+            general_results = await self.vector_store.query(
+                query=query,
+                top_k=remaining_slots * 2,
+                filter=filters if filters else None,
+            )
+            general_results = [
+                r for r in general_results if r.score >= self.config.similarity_threshold
+            ]
+
+        combined = org_results + general_results
+
+        if self.config.deduplicate:
+            combined = self._deduplicate(combined)
+
+        return combined[:max_chunks]
 
     def _build_filters(self, page_context: PageContext, query: str | None = None) -> dict:
         """

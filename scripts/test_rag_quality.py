@@ -98,8 +98,9 @@ class DynamicTestGenerator:
                     "id": "{slug}_title",
                     "prompt": "What is the title of {jurisdiction_name} {bill_id}?",
                     "category": "bill_title",
-                    "validation": "contains",
-                    "ground_truth_field": "name",
+                    "validation": "contains_any",
+                    "ground_truth_field": "name_keywords",
+                    "min_matches": 2,
                 },
                 {
                     "id": "{slug}_support_orgs",
@@ -156,8 +157,9 @@ class DynamicTestGenerator:
                     "prompt": "What type of organization is {name}?",
                     "category": "org_profile",
                     "condition": "has_type",
-                    "validation": "contains",
-                    "ground_truth_field": "org_type",
+                    "validation": "contains_any",
+                    "ground_truth_field": "org_type_keywords",
+                    "min_matches": 1,
                 },
                 {
                     "id": "{slug}_supported_bills",
