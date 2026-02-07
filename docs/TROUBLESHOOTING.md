@@ -14,6 +14,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Missing Data in Search Results](#missing-data-in-search-results)
 - [Federal Legislator Cache Issues](#federal-legislator-cache-issues)
 - [Pinecone Index Diagnostics](#pinecone-index-diagnostics)
+- [Webflow CMS Verification on Disputes](#webflow-cms-verification-on-disputes)
 - [RAG Test Suite Diagnostics](#rag-test-suite-diagnostics)
   - [Failure Analysis (100-Document Sample)](#failure-analysis-100-document-sample)
 - [Full Index Rebuild Procedure](#full-index-rebuild-procedure)
@@ -171,7 +172,9 @@ Bot: "Ashley Moody is the Attorney General of Florida and does not serve in Cong
 
 ### Solution: Vote Verification Feature
 
-VoteBot includes automatic vote verification that fetches directly from OpenStates when users challenge information. This is triggered by phrases like:
+VoteBot includes automatic vote verification that fetches directly from OpenStates when users challenge information. This works from **any page type** (bill, legislator, organization) or even with no page context — not just bill pages.
+
+This is triggered by phrases like:
 
 - **Dispute phrases**: "that's wrong", "no way", "that can't be", "impossible"
 - **Verification requests**: "be sure", "double check", "verify", "confirm"
@@ -179,10 +182,13 @@ VoteBot includes automatic vote verification that fetches directly from OpenStat
 
 When triggered, the agent:
 1. Extracts the legislator name from the conversation (handles lowercase input, "X voted Y" patterns, etc.)
-2. Gets the `session-code` from Webflow page context (e.g., "119" for 119th Congress)
-3. Calls `BillVotesService.lookup_legislator_vote()` directly
-4. **Prioritizes final passage votes** over procedural votes (motion to commit, cloture, etc.)
-5. Returns authoritative data from OpenStates API that overrides RAG results
+2. Gets the bill identifier from page context (if on a bill page) **or extracts it from the message text** (e.g., "are you sure Ashley Moody voted no on HR1?" → extracts "HR1"). Falls back to searching conversation history.
+3. Gets the `session-code` from Webflow page context (e.g., "119" for 119th Congress)
+4. Calls `BillVotesService.lookup_legislator_vote()` directly
+5. **Prioritizes final passage votes** over procedural votes (motion to commit, cloture, etc.)
+6. Returns authoritative data from OpenStates API that overrides RAG results
+
+Additionally, when a dispute is detected on any page type, VoteBot fetches **Webflow CMS details** for the current page entity (bill, legislator, or organization) and injects them as authoritative context. See [Webflow CMS Verification on Disputes](#webflow-cms-verification-on-disputes) for details.
 
 ### Diagnostic Steps
 
@@ -196,9 +202,16 @@ Look in the logs for these key messages:
 "Vote verification returned empty" (if name extraction or API lookup failed)
 "Verifying legislator vote from OpenStates" legislator=... bill=... session=...
 "Could not extract legislator name for vote verification" (if name not found in message or history)
+"Could not extract bill identifier for vote verification" (if bill not found in message, page context, or history)
+"Webflow CMS verification fetched" page_type=... (new — confirms CMS verification was injected)
+"Webflow CMS verification: fetched bill details" name=... (detail lookup succeeded)
+"Webflow CMS verification: fetched legislator details" name=... (detail lookup succeeded)
+"Webflow CMS verification: fetched org details" name=... (detail lookup succeeded)
 ```
 
 If `is_dispute=False` when you expected verification, the trigger phrase isn't being matched.
+
+**Note**: Vote verification now works from any page type. If on a non-bill page, the bill identifier is extracted from the message text or conversation history using the same regex patterns as `retrieval.py`.
 
 #### 2. Test verification manually
 
@@ -344,8 +357,10 @@ The "Model Contradicts Itself About Votes" issue is now **RESOLVED**. The comple
 3. **Session passing**: WebSocket accepts both `session` and `session-code` field names
 4. **Vote prioritization**: Returns final passage votes over procedural votes
 5. **Congress number fallback**: Calculates "119" from year if session not provided
+6. **Removed bill-page restriction**: Vote verification now works from any page type (legislator, organization, general) — bill identifier is extracted from message text or conversation history when not on a bill page
+7. **Webflow CMS verification**: On disputes, authoritative CMS details (bill facts, legislator party/chamber/district, org type/website) are injected as context for all page types
 
-**Verified working**: When users say "that's not true" or "check open states", VoteBot now correctly verifies Ashley Moody voted **YES** on HR1 final passage.
+**Verified working**: When users say "that's not true" or "check open states", VoteBot now correctly verifies Ashley Moody voted **YES** on HR1 final passage — from any page type, not just bill pages.
 
 ### Prevention
 
@@ -997,6 +1012,129 @@ async def test_queries():
 
 asyncio.run(test_queries())
 ```
+
+---
+
+## Webflow CMS Verification on Disputes
+
+### Overview
+
+When users challenge or dispute VoteBot's answers, the system now fetches authoritative details from **Webflow CMS** for the current page entity (bill, legislator, or organization) and injects them as high-priority context before LLM generation. This supplements the existing OpenStates vote verification with CMS facts.
+
+### How It Works
+
+1. User sends a dispute phrase (e.g., "that's wrong", "are you sure?", "verify that")
+2. `_is_dispute_or_correction()` detects the dispute trigger
+3. **Webflow CMS verification** (`_verify_from_webflow()`) dispatches based on `page_context.type`:
+   - **Bill page** → `get_bill_details()` → name, identifier, status, description, jurisdiction
+   - **Legislator page** → `get_legislator_details()` → name, party, chamber, district, DDP score
+   - **Organization page** → `get_org_details()` → name, type, website, about description
+4. **OpenStates vote verification** (`_verify_legislator_vote()`) also runs — now from **any page type**, extracting bill identifier from the message text if not on a bill page
+5. Both are injected as authoritative context, with Webflow CMS data first (most authoritative)
+
+### Context Injection Order (on disputes)
+
+```
+1. Webflow CMS verification (bill/legislator/org details)     ← NEW
+2. Org bill positions (if org page + bill position query)
+3. Org positions (if bill page + org position query)
+4. OpenStates vote verification (now from any page type)       ← UPDATED
+5. Bill info / legislator info (streaming only)
+6. RAG retrieval results
+```
+
+### Requirements
+
+- `page_context` must include `webflow_id` or `slug` (provided by the chat widget via `/content/resolve`)
+- `page_context.type` must be `"bill"`, `"legislator"`, or `"organization"`
+- Graceful degradation: if `webflow_id`/`slug` are missing or Webflow API fails, verification is silently skipped
+
+### Diagnostic Steps
+
+#### 1. Check if Webflow verification was triggered
+
+Look for these log entries:
+```
+"Webflow CMS verification fetched" page_type=bill webflow_id=... slug=...
+"Webflow CMS verification: fetched bill details" name=... identifier=...
+"Webflow CMS verification: fetched legislator details" name=... party=...
+"Webflow CMS verification: fetched org details" name=...
+```
+
+If verification is not triggering:
+- Confirm `is_dispute=True` in the logs
+- Confirm `page_context.type` is one of `bill`, `legislator`, `organization`
+- Confirm `webflow_id` or `slug` is present in `page_context`
+
+#### 2. Test Webflow lookup manually
+
+```python
+import asyncio
+from votebot.config import get_settings
+from votebot.services.webflow_lookup import (
+    WebflowLookupService,
+    format_bill_verification_context,
+    format_legislator_verification_context,
+    format_org_verification_context,
+)
+
+async def test_bill_details():
+    service = WebflowLookupService(get_settings())
+    result = await service.get_bill_details(slug="one-big-beautiful-bill-act-hr1-2025")
+    print(f"Found: {result.found}")
+    print(f"Name: {result.name}")
+    print(f"Identifier: {result.identifier}")
+    print(f"Status: {result.status}")
+    print(format_bill_verification_context(result))
+
+async def test_legislator_details():
+    service = WebflowLookupService(get_settings())
+    result = await service.get_legislator_details(slug="rick-scott")
+    print(f"Found: {result.found}")
+    print(f"Name: {result.name}")
+    print(f"Party: {result.party}")
+    print(f"Chamber: {result.chamber}")
+    print(format_legislator_verification_context(result))
+
+async def test_org_details():
+    service = WebflowLookupService(get_settings())
+    result = await service.get_org_details(slug="aclu")
+    print(f"Found: {result.found}")
+    print(f"Name: {result.name}")
+    print(f"Type: {result.org_type}")
+    print(format_org_verification_context(result))
+
+asyncio.run(test_bill_details())
+asyncio.run(test_legislator_details())
+asyncio.run(test_org_details())
+```
+
+#### 3. Test vote verification without bill page context
+
+The vote verification now works without a bill page context by extracting the bill identifier from the message:
+
+```python
+import asyncio
+from votebot.config import get_settings
+from votebot.core.agent import VoteBotAgent
+
+async def test_vote_verification_no_page():
+    agent = VoteBotAgent(get_settings())
+    # Simulate: user is on a legislator page but asks about a vote on HR1
+    result = await agent._verify_legislator_vote(
+        message="Are you sure Ashley Moody voted no on HR1?",
+        page_context=None,  # No bill page context
+    )
+    print(result)
+
+asyncio.run(test_vote_verification_no_page())
+```
+
+### Known Limitations
+
+1. **Webflow ID required**: Verification only works when `webflow_id` or `slug` is in `page_context`. If the chat widget doesn't call `/content/resolve`, there's no page entity to verify.
+2. **Legislator jurisdiction**: The legislator `jurisdiction` field in Webflow stores a reference ID (not a state code). The raw value is included as-is since `page_context` already provides the resolved jurisdiction.
+3. **Description HTML stripping**: Bill and org descriptions are HTML-stripped and truncated to 500 characters. Complex formatting may lose structure.
 
 ---
 

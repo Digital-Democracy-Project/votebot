@@ -6,6 +6,7 @@ similarity scores fall below threshold or org data is missing from the index.
 """
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 
 import httpx
@@ -56,6 +57,45 @@ class OrgBillPositionsResult:
     found: bool = False
 
 
+@dataclass
+class BillDetailsResult:
+    """Result of looking up bill details from Webflow CMS."""
+
+    name: str
+    identifier: str  # "HB 123"
+    status: str
+    description: str
+    jurisdiction: str
+    slug: str
+    found: bool = False
+
+
+@dataclass
+class LegislatorDetailsResult:
+    """Result of looking up legislator details from Webflow CMS."""
+
+    name: str
+    party: str
+    chamber: str
+    district: str
+    jurisdiction: str
+    score: str
+    slug: str
+    found: bool = False
+
+
+@dataclass
+class OrgDetailsResult:
+    """Result of looking up organization details from Webflow CMS."""
+
+    name: str
+    org_type: str
+    website: str
+    description: str
+    slug: str
+    found: bool = False
+
+
 class WebflowLookupService:
     """
     Lightweight runtime Webflow CMS lookup service.
@@ -71,6 +111,7 @@ class WebflowLookupService:
         self.api_key = self.settings.webflow_api_key.get_secret_value()
         self.bills_collection_id = self.settings.webflow_bills_collection_id
         self.organizations_collection_id = self.settings.webflow_organizations_collection_id
+        self.legislators_collection_id = self.settings.webflow_legislators_collection_id
         self._org_cache: dict[str, dict] = {}
         self._bill_cache: dict[str, dict] = {}
 
@@ -536,6 +577,258 @@ class WebflowLookupService:
                 return None
 
 
+    async def get_bill_details(
+        self,
+        webflow_id: str | None = None,
+        slug: str | None = None,
+    ) -> BillDetailsResult:
+        """
+        Get bill details from Webflow CMS for verification.
+
+        Args:
+            webflow_id: Webflow item ID for direct lookup (preferred)
+            slug: Bill slug for fallback search
+
+        Returns:
+            BillDetailsResult with bill facts
+        """
+        if not webflow_id and not slug:
+            return BillDetailsResult(
+                name="", identifier="", status="", description="",
+                jurisdiction="", slug="", found=False,
+            )
+
+        bill_item = None
+        if webflow_id:
+            bill_item = await self._fetch_bill_by_id(webflow_id)
+        if not bill_item and slug:
+            bill_item = await self._fetch_bill_by_slug(slug)
+
+        if not bill_item:
+            return BillDetailsResult(
+                name="", identifier="", status="", description="",
+                jurisdiction="", slug="", found=False,
+            )
+
+        fields = bill_item.get("fieldData", {})
+
+        # Build identifier from prefix + number
+        prefix = fields.get("bill-prefix", "")
+        number = fields.get("bill-number", "")
+        identifier = f"{prefix} {number}".strip() if prefix else fields.get("bill-id", "")
+
+        # Strip HTML from description
+        raw_desc = fields.get("description", "") or ""
+        description = re.sub(r"<[^>]+>", "", raw_desc).strip()
+        if len(description) > 500:
+            description = description[:500] + "..."
+
+        logger.info(
+            "Webflow CMS verification: fetched bill details",
+            name=fields.get("name", ""),
+            identifier=identifier,
+        )
+
+        return BillDetailsResult(
+            name=fields.get("name", ""),
+            identifier=identifier,
+            status=fields.get("status", ""),
+            description=description,
+            jurisdiction=fields.get("jurisdiction", ""),
+            slug=fields.get("slug", ""),
+            found=True,
+        )
+
+    async def _fetch_legislator_by_id(self, webflow_id: str) -> dict | None:
+        """Fetch a legislator item from Webflow by its ID."""
+        if not self.legislators_collection_id:
+            return None
+
+        url = f"{self.BASE_URL}/collections/{self.legislators_collection_id}/items/{webflow_id}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "accept": "application/json",
+        }
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                response = await client.get(url, headers=headers)
+                if response.status_code == 404:
+                    logger.warning("Legislator not found in Webflow", webflow_id=webflow_id)
+                    return None
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(
+                    "Failed to fetch legislator from Webflow",
+                    webflow_id=webflow_id,
+                    error=str(e),
+                )
+                return None
+
+    async def _fetch_legislator_by_slug(self, slug: str) -> dict | None:
+        """Fetch a legislator item from Webflow by slug (paginated search fallback)."""
+        if not self.legislators_collection_id:
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "accept": "application/json",
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            offset = 0
+            page_size = 100
+
+            while True:
+                try:
+                    params = {"limit": page_size, "offset": offset}
+                    response = await client.get(
+                        f"{self.BASE_URL}/collections/{self.legislators_collection_id}/items",
+                        headers=headers,
+                        params=params,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    items = data.get("items", [])
+
+                    if not items:
+                        break
+
+                    for item in items:
+                        fields = item.get("fieldData", {})
+                        if fields.get("slug") == slug:
+                            return item
+
+                    pagination = data.get("pagination", {})
+                    total = pagination.get("total", 0)
+                    if offset + len(items) >= total or len(items) < page_size:
+                        break
+
+                    offset += page_size
+
+                except Exception as e:
+                    logger.error(
+                        "Failed to search Webflow legislators by slug",
+                        slug=slug,
+                        error=str(e),
+                    )
+                    break
+
+        logger.warning("Legislator not found by slug in Webflow", slug=slug)
+        return None
+
+    async def get_legislator_details(
+        self,
+        webflow_id: str | None = None,
+        slug: str | None = None,
+    ) -> LegislatorDetailsResult:
+        """
+        Get legislator details from Webflow CMS for verification.
+
+        Args:
+            webflow_id: Webflow item ID for direct lookup (preferred)
+            slug: Legislator slug for fallback search
+
+        Returns:
+            LegislatorDetailsResult with legislator facts
+        """
+        if not webflow_id and not slug:
+            return LegislatorDetailsResult(
+                name="", party="", chamber="", district="",
+                jurisdiction="", score="", slug="", found=False,
+            )
+
+        leg_item = None
+        if webflow_id:
+            leg_item = await self._fetch_legislator_by_id(webflow_id)
+        if not leg_item and slug:
+            leg_item = await self._fetch_legislator_by_slug(slug)
+
+        if not leg_item:
+            return LegislatorDetailsResult(
+                name="", party="", chamber="", district="",
+                jurisdiction="", score="", slug="", found=False,
+            )
+
+        fields = leg_item.get("fieldData", {})
+
+        # party-2 is the display field; fallback to party
+        party = fields.get("party-2", "") or fields.get("party", "")
+
+        logger.info(
+            "Webflow CMS verification: fetched legislator details",
+            name=fields.get("name", ""),
+            party=party,
+        )
+
+        return LegislatorDetailsResult(
+            name=fields.get("name", ""),
+            party=party,
+            chamber=fields.get("chamber", ""),
+            district=fields.get("district", ""),
+            jurisdiction=fields.get("jurisdiction", ""),
+            score=fields.get("score", ""),
+            slug=fields.get("slug", ""),
+            found=True,
+        )
+
+    async def get_org_details(
+        self,
+        webflow_id: str | None = None,
+        slug: str | None = None,
+    ) -> OrgDetailsResult:
+        """
+        Get organization details from Webflow CMS for verification.
+
+        Args:
+            webflow_id: Webflow item ID for direct lookup (preferred)
+            slug: Org slug for fallback search
+
+        Returns:
+            OrgDetailsResult with organization facts
+        """
+        if not webflow_id and not slug:
+            return OrgDetailsResult(
+                name="", org_type="", website="", description="",
+                slug="", found=False,
+            )
+
+        org_item = None
+        if webflow_id:
+            org_item = await self._fetch_org_item_by_id(webflow_id)
+        if not org_item and slug:
+            org_item = await self._fetch_org_item_by_slug(slug)
+
+        if not org_item:
+            return OrgDetailsResult(
+                name="", org_type="", website="", description="",
+                slug="", found=False,
+            )
+
+        fields = org_item.get("fieldData", {})
+
+        # Strip HTML from description
+        raw_desc = fields.get("about-organization", "") or fields.get("description-4", "") or ""
+        description = re.sub(r"<[^>]+>", "", raw_desc).strip()
+        if len(description) > 500:
+            description = description[:500] + "..."
+
+        logger.info(
+            "Webflow CMS verification: fetched org details",
+            name=fields.get("name", ""),
+        )
+
+        return OrgDetailsResult(
+            name=fields.get("name", ""),
+            org_type=fields.get("type-2", ""),
+            website=fields.get("website", ""),
+            description=description,
+            slug=fields.get("slug", ""),
+            found=True,
+        )
+
+
 def format_org_positions_context(result: BillOrgPositionsResult) -> str:
     """
     Format org positions as markdown for LLM context injection.
@@ -646,3 +939,97 @@ def format_org_bill_positions_context(result: OrgBillPositionsResult) -> str:
     )
 
     return "\n\n".join(parts)
+
+
+def format_bill_verification_context(result: BillDetailsResult) -> str:
+    """
+    Format bill details as markdown for verification context injection.
+
+    Args:
+        result: BillDetailsResult from get_bill_details
+
+    Returns:
+        Formatted markdown string, or empty string if not found
+    """
+    if not result.found:
+        return ""
+
+    parts = ["## Bill Details (Authoritative Source — Webflow CMS)"]
+    if result.name:
+        parts.append(f"**Name:** {result.name}")
+    if result.identifier:
+        parts.append(f"**Identifier:** {result.identifier}")
+    if result.status:
+        parts.append(f"**Status:** {result.status}")
+    if result.jurisdiction:
+        parts.append(f"**Jurisdiction:** {result.jurisdiction}")
+    if result.description:
+        parts.append(f"**Description:** {result.description}")
+    parts.append(
+        "\n*This information is fetched directly from the Digital Democracy Project CMS "
+        "and should be considered authoritative.*"
+    )
+
+    return "\n".join(parts)
+
+
+def format_legislator_verification_context(result: LegislatorDetailsResult) -> str:
+    """
+    Format legislator details as markdown for verification context injection.
+
+    Args:
+        result: LegislatorDetailsResult from get_legislator_details
+
+    Returns:
+        Formatted markdown string, or empty string if not found
+    """
+    if not result.found:
+        return ""
+
+    parts = ["## Legislator Details (Authoritative Source — Webflow CMS)"]
+    if result.name:
+        parts.append(f"**Name:** {result.name}")
+    if result.party:
+        parts.append(f"**Party:** {result.party}")
+    if result.chamber:
+        parts.append(f"**Chamber:** {result.chamber}")
+    if result.district:
+        parts.append(f"**District:** {result.district}")
+    if result.score:
+        parts.append(f"**DDP Score:** {result.score}")
+    parts.append(
+        "\n*This information is fetched directly from the Digital Democracy Project CMS "
+        "and should be considered authoritative.*"
+    )
+
+    return "\n".join(parts)
+
+
+def format_org_verification_context(result: OrgDetailsResult) -> str:
+    """
+    Format organization details as markdown for verification context injection.
+
+    Args:
+        result: OrgDetailsResult from get_org_details
+
+    Returns:
+        Formatted markdown string, or empty string if not found
+    """
+    if not result.found:
+        return ""
+
+    parts = ["## Organization Details (Authoritative Source — Webflow CMS)"]
+    if result.name:
+        parts.append(f"**Name:** {result.name}")
+    if result.org_type:
+        parts.append(f"**Type:** {result.org_type}")
+    if result.website:
+        parts.append(f"**Website:** {result.website}")
+    if result.description:
+        parts.append(f"**About:** {result.description}")
+    parts.append(
+        "\n*This information is fetched directly from the Digital Democracy Project CMS "
+        "and should be considered authoritative.*"
+    )
+
+    return "\n".join(parts)

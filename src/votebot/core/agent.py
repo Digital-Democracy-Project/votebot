@@ -22,6 +22,9 @@ from votebot.services.webflow_lookup import (
     WebflowLookupService,
     format_org_positions_context,
     format_org_bill_positions_context,
+    format_bill_verification_context,
+    format_legislator_verification_context,
+    format_org_verification_context,
 )
 
 logger = structlog.get_logger()
@@ -136,7 +139,7 @@ class VoteBotAgent:
             is_dispute=is_dispute,
             page_type=page_context.type if page_context else None,
         )
-        if is_dispute and page_context and page_context.type == "bill":
+        if is_dispute:
             logger.info("Dispute detected, attempting vote verification (non-streaming)")
             vote_verification_context = await self._verify_legislator_vote(
                 message=message,
@@ -166,20 +169,34 @@ class VoteBotAgent:
                 and self._is_bill_position_query(message)):
             org_bill_positions_context = await self._prefetch_org_bill_positions(page_context)
 
+        # Step 3d: Webflow CMS verification for all page types on disputes
+        webflow_verification_context = ""
+        if is_dispute and page_context and page_context.type in ("bill", "legislator", "organization"):
+            webflow_verification_context = await self._verify_from_webflow(page_context)
+
         # Step 4: Build page info for prompt
         page_info = self._extract_page_info(page_context)
 
         # Step 5: Build system prompt with verification context if available
+        # Context order (most authoritative first):
+        # 1. webflow_verification_context (CMS facts)
+        # 2. org_bill_positions_context
+        # 3. org_positions_context
+        # 4. vote_verification_context (OpenStates votes)
+        # 5. retrieved_context (RAG results)
         full_context = retrieved_context
         if vote_verification_context:
             # Put verification context first - it's the authoritative source
-            full_context = f"{vote_verification_context}\n\n{retrieved_context}"
+            full_context = f"{vote_verification_context}\n\n{full_context}"
         if org_positions_context:
             # Org positions from CMS are authoritative — prepend before RAG
             full_context = f"{org_positions_context}\n\n{full_context}"
         if org_bill_positions_context:
             # Org bill positions from CMS are authoritative — prepend before RAG
             full_context = f"{org_bill_positions_context}\n\n{full_context}"
+        if webflow_verification_context:
+            # Webflow CMS data is authoritative — prepend before everything
+            full_context = f"{webflow_verification_context}\n\n{full_context}"
 
         system_prompt = build_system_prompt(
             page_type=page_context.type,
@@ -361,7 +378,7 @@ class VoteBotAgent:
             is_dispute=is_dispute,
             page_type=page_context.type if page_context else None,
         )
-        if is_dispute and page_context and page_context.type == "bill":
+        if is_dispute:
             logger.info("Dispute detected, attempting vote verification")
             vote_verification_context = await self._verify_legislator_vote(
                 message=message,
@@ -391,10 +408,22 @@ class VoteBotAgent:
                 and self._is_bill_position_query(message)):
             org_bill_positions_context = await self._prefetch_org_bill_positions(page_context)
 
+        # Step 2g: Webflow CMS verification for all page types on disputes
+        webflow_verification_context = ""
+        if is_dispute and page_context and page_context.type in ("bill", "legislator", "organization"):
+            webflow_verification_context = await self._verify_from_webflow(page_context)
+
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
 
         # Combine RAG context with bill info, legislator info, and verification
+        # Context order (most authoritative first):
+        # 1. webflow_verification_context (CMS facts)
+        # 2. org_bill_positions_context
+        # 3. org_positions_context
+        # 4. vote_verification_context (OpenStates votes)
+        # 5. legislator_info_context / bill_info_context
+        # 6. retrieved_context (RAG results)
         full_context = retrieved_context
         if bill_info_context:
             full_context = f"{retrieved_context}\n\n{bill_info_context}"
@@ -409,6 +438,9 @@ class VoteBotAgent:
         if org_bill_positions_context:
             # Org bill positions from CMS are authoritative — prepend before everything
             full_context = f"{org_bill_positions_context}\n\n{full_context}"
+        if webflow_verification_context:
+            # Webflow CMS data is authoritative — prepend before everything
+            full_context = f"{webflow_verification_context}\n\n{full_context}"
 
         system_prompt = build_system_prompt(
             page_type=page_context.type,
@@ -1008,7 +1040,7 @@ class VoteBotAgent:
     async def _verify_legislator_vote(
         self,
         message: str,
-        page_context: PageContext,
+        page_context: PageContext | None = None,
         conversation_history: list[dict] | None = None,
     ) -> str:
         """
@@ -1017,9 +1049,12 @@ class VoteBotAgent:
         This is triggered when a user disputes or challenges vote information.
         It bypasses RAG and goes directly to the authoritative source.
 
+        Works from any page type or with no page context by extracting bill
+        identifiers and jurisdiction from message text or conversation history.
+
         Args:
             message: The user's message
-            page_context: Context about the current page (bill info)
+            page_context: Context about the current page (optional)
             conversation_history: Previous messages to extract context
 
         Returns:
@@ -1068,12 +1103,37 @@ class VoteBotAgent:
             logger.info("Could not extract legislator name for vote verification")
             return ""
 
-        # Get bill info from page context
+        # Get bill info from page context first, then fall back to message extraction
         bill_identifier = page_context.id if page_context else None
-        jurisdiction = page_context.jurisdiction if page_context else "US"
+        jurisdiction = page_context.jurisdiction if page_context else None
+
+        # If no bill identifier from page context, extract from message text
+        if not bill_identifier:
+            bill_identifier, msg_jurisdiction = self._extract_bill_from_text(message)
+            if msg_jurisdiction and not jurisdiction:
+                jurisdiction = msg_jurisdiction
+
+        # If still no bill identifier, search conversation history
+        if not bill_identifier and conversation_history:
+            for msg in reversed(conversation_history[-6:]):
+                content = msg.get("content", "")
+                bill_identifier, msg_jurisdiction = self._extract_bill_from_text(content)
+                if bill_identifier:
+                    if msg_jurisdiction and not jurisdiction:
+                        jurisdiction = msg_jurisdiction
+                    logger.debug(
+                        "Found bill identifier in conversation history",
+                        bill_identifier=bill_identifier,
+                    )
+                    break
 
         if not bill_identifier:
+            logger.info("Could not extract bill identifier for vote verification")
             return ""
+
+        # Default jurisdiction if still unknown
+        if not jurisdiction:
+            jurisdiction = "US"
 
         # Determine session
         session = getattr(page_context, "session", None)
@@ -1346,6 +1406,105 @@ class VoteBotAgent:
             return "US"
 
         return None
+
+    def _extract_bill_from_text(self, text: str) -> tuple[str | None, str | None]:
+        """
+        Extract bill identifier and jurisdiction from text.
+
+        Uses the same regex patterns as retrieval.py _extract_bill_from_query()
+        for consistency.
+
+        Args:
+            text: Text to search for bill identifiers
+
+        Returns:
+            Tuple of (bill_identifier, jurisdiction) — either may be None
+        """
+        if not text:
+            return None, None
+
+        text_lower = text.lower()
+
+        # Extract jurisdiction using the same state mappings as retrieval.py
+        jurisdiction = self._extract_jurisdiction_from_message(text)
+
+        # Bill identifier patterns (same as retrieval.py)
+        pattern = r'\b(H\.?J\.?R\.?|S\.?J\.?R\.?|H\.?C\.?R\.?|S\.?C\.?R\.?|H\.?B\.?|S\.?B\.?|H\.?R\.?|S\.?|H\.?J\.?|S\.?J\.?)\s*(\d+)\b'
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            prefix = match.group(1).replace(".", "").upper()
+            number = match.group(2)
+            return f"{prefix}{number}", jurisdiction
+
+        # Full name patterns: "House Bill 363", "Senate Bill 123"
+        pattern2 = r'\b(house|senate)\s+(?:bill|resolution|joint\s+resolution)\s*(\d+)\b'
+        match = re.search(pattern2, text, re.IGNORECASE)
+        if match:
+            chamber = match.group(1).lower()
+            number = match.group(2)
+            prefix = "HB" if chamber == "house" else "SB"
+            return f"{prefix}{number}", jurisdiction
+
+        return None, jurisdiction
+
+    async def _verify_from_webflow(self, page_context: PageContext) -> str:
+        """
+        Fetch authoritative details from Webflow CMS for verification.
+
+        Dispatches based on page_context.type to the appropriate detail-lookup
+        method. Used when a user disputes or challenges information.
+
+        Args:
+            page_context: Page context with type, webflow_id, and/or slug
+
+        Returns:
+            Formatted verification context string, or empty string on failure
+        """
+        webflow_id = getattr(page_context, "webflow_id", None)
+        slug = getattr(page_context, "slug", None)
+
+        if not webflow_id and not slug:
+            logger.debug("No webflow_id or slug in page_context for Webflow verification")
+            return ""
+
+        try:
+            if page_context.type == "bill":
+                result = await self.webflow_lookup.get_bill_details(
+                    webflow_id=webflow_id, slug=slug,
+                )
+                formatted = format_bill_verification_context(result)
+
+            elif page_context.type == "legislator":
+                result = await self.webflow_lookup.get_legislator_details(
+                    webflow_id=webflow_id, slug=slug,
+                )
+                formatted = format_legislator_verification_context(result)
+
+            elif page_context.type == "organization":
+                result = await self.webflow_lookup.get_org_details(
+                    webflow_id=webflow_id, slug=slug,
+                )
+                formatted = format_org_verification_context(result)
+
+            else:
+                return ""
+
+            if formatted:
+                logger.info(
+                    "Webflow CMS verification fetched",
+                    page_type=page_context.type,
+                    webflow_id=webflow_id,
+                    slug=slug,
+                )
+            return formatted
+
+        except Exception as e:
+            logger.error(
+                "Error fetching Webflow CMS verification",
+                page_type=page_context.type,
+                error=str(e),
+            )
+            return ""
 
     def _should_use_web_search(
         self,

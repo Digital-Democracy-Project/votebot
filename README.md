@@ -13,6 +13,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Multi-Phase Retrieval**: For bill queries, prioritizes legislative text over CMS summaries, with dedicated phases for organization positions and vote records
 - **Organization-Aware Retrieval**: Automatically detects organization-focused queries and prioritizes org documents, fetching all related chunks for complete bill position data
 - **Webflow CMS Runtime Lookup**: Bidirectional Webflow CMS pre-fetch — fetches authoritative org positions for bill→org queries (99.1%) and bill positions for org→bill queries (100%), bypassing Pinecone similarity thresholds
+- **Webflow CMS Verification on Disputes**: When users challenge information, fetches authoritative details from Webflow CMS for the current page entity (bill facts, legislator party/chamber/district, org type/website) and injects as high-priority context
 - **Bill Info Tool**: Real-time OpenStates lookups for full bill details (status, sponsors, votes) on bills not in the RAG system
   - Automatic jurisdiction detection from message text ("Virginia HB 2724" → VA)
   - Session year fallback (tries current year, then previous 2 years)
@@ -425,12 +426,19 @@ VoteBot maintains a reverse index of legislator voting records, enabling queries
 
 4. **Name Enrichment**: During legislator-votes document creation, last-name-only entries (e.g., "Moody") are enriched with full names (e.g., "Ashley Moody") from the federal legislator cache. This improves search ranking for full-name queries.
 
-5. **Vote Verification**: When users challenge or dispute vote information, VoteBot automatically fetches directly from OpenStates API to verify. This is triggered by phrases like "are you sure", "double check", "that's wrong", or "verify". The verification:
+5. **Vote Verification**: When users challenge or dispute vote information, VoteBot automatically fetches directly from OpenStates API to verify. This works from **any page type** (bill, legislator, organization, or no page context). Triggered by phrases like "are you sure", "double check", "that's wrong", or "verify". The verification:
+   - Works from any page type — extracts bill identifier from message text or conversation history when not on a bill page
    - Gets session via: `/content/resolve` → extracts `session-code` from Webflow → widget passes to WebSocket
    - Falls back to calculating Congress number from year if session not provided
    - Searches for legislator by **last name** (e.g., "moody" matches "Moody (R-FL)")
    - Prioritizes **final passage votes** over procedural votes (motion to commit, cloture, etc.)
    - Returns authoritative data that overrides RAG results
+
+6. **Webflow CMS Verification on Disputes**: When users challenge information, VoteBot also fetches authoritative details from Webflow CMS for the current page entity:
+   - **Bill pages**: name, identifier, status, description, jurisdiction
+   - **Legislator pages**: name, party, chamber, district, DDP score
+   - **Organization pages**: name, type, website, description
+   - Injected as highest-priority context before all other sources
 
 ### CLI Commands
 
@@ -502,6 +510,8 @@ VoteBot maintains bidirectional linkages between content types:
 | Bill ↔ Organization | Org → Bill | "Bills Supported/Opposed" with DDP links | Webflow CMS (100%) |
 | Bill → Legislator | Vote Records | `[ocd-person/uuid]Name (Party-State)` format | OpenStates API |
 | Legislator → Bill | Voting Record | `legislator-votes-{person_uuid}` documents | — |
+| Dispute Verification | Any → CMS | Bill/legislator/org details on disputes | Webflow CMS |
+| Vote Verification | Any → OpenStates | Legislator vote lookup (any page type) | OpenStates API |
 
 ### Full Rebuild Script
 
@@ -630,7 +640,7 @@ votebot/
 │   │   ├── vector_store.py  # Pinecone operations
 │   │   ├── web_search.py    # Tavily web search
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
-│   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill)
+│   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification)
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service
 │   │   ├── service.py       # UnifiedSyncService
@@ -791,6 +801,7 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 - Organization retrieval issues (bill→org, org→bill, org type detection)
 - Bill identifier extraction (HJR, SJR, HCR, SCR patterns)
 - Organization chunk data quality (aggressive chunking)
+- Webflow CMS verification on disputes (bill, legislator, organization pages)
 - Missing data in search results
 - Federal legislator cache issues
 - Pinecone index diagnostics
