@@ -11,7 +11,7 @@
  * Usage (Website with auto-detection):
  * <script>
  *   window.DDPChatConfig = {
- *     wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+ *     wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
  *     autoDetect: true
  *   };
  * </script>
@@ -19,7 +19,7 @@
  * Usage (Mobile App with explicit context):
  * <script>
  *   window.DDPChatConfig = {
- *     wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+ *     wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
  *     pageContext: {
  *       type: 'bill',
  *       id: 'HR 1',
@@ -41,7 +41,7 @@
 
     // Default configuration
     var defaultConfig = {
-        wsUrl: 'wss://api.digitaldemocracyproject.org/votebot/ws',
+        wsUrl: 'wss://api.digitaldemocracyproject.org/ws/chat',
         position: 'bottom-right',
         primaryColor: '#1a5f7a',
         botName: 'VoteBot',
