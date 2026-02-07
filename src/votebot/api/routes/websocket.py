@@ -315,6 +315,8 @@ async def handle_client_message(session_id: str, data: dict):
 
     if message_type == "user_message":
         await handle_user_message(session_id, payload)
+    elif message_type == "context_update":
+        await handle_context_update(session_id, payload)
     elif message_type == "confirm_handoff":
         await handle_confirm_handoff(session_id)
     elif message_type == "ping":
@@ -344,6 +346,34 @@ async def handle_confirm_handoff(session_id: str):
     manager.update_session(session_id, pending_handoff_message=None)
 
     logger.info("Handoff confirmed by user", session_id=session_id)
+
+
+async def handle_context_update(session_id: str, payload: dict):
+    """Handle page context change — inject a system note so the LLM knows the user navigated."""
+    page_context_data = payload.get("page_context", {"type": "general"})
+
+    # Update stored page context
+    manager.update_session(session_id, page_context=page_context_data)
+
+    # Build a note for the LLM based on the new context
+    ctx_type = page_context_data.get("type", "general")
+    title = page_context_data.get("title", "")
+    if ctx_type == "general":
+        note = "The user has navigated to a general page. They may now ask about any topic."
+    elif title:
+        note = f"The user has navigated to a new {ctx_type} page: {title}. Answer subsequent questions about this {ctx_type}, not previous ones."
+    else:
+        note = f"The user has navigated to a new {ctx_type} page. Answer subsequent questions about this {ctx_type}, not previous ones."
+
+    # Add as a system message in conversation history
+    manager.add_message(session_id, "system", note)
+
+    logger.info(
+        "Page context updated",
+        session_id=session_id,
+        new_type=ctx_type,
+        new_title=title,
+    )
 
 
 async def handle_user_message(session_id: str, payload: dict):

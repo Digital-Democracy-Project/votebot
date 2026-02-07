@@ -450,17 +450,16 @@
 
         // Decide initial message
         var initialMessage = null;
+        var contextChangeMsg = null;
         if (!isReturning) {
             // New session — show welcome message
             initialMessage = config.welcomeMessage || generateWelcomeMessage(pageContext);
         } else if (contextChanged(previousContext, pageContext)) {
-            // Returning session + different entity — start fresh session
-            // Old conversation history would confuse the LLM about the new entity
-            DDPWebSocket.storageRemove('session_id');
-            isReturning = false;
-            initialMessage = generateWelcomeMessage(pageContext);
+            // Returning session + different page — show context-change notice after restore
+            // Server will be notified via context_update message to inject a system note
+            contextChangeMsg = generateContextChangeMessage(pageContext);
         }
-        // Returning + same context → no extra message (session will be restored)
+        // Returning + same context → no extra message
 
         // Create container element
         var container = document.createElement('div');
@@ -510,6 +509,20 @@
                 // Server lost the session — show welcome message instead
                 originalHandler(data);
                 DDPUI.addSystemMessage(config.welcomeMessage || generateWelcomeMessage(pageContext));
+                return;
+            }
+
+            // After session_restored, show context-change notice and notify server
+            if (data.type === 'session_restored') {
+                originalHandler(data);
+                if (contextChangeMsg) {
+                    DDPUI.addSystemMessage(contextChangeMsg);
+                    // Notify server so it injects a system note for the LLM
+                    DDPWebSocket.send({
+                        type: 'context_update',
+                        payload: { page_context: pageContext }
+                    });
+                }
                 return;
             }
 
