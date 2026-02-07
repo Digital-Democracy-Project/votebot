@@ -320,9 +320,32 @@ class RetrievalService:
         query_lower = query.lower()
         is_org_query = any(kw in query_lower for kw in org_keywords)
         org_results = []
+        bill_org_results = []
 
         if is_org_query:
-            remaining_org_slots = max(3, max_chunks - len(text_results) - len(summary_results) - len(history_results))
+            # Phase 4a-i: Search the bill's OWN chunks for org position content
+            org_position_query = "organization positions supporting opposing this bill"
+            bill_org_filters = {**filters, "document_type": "bill"}
+            bill_org_results = await self.vector_store.query(
+                query=org_position_query,
+                top_k=3,
+                filter=bill_org_filters,
+            )
+            bill_org_results = [
+                r for r in bill_org_results
+                if r.score >= self.config.similarity_threshold
+            ]
+
+            # Prioritize chunks with actual org position markers
+            org_position_markers = ["organization positions", "organizations supporting", "organizations opposing"]
+            bill_org_relevant = [r for r in bill_org_results if any(m in (r.content or "").lower() for m in org_position_markers)]
+            bill_org_other = [r for r in bill_org_results if r not in bill_org_relevant]
+            bill_org_results = bill_org_relevant + bill_org_other
+
+            logger.info("Bill text retrieval phase 4a-i (bill org positions)",
+                        bill_org_chunks_found=len(bill_org_results), bill_org_relevant=len(bill_org_relevant))
+
+            remaining_org_slots = max(2, max_chunks - len(text_results) - len(summary_results) - len(history_results) - len(bill_org_results))
 
             # Build query combining bill info with org-related terms
             # Use the bill slug/title to find org chunks that reference this bill
@@ -544,9 +567,9 @@ class RetrievalService:
             # 2. Bill-votes documents
             # 3. Other content
             combined = legislator_votes_results + vote_results + text_results + summary_results + history_results + org_results
-        elif is_org_query and org_results:
-            # For org queries, prioritize org data alongside bill summaries
-            combined = org_results + summary_results + text_results + history_results + vote_results
+        elif is_org_query and (bill_org_results or org_results):
+            # For org queries, prioritize bill's own org positions, then standalone org docs
+            combined = bill_org_results + org_results + summary_results + text_results + history_results + vote_results
         else:
             # Default: legislative text first, then summaries, then history, then votes, then orgs
             combined = text_results + summary_results + history_results + vote_results + org_results

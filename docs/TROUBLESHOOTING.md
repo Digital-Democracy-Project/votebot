@@ -475,11 +475,15 @@ VoteBot fails to answer questions about organization positions on bills, or retu
 #### Bill→Org: Retrieval pipeline filters out org data
 When a bill identifier is detected in a query, the retrieval pipeline activates bill-priority mode, which searches only for `document_type="bill"`, `"bill-text"`, `"bill-history"`, and `"bill-votes"`. Organization documents are excluded by these filters.
 
-**Fix (implemented February 2026)**: Added Phase 4a (organization retrieval) to `_retrieve_bill_with_text_priority()` in `retrieval.py`. This phase:
+**Fix (implemented February 2026)**: Added two-phase organization retrieval to `_retrieve_bill_with_text_priority()` in `retrieval.py`:
+
+**Phase 4a-i (bill's own org positions)**: Searches the bill's own `document_type="bill"` chunks with a targeted semantic query (`"organization positions supporting opposing this bill"`) designed to match the `## Organization Positions` section added during bill sync (see `webflow.py:1597-1633`). Uses the same `webflow_id` filter to stay scoped to the current bill. Results are re-ranked to prioritize chunks containing org position markers ("organization positions", "organizations supporting", "organizations opposing"). This phase improved the bill→org template pass rate from **58.9% to 82.1%** (46→20 failures).
+
+**Phase 4a-ii (standalone org documents, fallback)**: Searches `document_type="organization"` without the bill slug filter as a fallback. This phase:
 1. Detects org-related keywords in bill queries (e.g., "organizations", "support", "oppose", "position")
-2. Searches `document_type="organization"` without the bill slug filter
-3. Builds a query from the bill's slug words for semantic matching
-4. Post-filters results to prioritize org chunks that reference the specific bill by slug
+2. Builds a query from the bill's slug words for semantic matching
+3. Post-filters results to prioritize org chunks that reference the specific bill by slug
+4. Remaining org slots are reduced by the number of chunks already found in Phase 4a-i
 
 #### Org type: Unfiltered semantic search
 Generic queries about an organization (e.g., "What type of organization is X?") go through the default semantic search, which may return random documents instead of the target org's profile.
@@ -1010,52 +1014,48 @@ The test suite reports:
 
 | Category | Passed | Total | Rate |
 |----------|--------|-------|------|
-| Bills | 264 | 312 | **85%** |
+| Bills | 289 | 312 | **93%** |
 | Legislators | 290 | 300 | **97%** |
 | Organizations | 249 | 259 | **96%** |
 | DDP | — | 8 | N/A |
 | Out-of-system votes | — | 5 | N/A |
-| **Overall** | **803** | **871** | **92.2%** |
+| **Overall** | **828** | **871** | **95.1%** |
 
-**By jurisdiction (large sample):**
+**By jurisdiction (bills category, post Phase 4a-i fix):**
 
 | Jurisdiction | Passed/Total | Rate |
 |-------------|-------------|------|
-| FL | 216/225 | 96% |
-| US | 110/121 | 91% |
-| AZ | 40/45 | 89% |
-| VA | 60/68 | 88% |
-| WA | 88/104 | 85% |
-| UT | 15/18 | 83% |
-| MI | 21/27 | 78% |
 | MA | 4/4 | 100% |
+| MI | 27/27 | 100% |
+| WA | 96/100 | 96% |
+| VA | 65/68 | 96% |
+| FL | 19/20 | 95% |
+| AZ | 38/41 | 93% |
+| UT | 24/27 | 89% |
+| US | 16/25 | 64% |
 
-**Aggregate metrics:** Avg confidence 0.78, avg latency 8.4s, P95 latency 18.5s, citation rate 64.2%.
+Notable improvements after the Phase 4a-i fix: MI went from 78% to **100%**, WA from 85% to **96%**, VA from 88% to **96%**. US (federal) remains the weakest at 64% — many federal bills lack org positions in Pinecone.
+
+**Aggregate metrics:** Avg confidence 0.76, avg latency 9.7s, P95 latency 18.3s, citation rate 55.8%.
 
 ### Failure Analysis (100-Document Sample)
 
-68 total failures across 4 clusters:
+43 total failures across 4 clusters (down from 68 after Phase 4a-i fix):
 
-#### Cluster 1: Bill → Org Positions (46 failures, 67.6% of all failures)
+#### Cluster 1: Bill → Org Positions (20 failures, 46.5% of all failures)
 
 **Template**: "Which organizations support/oppose [bill]?"
-**Pass rate for this template**: 66/112 (58.9%) — the weakest template
+**Pass rate for this template**: 92/112 (82.1%) — improved from 58.9% after Phase 4a-i fix
 
-The retrieval pipeline finds the bill but cannot locate organization position data in Pinecone. Phase 4a org retrieval searches for org docs referencing the bill, but many org chunks are too small (just headers) or don't contain the bill slug in their content.
+**Before (Phase 4a only)**: The retrieval pipeline found the bill but searched only standalone `document_type="organization"` docs. These org chunks are too small (just headers) or don't contain the bill slug, leading to 46 failures.
 
-| Jurisdiction | Failed/Total | Rate |
-|-------------|-------------|------|
-| US | 7/11 | 36% pass |
-| MI | 6/9 | 33% pass |
-| UT | 3/6 | 50% pass |
-| AZ | 4/9 | 56% pass |
-| FL | 2/5 | 60% pass |
-| VA | 8/26 | 69% pass |
-| WA | 16/44 | 64% pass |
+**After (Phase 4a-i + 4a-ii)**: Phase 4a-i now searches the bill's own `document_type="bill"` chunks with a targeted query for org positions. Bill documents already contain `## Organization Positions` sections (added during sync), so this targeted query reliably surfaces org data. Phase 4a-ii (standalone org docs) remains as fallback. This reduced failures from 46 to 20 — a **56.5% reduction**.
 
-**Root cause**: Organization documents are chunked so aggressively that bill position data is in separate chunks (or missing entirely) from the org header. The Phase 4a retrieval finds org documents but the specific chunks containing "Bills Supported/Opposed" sections don't always reference the bill by slug. See [Organization Chunk Data Quality](#organization-chunk-data-quality).
+The remaining 20 failures are concentrated in:
+- **Federal bills (7 failures)**: Many federal bills lack `## Organization Positions` sections in their content
+- **Scattered state bills (13)**: Bills without org position data indexed in Pinecone
 
-**Fix needed**: Re-ingest organization documents with larger chunks or prepend org name + bill slugs to each chunk. This is a data quality issue, not a retrieval logic issue.
+**Fix needed for remaining failures**: Re-ingest organization documents with larger chunks, and ensure all bills with org positions have that data in their Pinecone chunks. Federal bill coverage is a known gap.
 
 #### Cluster 2: Org → Bills Supported (10 failures, 14.7%)
 
@@ -1092,11 +1092,11 @@ Examples:
 
 Excluding the 10 false failures from Cluster 3 (correct responses flagged as failures due to validation issues), the true pass rate is:
 
-**803 / 861 = 93.3%** (adjusted) vs 92.2% (raw)
+**828 / 861 = 96.2%** (adjusted) vs 95.1% (raw)
 
 ### Common Failure Patterns
 
-1. **Bill→Org and Org→Bill relationship queries** (56/68 failures): Organization position data not retrievable from Pinecone due to aggressive chunking. See [Organization Chunk Data Quality](#organization-chunk-data-quality).
+1. **Bill→Org and Org→Bill relationship queries** (30/43 failures): Organization position data not always retrievable. Phase 4a-i fix (searching bill's own chunks) reduced bill→org failures from 46 to 20. Remaining failures are bills without org position data in Pinecone. See [Organization Chunk Data Quality](#organization-chunk-data-quality).
 
 2. **Legislator name validation** (7/68 failures): LLM expands short names to legal names. Need `contains_any` validation with name parts.
 

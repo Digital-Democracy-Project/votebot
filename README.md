@@ -756,12 +756,12 @@ PYTHONPATH=src python scripts/test_rag_quality.py --dynamic --limit 10
 
 | Category | Passed/Total | Rate |
 |----------|-------------|------|
-| Bills | 264/312 | 85% |
+| Bills | 289/312 | 93% |
 | Legislators | 290/300 | 97% |
 | Organizations | 249/259 | 96% |
-| **Overall** | **803/871** | **92.2%** |
+| **Overall** | **828/871** | **95.1%** |
 
-Top jurisdictions: FL 96%, US 91%, AZ 89%, VA 88%, WA 85%. Remaining failures are primarily org→bill relationship queries (Pinecone chunk quality) and test validation false positives (legislator name expansion). See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-sample) for detailed failure analysis.
+Top jurisdictions: MI 100%, WA 96%, VA 96%, FL 95%, AZ 93%. Bills improved from 85%→93% after Phase 4a-i fix (searching bill's own org-position chunks). Remaining failures are primarily federal bills missing org data and test validation false positives (legislator name expansion). See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-sample) for detailed failure analysis.
 
 ## Performance Targets
 
