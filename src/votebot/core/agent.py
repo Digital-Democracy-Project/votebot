@@ -517,9 +517,10 @@ class VoteBotAgent:
         """Extract page info dict from PageContext."""
         return {
             "id": page_context.id,
+            "name": page_context.title,
+            "title": page_context.title,
             "jurisdiction": page_context.jurisdiction,
             "session": getattr(page_context, "session", None),
-            "title": page_context.title,
             "url": page_context.url,
         }
 
