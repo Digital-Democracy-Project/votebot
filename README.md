@@ -12,6 +12,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
 - **Multi-Phase Retrieval**: For bill queries, prioritizes legislative text over CMS summaries, with dedicated phases for organization positions and vote records
 - **Organization-Aware Retrieval**: Automatically detects organization-focused queries and prioritizes org documents, fetching all related chunks for complete bill position data
+- **Legislator Slug Resolution**: Automatically resolves legislator slugs from Webflow pages to OpenStates person IDs via Webflow CMS lookup, enabling correct Pinecone filtering even when only the URL slug is available
 - **Webflow CMS Runtime Lookup**: Bidirectional Webflow CMS pre-fetch — fetches authoritative org positions for bill→org queries (99.1%) and bill positions for org→bill queries (100%), bypassing Pinecone similarity thresholds
 - **Webflow CMS Verification on Disputes**: When users challenge information, fetches authoritative details from Webflow CMS for the current page entity (bill facts, legislator party/chamber/district, org type/website) and injects as high-priority context
 - **Bill Info Tool**: Real-time OpenStates lookups for full bill details (status, sponsors, votes) on bills not in the RAG system
@@ -248,7 +249,7 @@ An embeddable JavaScript widget is available in the `chat-widget/` directory. Se
 
 - **Context-Aware**: Automatically detects page context from DDP URLs or manual configuration
 - **Cross-Page Session Persistence**: Chat session, conversation history, and popup state persist across full-page navigations via `sessionStorage` (scoped to browser tab, 30-minute timeout)
-- **Context-Change Notifications**: When the user navigates to a different entity, conversation is restored and a context-change notice is shown
+- **Smart Context Handling**: When the user navigates to a different entity, a fresh session starts with a new welcome message to avoid confusing the LLM with stale context
 - **Streaming Responses**: Real-time token streaming with smooth auto-scroll
 - **Smart Auto-Scroll**: Auto-scrolling pauses when user scrolls up to read; "scroll to bottom" button appears to resume
 - **Auto-Open Modes**:
@@ -512,6 +513,7 @@ VoteBot maintains bidirectional linkages between content types:
 | Bill ↔ Organization | Org → Bill | "Bills Supported/Opposed" with DDP links | Webflow CMS (100%) |
 | Bill → Legislator | Vote Records | `[ocd-person/uuid]Name (Party-State)` format | OpenStates API |
 | Legislator → Bill | Voting Record | `legislator-votes-{person_uuid}` documents | — |
+| Legislator Page → ID | Slug → OpenStates ID | Resolves slug to `legislator_id` for Pinecone filtering | Webflow CMS |
 | Dispute Verification | Any → CMS | Bill/legislator/org details on disputes | Webflow CMS |
 | Vote Verification | Any → OpenStates | Legislator vote lookup (any page type) | OpenStates API |
 
@@ -798,6 +800,7 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-s
 
 For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). This includes:
 
+- Wrong legislator returned on Webflow pages (slug→ID resolution)
 - Legislator vote lookups not working
 - Corrupted legislator-votes documents (chunk boundary parsing issues)
 - Organization retrieval issues (bill→org, org→bill, org type detection)

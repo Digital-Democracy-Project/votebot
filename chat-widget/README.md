@@ -160,19 +160,10 @@ The widget persists chat sessions across full-page navigations within the same b
 | Scenario | Behavior |
 |----------|----------|
 | **First visit** | Welcome message: "Welcome! I can answer questions about **Bill Title**." |
-| **Navigate to different entity** | Conversation history restored from server + context-change notice: "You're now viewing **New Entity**." |
+| **Navigate to different entity** | Fresh session with welcome message for the new entity (old conversation is discarded to avoid confusing the LLM) |
 | **Same-page refresh** | Conversation history restored, no extra message |
 | **Close tab + reopen** | Fresh session (`sessionStorage` cleared) with welcome message |
 | **30-minute inactivity** | Session expires, next page load starts fresh |
-
-### Context-Change Notifications
-
-When the user navigates from one entity to another (e.g., bill → different bill, or bill → legislator), the widget shows a system message:
-
-- **Bill**: "You're now viewing **Title (ID)**. I can answer questions about this bill."
-- **Legislator**: "You're now viewing **Name**. I can answer questions about this legislator."
-- **Organization**: "You're now viewing **Name**. I can answer questions about this organization."
-- **General**: "You're now on a general page. I can answer questions about any legislation, legislator, or organization."
 
 ### Storage Keys
 

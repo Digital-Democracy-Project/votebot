@@ -4,6 +4,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 
 ## Table of Contents
 
+- [Wrong Legislator Returned on Webflow Pages](#wrong-legislator-returned-on-webflow-pages)
 - [Legislator Vote Lookups Not Working](#legislator-vote-lookups-not-working)
 - [Model Contradicts Itself About Votes](#model-contradicts-itself-about-votes)
 - [Poor Search Ranking for Full Name Queries](#poor-search-ranking-for-full-name-queries)
@@ -18,6 +19,134 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [RAG Test Suite Diagnostics](#rag-test-suite-diagnostics)
   - [Failure Analysis (100-Document Sample)](#failure-analysis-100-document-sample)
 - [Full Index Rebuild Procedure](#full-index-rebuild-procedure)
+
+---
+
+## Wrong Legislator Returned on Webflow Pages
+
+### Symptom
+When viewing a legislator page on the Webflow-hosted site (e.g., Mario Diaz-Balart), VoteBot returns information about a different legislator (e.g., Carlos Guillermo Smith). This happens even on fresh sessions with no prior conversation history.
+
+### Example
+```
+User navigates to: digitaldemocracyproject.org/legislators/mario-diaz-balart-fl-representative
+VoteBot: "Welcome! I can answer questions about Carlos Guillermo Smith..."
+```
+
+### Root Cause
+
+Webflow page context only provides `slug` and `title` for legislators — it does NOT provide the OpenStates person ID (the `id` field). The retrieval filter in `_build_filters()` at `retrieval.py` previously only filtered legislators by `page_context.id` (OpenStates person ID):
+
+```python
+# OLD (broken)
+elif page_context.type == "legislator" and page_context.id:
+    filters["legislator_id"] = page_context.id
+```
+
+When `id` was `None`, **no Pinecone filter was applied**, so the vector search returned whichever legislator had the strongest semantic match to the query — typically the same legislator every time regardless of which page the user was on.
+
+### Fix (February 2026)
+
+Two-part fix in `retrieval.py` and `webflow_lookup.py`:
+
+**1. Slug → OpenStates ID resolution via Webflow CMS:**
+
+Added `_resolve_legislator_id()` method to `RetrievalService`. When a legislator page context has `slug` but no `id`, it calls `WebflowLookupService.get_legislator_details(slug=slug)` to look up the Webflow CMS item and extract the `openstatesid` field.
+
+```python
+# In retrieve(), before _build_filters():
+if effective_context.type == "legislator" and not effective_context.id and effective_context.slug:
+    resolved_id = await self._resolve_legislator_id(effective_context)
+    if resolved_id:
+        effective_context = PageContext(type="legislator", id=resolved_id, ...)
+```
+
+**2. Slug/webflow_id fallback in `_build_filters()`:**
+
+Added bill-style fallback chain for legislators:
+
+```python
+# NEW (fixed)
+elif page_context.type == "legislator":
+    if page_context.id:
+        filters["legislator_id"] = page_context.id
+    elif page_context.webflow_id:
+        filters["webflow_id"] = page_context.webflow_id
+    elif page_context.slug:
+        filters["slug"] = page_context.slug
+```
+
+**3. `LegislatorDetailsResult` updated:**
+
+Added `openstates_id` field to `LegislatorDetailsResult` in `webflow_lookup.py`, extracted from the Webflow CMS `openstatesid` field.
+
+### Resolution Flow
+
+```
+Webflow page → {type: "legislator", slug: "mario-diaz-balart-fl-representative", title: "Mario Diaz-Balart"}
+                                    ↓
+              _resolve_legislator_id() → Webflow CMS lookup by slug
+                                    ↓
+              Gets openstatesid: "ocd-person/abc123..."
+                                    ↓
+              _build_filters() → {legislator_id: "ocd-person/abc123..."}
+                                    ↓
+              Pinecone returns ONLY Mario Diaz-Balart's documents
+```
+
+### Diagnostic Steps
+
+#### 1. Check if slug resolution is working
+
+Look for these log entries:
+```
+"Resolved legislator OpenStates ID from slug" slug=... openstates_id=... name=...
+"Built retrieval filters" page_type=legislator filters={"legislator_id": "ocd-person/..."}
+```
+
+If you see `filters={}` for a legislator page, the resolution failed.
+
+#### 2. Check if Webflow CMS has the openstatesid field
+
+```python
+import asyncio
+from votebot.config import get_settings
+from votebot.services.webflow_lookup import WebflowLookupService
+
+async def check_legislator_id(slug):
+    service = WebflowLookupService(get_settings())
+    result = await service.get_legislator_details(slug=slug)
+    print(f"Found: {result.found}")
+    print(f"Name: {result.name}")
+    print(f"OpenStates ID: {result.openstates_id}")
+
+asyncio.run(check_legislator_id("mario-diaz-balart-fl-representative"))
+```
+
+#### 3. Verify the Webflow template sends slug
+
+The Webflow legislator CMS template custom code should include:
+```javascript
+window.DDPChatConfig = window.DDPChatConfig || {};
+window.DDPChatConfig.pageContext = {
+    type: 'legislator',
+    title: '{{wf {"path":"name","type":"PlainText"} }}',
+    slug: '{{wf {"path":"slug","type":"PlainText"} }}'
+};
+```
+
+### Comparison: Bill vs Legislator Filter Chains
+
+| Aspect | Bills | Legislators |
+|--------|-------|-------------|
+| Primary filter | `webflow_id` | `legislator_id` (OpenStates ID) |
+| Fallback 1 | `slug` | `webflow_id` |
+| Fallback 2 | — | `slug` |
+| Pre-retrieval resolution | `_lookup_bill_slug()` (from query) | `_resolve_legislator_id()` (from Webflow CMS) |
+
+### Prevention
+
+Ensure all Webflow CMS legislator items have the `openstatesid` field populated. Legislators without this field are skipped during ingestion (see `webflow.py:955-957`), so they won't have documents in Pinecone and the slug resolution will fail.
 
 ---
 

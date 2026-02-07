@@ -8,6 +8,7 @@ import structlog
 from votebot.api.schemas.chat import PageContext
 from votebot.config import Settings, get_settings
 from votebot.services.vector_store import SearchResult, VectorStoreService
+from votebot.services.webflow_lookup import WebflowLookupService
 
 logger = structlog.get_logger()
 
@@ -157,6 +158,24 @@ class RetrievalService:
                         slug=slug,
                         original_context="general",
                     )
+
+        # For legislator pages with slug but no OpenStates ID, resolve via Webflow CMS
+        if (
+            effective_context.type == "legislator"
+            and not effective_context.id
+            and effective_context.slug
+        ):
+            resolved_id = await self._resolve_legislator_id(effective_context)
+            if resolved_id:
+                effective_context = PageContext(
+                    type=effective_context.type,
+                    id=resolved_id,
+                    slug=effective_context.slug,
+                    title=effective_context.title,
+                    jurisdiction=effective_context.jurisdiction,
+                    webflow_id=effective_context.webflow_id,
+                    url=effective_context.url,
+                )
 
         # Build filters based on effective context
         filters = self._build_filters(effective_context, query)
@@ -812,6 +831,49 @@ class RetrievalService:
         )
         return None
 
+    async def _resolve_legislator_id(self, page_context: PageContext) -> str | None:
+        """
+        Resolve a legislator's OpenStates ID from slug via Webflow CMS lookup.
+
+        When the page context has a slug but no OpenStates ID (common for Webflow
+        pages), look up the Webflow CMS item to get the openstatesid field.
+
+        Args:
+            page_context: Page context with slug but no id
+
+        Returns:
+            OpenStates person ID if found, None otherwise
+        """
+        slug = page_context.slug
+        if not slug:
+            return None
+
+        try:
+            webflow_service = WebflowLookupService()
+            result = await webflow_service.get_legislator_details(slug=slug)
+            if result.found and result.openstates_id:
+                logger.info(
+                    "Resolved legislator OpenStates ID from slug",
+                    slug=slug,
+                    openstates_id=result.openstates_id,
+                    name=result.name,
+                )
+                return result.openstates_id
+            else:
+                logger.warning(
+                    "Could not resolve legislator OpenStates ID from slug",
+                    slug=slug,
+                    found=result.found,
+                )
+        except Exception as e:
+            logger.error(
+                "Failed to resolve legislator ID from Webflow",
+                slug=slug,
+                error=str(e),
+            )
+
+        return None
+
     def _is_organization_query(self, query: str) -> bool:
         """Detect if the query is primarily about an organization."""
         query_lower = query.lower()
@@ -949,8 +1011,13 @@ class RetrievalService:
             # Fallback to slug if no webflow_id (only matches summary chunks, not PDFs)
             elif page_context.slug:
                 filters["slug"] = page_context.slug
-        elif page_context.type == "legislator" and page_context.id:
-            filters["legislator_id"] = page_context.id
+        elif page_context.type == "legislator":
+            if page_context.id:
+                filters["legislator_id"] = page_context.id
+            elif page_context.webflow_id:
+                filters["webflow_id"] = page_context.webflow_id
+            elif page_context.slug:
+                filters["slug"] = page_context.slug
 
         # Note: jurisdiction filter removed as it's stored as Webflow ID, not code
 

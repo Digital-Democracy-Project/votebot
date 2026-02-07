@@ -81,6 +81,7 @@ class LegislatorDetailsResult:
     jurisdiction: str
     score: str
     slug: str
+    openstates_id: str = ""
     found: bool = False
 
 
@@ -736,7 +737,8 @@ class WebflowLookupService:
         if not webflow_id and not slug:
             return LegislatorDetailsResult(
                 name="", party="", chamber="", district="",
-                jurisdiction="", score="", slug="", found=False,
+                jurisdiction="", score="", slug="", openstates_id="",
+                found=False,
             )
 
         leg_item = None
@@ -748,7 +750,8 @@ class WebflowLookupService:
         if not leg_item:
             return LegislatorDetailsResult(
                 name="", party="", chamber="", district="",
-                jurisdiction="", score="", slug="", found=False,
+                jurisdiction="", score="", slug="", openstates_id="",
+                found=False,
             )
 
         fields = leg_item.get("fieldData", {})
@@ -756,10 +759,13 @@ class WebflowLookupService:
         # party-2 is the display field; fallback to party
         party = fields.get("party-2", "") or fields.get("party", "")
 
+        openstates_id = fields.get("openstatesid", "")
+
         logger.info(
             "Webflow CMS verification: fetched legislator details",
             name=fields.get("name", ""),
             party=party,
+            openstates_id=openstates_id,
         )
 
         return LegislatorDetailsResult(
@@ -770,6 +776,7 @@ class WebflowLookupService:
             jurisdiction=fields.get("jurisdiction", ""),
             score=fields.get("score", ""),
             slug=fields.get("slug", ""),
+            openstates_id=openstates_id,
             found=True,
         )
 
