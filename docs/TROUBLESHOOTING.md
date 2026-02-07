@@ -33,9 +33,13 @@ User navigates to: digitaldemocracyproject.org/legislators/mario-diaz-balart-fl-
 VoteBot: "Welcome! I can answer questions about Carlos Guillermo Smith..."
 ```
 
-### Root Cause
+### Root Cause (Three-Layer Problem)
 
-Webflow page context only provides `slug` and `title` for legislators — it does NOT provide the OpenStates person ID (the `id` field). The retrieval filter in `_build_filters()` at `retrieval.py` previously only filtered legislators by `page_context.id` (OpenStates person ID):
+This bug had three contributing causes that all had to be fixed. Fixing retrieval alone was insufficient — the second and third issues were discovered during live production debugging.
+
+#### Layer 1: Missing Pinecone Filter (retrieval.py)
+
+Webflow page context only provides `slug` and `title` for legislators — it does NOT provide the OpenStates person ID (the `id` field). The retrieval filter in `_build_filters()` previously only filtered legislators by `page_context.id`:
 
 ```python
 # OLD (broken)
@@ -43,13 +47,45 @@ elif page_context.type == "legislator" and page_context.id:
     filters["legislator_id"] = page_context.id
 ```
 
-When `id` was `None`, **no Pinecone filter was applied**, so the vector search returned whichever legislator had the strongest semantic match to the query — typically the same legislator every time regardless of which page the user was on.
+When `id` was `None`, **no Pinecone filter was applied**, so the vector search returned whichever legislator had the strongest semantic match to the query.
+
+#### Layer 2: System Prompt Field Mismatch (agent.py — actual root cause)
+
+Even after fixing retrieval, VoteBot still returned the wrong legislator. Server logs showed:
+- Slug resolution: SUCCESS (correct OpenStates ID resolved)
+- Pinecone filter: CORRECT (`legislator_id` set properly)
+- Retrieved documents: CORRECT (10 chunks about Mario Diaz-Balart)
+
+The real problem was in `_extract_page_info()` in `agent.py`. It stored the legislator name under the `"title"` key:
+
+```python
+# OLD (broken) — _extract_page_info() returned:
+{"id": ..., "title": "Mario Diaz-Balart", "jurisdiction": ...}
+```
+
+But `_format_legislator_info()` in `prompts.py` looked for `info.get("name")`:
+
+```python
+# prompts.py line 231
+if info.get("name"):
+    parts.append(f"- Name: {info['name']}")
+```
+
+Result: The system prompt said **"No legislator details available"** — the LLM didn't know which legislator the user was asking about, even though the correct documents were retrieved.
+
+#### Layer 3: Web Search Override
+
+With "No legislator details available" in the prompt and a vague user message like "who is this guy?":
+1. RAG confidence was **0.5** (below the legislator threshold of **0.7**)
+2. This triggered the **web search fallback** via OpenAI Responses API
+3. The web search had no legislator name to search for, so it returned a random Florida legislator (Carlos Guillermo Smith)
+4. The LLM confidently presented the web search results as the answer
+
+Server logs confirmed: `"web_search": true, "confidence_trigger": true` for the failing sessions.
 
 ### Fix (February 2026)
 
-Two-part fix in `retrieval.py` and `webflow_lookup.py`:
-
-**1. Slug → OpenStates ID resolution via Webflow CMS:**
+**Fix 1 — Slug → OpenStates ID resolution (`retrieval.py` + `webflow_lookup.py`):**
 
 Added `_resolve_legislator_id()` method to `RetrievalService`. When a legislator page context has `slug` but no `id`, it calls `WebflowLookupService.get_legislator_details(slug=slug)` to look up the Webflow CMS item and extract the `openstatesid` field.
 
@@ -61,12 +97,9 @@ if effective_context.type == "legislator" and not effective_context.id and effec
         effective_context = PageContext(type="legislator", id=resolved_id, ...)
 ```
 
-**2. Slug/webflow_id fallback in `_build_filters()`:**
-
-Added bill-style fallback chain for legislators:
+Added bill-style fallback chain for legislators in `_build_filters()`:
 
 ```python
-# NEW (fixed)
 elif page_context.type == "legislator":
     if page_context.id:
         filters["legislator_id"] = page_context.id
@@ -76,29 +109,55 @@ elif page_context.type == "legislator":
         filters["slug"] = page_context.slug
 ```
 
-**3. `LegislatorDetailsResult` updated:**
+Added `openstates_id` field to `LegislatorDetailsResult` in `webflow_lookup.py`.
 
-Added `openstates_id` field to `LegislatorDetailsResult` in `webflow_lookup.py`, extracted from the Webflow CMS `openstatesid` field.
+**Fix 2 — Field mismatch (`agent.py` — critical fix):**
+
+Added `"name"` key to the dict returned by `_extract_page_info()`:
+
+```python
+# NEW (fixed)
+def _extract_page_info(self, page_context: PageContext) -> dict:
+    return {
+        "id": page_context.id,
+        "name": page_context.title,    # <-- THIS was missing
+        "title": page_context.title,
+        "jurisdiction": page_context.jurisdiction,
+        "session": getattr(page_context, "session", None),
+        "url": page_context.url,
+    }
+```
+
+Before fix: system prompt showed "No legislator details available"
+After fix: system prompt shows "- Name: Mario Diaz-Balart"
+
+This was the critical fix. With the legislator name in the system prompt, the LLM knows who the user is asking about even when RAG confidence is low, and web search (if triggered) has the correct name to search for.
 
 ### Resolution Flow
 
 ```
-Webflow page → {type: "legislator", slug: "mario-diaz-balart-fl-representative", title: "Mario Diaz-Balart"}
+Webflow page → {type: "legislator", slug: "mario-diazbalart-fl0026us", title: "Mario Diaz-Balart"}
                                     ↓
               _resolve_legislator_id() → Webflow CMS lookup by slug
                                     ↓
-              Gets openstatesid: "ocd-person/abc123..."
+              Gets openstatesid: "ocd-person/7e5729d1-198d-5389-be51-d1e05969729c"
                                     ↓
-              _build_filters() → {legislator_id: "ocd-person/abc123..."}
+              _build_filters() → {legislator_id: "ocd-person/7e5729d1-..."}
                                     ↓
               Pinecone returns ONLY Mario Diaz-Balart's documents
+                                    ↓
+              _extract_page_info() → {"name": "Mario Diaz-Balart", ...}
+                                    ↓
+              System prompt: "- Name: Mario Diaz-Balart"
+                                    ↓
+              LLM knows the correct legislator (even if web search triggers)
 ```
 
 ### Diagnostic Steps
 
 #### 1. Check if slug resolution is working
 
-Look for these log entries:
+Look for these log entries in `sudo journalctl -u votebot`:
 ```
 "Resolved legislator OpenStates ID from slug" slug=... openstates_id=... name=...
 "Built retrieval filters" page_type=legislator filters={"legislator_id": "ocd-person/..."}
@@ -106,7 +165,20 @@ Look for these log entries:
 
 If you see `filters={}` for a legislator page, the resolution failed.
 
-#### 2. Check if Webflow CMS has the openstatesid field
+#### 2. Check if the system prompt includes the legislator name
+
+Look for log entries showing the system prompt content. If you see "No legislator details available" for a legislator page, the `_extract_page_info()` → `_format_legislator_info()` chain is broken.
+
+#### 3. Check if web search is overriding RAG results
+
+Look for:
+```
+"web_search": true, "confidence_trigger": true
+```
+
+If web search triggers on a legislator page, it may indicate the RAG confidence is below the `legislator_threshold` (0.7). This is less of a problem now that the system prompt includes the legislator name, since the web search will at least search for the correct person.
+
+#### 4. Check if Webflow CMS has the openstatesid field
 
 ```python
 import asyncio
@@ -120,10 +192,10 @@ async def check_legislator_id(slug):
     print(f"Name: {result.name}")
     print(f"OpenStates ID: {result.openstates_id}")
 
-asyncio.run(check_legislator_id("mario-diaz-balart-fl-representative"))
+asyncio.run(check_legislator_id("mario-diazbalart-fl0026us"))
 ```
 
-#### 3. Verify the Webflow template sends slug
+#### 5. Verify the Webflow template sends slug
 
 The Webflow legislator CMS template custom code should include:
 ```javascript
@@ -144,9 +216,17 @@ window.DDPChatConfig.pageContext = {
 | Fallback 2 | — | `slug` |
 | Pre-retrieval resolution | `_lookup_bill_slug()` (from query) | `_resolve_legislator_id()` (from Webflow CMS) |
 
+### Lessons Learned
+
+1. **Check server logs before making assumptions**: The initial assumption was that Webflow wasn't sending the slug. Logs showed it was — the slug resolution worked perfectly.
+2. **Field name mismatches are silent**: `info.get("name")` returning `None` doesn't raise an error — it just silently omits the legislator name from the prompt.
+3. **Web search is a double-edged sword**: When RAG confidence is low and the system prompt lacks key context, web search can confidently return wrong information.
+4. **Multi-layer bugs require end-to-end debugging**: Fixing retrieval alone was insufficient. The full chain (Webflow → retrieval → system prompt → LLM → web search) all had to work correctly.
+
 ### Prevention
 
-Ensure all Webflow CMS legislator items have the `openstatesid` field populated. Legislators without this field are skipped during ingestion (see `webflow.py:955-957`), so they won't have documents in Pinecone and the slug resolution will fail.
+- Ensure all Webflow CMS legislator items have the `openstatesid` field populated. Legislators without this field are skipped during ingestion (see `webflow.py:955-957`), so they won't have documents in Pinecone and the slug resolution will fail.
+- When adding new page context fields, verify that `_extract_page_info()` maps them to the keys expected by the corresponding `_format_*_info()` function in `prompts.py`.
 
 ---
 
