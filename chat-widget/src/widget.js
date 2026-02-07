@@ -450,15 +450,17 @@
 
         // Decide initial message
         var initialMessage = null;
-        var contextChangeMsg = null;
         if (!isReturning) {
             // New session — show welcome message
             initialMessage = config.welcomeMessage || generateWelcomeMessage(pageContext);
         } else if (contextChanged(previousContext, pageContext)) {
-            // Returning session + different page — show context-change notice after restore
-            contextChangeMsg = generateContextChangeMessage(pageContext);
+            // Returning session + different entity — start fresh session
+            // Old conversation history would confuse the LLM about the new entity
+            DDPWebSocket.storageRemove('session_id');
+            isReturning = false;
+            initialMessage = generateWelcomeMessage(pageContext);
         }
-        // Returning + same context → no extra message
+        // Returning + same context → no extra message (session will be restored)
 
         // Create container element
         var container = document.createElement('div');
@@ -508,17 +510,6 @@
                 // Server lost the session — show welcome message instead
                 originalHandler(data);
                 DDPUI.addSystemMessage(config.welcomeMessage || generateWelcomeMessage(pageContext));
-                // Unwrap — no longer need interception
-                // Further messages go directly to original handler
-                return;
-            }
-
-            // After session_restored, append context-change message
-            if (data.type === 'session_restored') {
-                originalHandler(data);
-                if (contextChangeMsg) {
-                    DDPUI.addSystemMessage(contextChangeMsg);
-                }
                 return;
             }
 
