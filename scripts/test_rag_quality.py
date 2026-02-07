@@ -170,6 +170,15 @@ class DynamicTestGenerator:
                     "ground_truth_field": "bills_support_names",
                     "min_matches": 1,
                 },
+                {
+                    "id": "{slug}_opposed_bills",
+                    "prompt": "What bills does {name} oppose?",
+                    "category": "org_positions",
+                    "condition": "has_opposed_bills",
+                    "validation": "contains_any",
+                    "ground_truth_field": "bills_oppose_names",
+                    "min_matches": 1,
+                },
             ],
         }
 
@@ -284,6 +293,7 @@ class DynamicTestGenerator:
                     "min_matches": template.get("min_matches", 1),
                     "entity_type": "organization",
                     "entity_slug": org.slug,
+                    "webflow_id": org.webflow_id,
                 })
 
         return test_cases
@@ -343,13 +353,25 @@ class RAGQualityTester:
         validation_mode = test_case.get("validation", "contains")
         min_matches = test_case.get("min_matches", 1)
 
-        # Build page context (legislators get special treatment)
+        # Build page context based on entity type
         page_context = {"type": "general"}
         if test_case.get("openstates_id"):
             page_context = {
                 "type": "legislator",
                 "id": test_case["openstates_id"],
                 "jurisdiction": test_case.get("jurisdiction", "US"),
+            }
+        elif test_case.get("entity_type") == "bill" and test_case.get("webflow_id"):
+            page_context = {
+                "type": "bill",
+                "webflow_id": test_case["webflow_id"],
+                "slug": test_case.get("entity_slug", ""),
+            }
+        elif test_case.get("entity_type") == "organization" and test_case.get("webflow_id"):
+            page_context = {
+                "type": "organization",
+                "webflow_id": test_case["webflow_id"],
+                "slug": test_case.get("entity_slug", ""),
             }
 
         resp = await self.client.send_message(prompt, page_context=page_context)

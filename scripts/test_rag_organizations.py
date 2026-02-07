@@ -181,7 +181,14 @@ async def _run_single_mode_ground_truth(
 
     results = []
     for i, tc in enumerate(test_cases):
-        resp = await client.send_message(tc["prompt"])
+        page_context = {"type": "general"}
+        if tc.get("webflow_id"):
+            page_context = {
+                "type": "organization",
+                "webflow_id": tc["webflow_id"],
+                "slug": tc.get("entity_slug", ""),
+            }
+        resp = await client.send_message(tc["prompt"], page_context=page_context)
 
         result = TestResult(
             test_id=tc["id"],

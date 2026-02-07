@@ -12,7 +12,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
 - **Multi-Phase Retrieval**: For bill queries, prioritizes legislative text over CMS summaries, with dedicated phases for organization positions and vote records
 - **Organization-Aware Retrieval**: Automatically detects organization-focused queries and prioritizes org documents, fetching all related chunks for complete bill position data
-- **Webflow CMS Runtime Lookup**: Fetches authoritative organization positions directly from Webflow CMS at runtime for bill→org queries, bypassing Pinecone similarity thresholds (99.1% accuracy)
+- **Webflow CMS Runtime Lookup**: Bidirectional Webflow CMS pre-fetch — fetches authoritative org positions for bill→org queries (99.1%) and bill positions for org→bill queries (100%), bypassing Pinecone similarity thresholds
 - **Bill Info Tool**: Real-time OpenStates lookups for full bill details (status, sponsors, votes) on bills not in the RAG system
   - Automatic jurisdiction detection from message text ("Virginia HB 2724" → VA)
   - Session year fallback (tries current year, then previous 2 years)
@@ -496,12 +496,12 @@ VoteBot uses a unified sync service for all content types. The primary data sour
 
 VoteBot maintains bidirectional linkages between content types:
 
-| Relationship | Direction | Content |
-|--------------|-----------|---------|
-| Bill ↔ Organization | Bill → Org | "Organizations Supporting/Opposing This Bill" |
-| Bill ↔ Organization | Org → Bill | "Bills Supported/Opposed" with DDP links |
-| Bill → Legislator | Vote Records | `[ocd-person/uuid]Name (Party-State)` format |
-| Legislator → Bill | Voting Record | `legislator-votes-{person_uuid}` documents |
+| Relationship | Direction | Content | Runtime Lookup |
+|--------------|-----------|---------|----------------|
+| Bill ↔ Organization | Bill → Org | "Organizations Supporting/Opposing This Bill" | Webflow CMS (99.1%) |
+| Bill ↔ Organization | Org → Bill | "Bills Supported/Opposed" with DDP links | Webflow CMS (100%) |
+| Bill → Legislator | Vote Records | `[ocd-person/uuid]Name (Party-State)` format | OpenStates API |
+| Legislator → Bill | Voting Record | `legislator-votes-{person_uuid}` documents | — |
 
 ### Full Rebuild Script
 
@@ -630,7 +630,7 @@ votebot/
 │   │   ├── vector_store.py  # Pinecone operations
 │   │   ├── web_search.py    # Tavily web search
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
-│   │   ├── webflow_lookup.py # Runtime Webflow CMS org position lookup
+│   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill)
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service
 │   │   ├── service.py       # UnifiedSyncService
@@ -761,10 +761,12 @@ PYTHONPATH=src python scripts/test_rag_quality.py --dynamic --limit 10
 |----------|-------------|------|
 | Bills | 310/312 | **99.4%** |
 | Legislators | 290/300 | 97% |
-| Organizations | 249/259 | 96% |
-| **Overall** | **849/871** | **97.5%** |
+| Organizations | 290/292 | **99.3%** |
+| **Overall** | **890/904** | **98.5%** |
 
-**Bill→Org positions**: 111/112 (99.1%) — up from 82.1% after Phase 4a-i, and 58.9% before that. The Webflow CMS runtime lookup (`WebflowLookupService`) fetches authoritative org position data directly from CMS, bypassing Pinecone similarity thresholds.
+**Webflow CMS Runtime Lookup** (`WebflowLookupService`) fetches authoritative position data directly from CMS in both directions, bypassing Pinecone similarity thresholds:
+- **Bill→Org positions**: 111/112 (99.1%) — up from 82.1% after Phase 4a-i, and 58.9% before
+- **Org→Bill positions**: 99/99 (100%) — up from ~96% with Pinecone-only retrieval
 
 Top jurisdictions (bills): MI 100%, WA 100%, VA 100%, FL 100%, US 100%, MA 100%, AZ 98%, UT 96%. All jurisdictions now ≥96%.
 
@@ -786,7 +788,7 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 
 - Legislator vote lookups not working
 - Corrupted legislator-votes documents (chunk boundary parsing issues)
-- Organization retrieval issues (bill positions, org type detection)
+- Organization retrieval issues (bill→org, org→bill, org type detection)
 - Bill identifier extraction (HJR, SJR, HCR, SCR patterns)
 - Organization chunk data quality (aggressive chunking)
 - Missing data in search results
