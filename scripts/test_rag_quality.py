@@ -120,6 +120,14 @@ class DynamicTestGenerator:
                     "ground_truth_field": "oppose_org_names",
                     "min_matches": 1,
                 },
+                {
+                    "id": "{slug}_dispute_summary",
+                    "prompt": "Can you verify what {jurisdiction_name} {bill_id} is about? I want to make sure the information is correct.",
+                    "category": "bill_dispute",
+                    "validation": "keywords",
+                    "ground_truth_field": "description_keywords",
+                    "min_matches": 2,
+                },
             ],
             "legislator_templates": [
                 {
@@ -140,6 +148,13 @@ class DynamicTestGenerator:
                     "id": "{slug}_party",
                     "prompt": "What party is {name} affiliated with?",
                     "category": "legislator_party",
+                    "validation": "contains",
+                    "ground_truth_field": "party",
+                },
+                {
+                    "id": "{slug}_dispute_party",
+                    "prompt": "Are you sure {name} is a {party}? Can you verify their party affiliation?",
+                    "category": "legislator_dispute",
                     "validation": "contains",
                     "ground_truth_field": "party",
                 },
@@ -177,6 +192,15 @@ class DynamicTestGenerator:
                     "condition": "has_opposed_bills",
                     "validation": "contains_any",
                     "ground_truth_field": "bills_oppose_names",
+                    "min_matches": 1,
+                },
+                {
+                    "id": "{slug}_dispute_type",
+                    "prompt": "Double check what type of organization {name} is. I want to make sure.",
+                    "category": "org_dispute",
+                    "condition": "has_type",
+                    "validation": "contains_any",
+                    "ground_truth_field": "org_type_keywords",
                     "min_matches": 1,
                 },
             ],
@@ -256,6 +280,7 @@ class DynamicTestGenerator:
                     "min_matches": template.get("min_matches", 1),
                     "entity_type": "legislator",
                     "entity_slug": legislator.slug,
+                    "webflow_id": legislator.webflow_id,
                     "jurisdiction": legislator.jurisdiction,
                     # Preserve legislator-specific context for page_context
                     "openstates_id": legislator.openstates_id,
@@ -360,6 +385,8 @@ class RAGQualityTester:
                 "type": "legislator",
                 "id": test_case["openstates_id"],
                 "jurisdiction": test_case.get("jurisdiction", "US"),
+                "webflow_id": test_case.get("webflow_id", ""),
+                "slug": test_case.get("entity_slug", ""),
             }
         elif test_case.get("entity_type") == "bill" and test_case.get("webflow_id"):
             page_context = {

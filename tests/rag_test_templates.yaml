@@ -19,6 +19,11 @@
 # =============================================================================
 # BILL TEST TEMPLATES
 # =============================================================================
+#
+# Dispute templates use trigger phrases ("verify", "are you sure", "double check")
+# that activate Webflow CMS verification in agent.py. The response should still
+# contain the same ground truth data — the CMS verification reinforces accuracy.
+#
 bill_templates:
   - id: "{slug}_summary"
     prompt: "What is {jurisdiction_name} {bill_id} about?"
@@ -104,6 +109,29 @@ bill_templates:
     ground_truth_field: oppose_keywords
     min_matches: 2
 
+  # --- Dispute/Verification Templates (trigger Webflow CMS verification) ---
+  - id: "{slug}_dispute_summary"
+    prompt: "Can you verify what {jurisdiction_name} {bill_id} is about? I want to make sure the information is correct."
+    category: bill_dispute
+    validation: keywords
+    ground_truth_field: description_keywords
+    min_matches: 2
+
+  - id: "{slug}_dispute_title"
+    prompt: "Are you sure that's the correct title for {jurisdiction_name} {bill_id}? Double check for me."
+    category: bill_dispute
+    validation: contains_any
+    ground_truth_field: name_keywords
+    min_matches: 2
+
+  - id: "{slug}_dispute_orgs"
+    prompt: "I don't think that's right about the organizations on {jurisdiction_name} {bill_id}. Can you verify which organizations support it?"
+    category: bill_dispute
+    condition: has_support_orgs
+    validation: contains_any
+    ground_truth_field: support_org_names
+    min_matches: 1
+
 # =============================================================================
 # LEGISLATOR TEST TEMPLATES
 # =============================================================================
@@ -133,6 +161,19 @@ legislator_templates:
     ground_truth_field: sponsored_bills
     min_matches: 1
     # Falls back to checking for "bill" if no OpenStates data
+
+  # --- Dispute/Verification Templates (trigger Webflow CMS verification) ---
+  - id: "{slug}_dispute_party"
+    prompt: "Are you sure {name} is a {party}? Can you verify their party affiliation?"
+    category: legislator_dispute
+    validation: contains
+    ground_truth_field: party
+
+  - id: "{slug}_dispute_chamber"
+    prompt: "I don't think that's right. Can you confirm what chamber {name} serves in?"
+    category: legislator_dispute
+    validation: contains
+    ground_truth_field: chamber
 
 # =============================================================================
 # ORGANIZATION TEST TEMPLATES
@@ -174,3 +215,20 @@ organization_templates:
     validation: keywords
     ground_truth_field: about_keywords
     min_matches: 2
+
+  # --- Dispute/Verification Templates (trigger Webflow CMS verification) ---
+  - id: "{slug}_dispute_type"
+    prompt: "Double check what type of organization {name} is. I want to make sure."
+    category: org_dispute
+    condition: has_type
+    validation: contains_any
+    ground_truth_field: org_type_keywords
+    min_matches: 1
+
+  - id: "{slug}_dispute_bills"
+    prompt: "Are you sure about what bills {name} supports? Can you verify that?"
+    category: org_dispute
+    condition: has_supported_bills
+    validation: contains_any
+    ground_truth_field: bills_support_names
+    min_matches: 1

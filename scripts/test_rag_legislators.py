@@ -135,6 +135,17 @@ LEGISLATOR_QUESTIONS = [
         "keywords": ["position", "issue", "stance", "policy", "vote"],
         "description": "Issue positions query",
     },
+    # Dispute/verification follow-ups (trigger Webflow CMS verification)
+    {
+        "question": "Are you sure about their party? Can you verify that?",
+        "keywords": ["party", "republican", "democrat", "democratic", "verify", "confirm"],
+        "description": "Dispute party affiliation (triggers CMS verification)",
+    },
+    {
+        "question": "I don't think that's right about their district. Double check for me.",
+        "keywords": ["district", "represent", "area"],
+        "description": "Dispute district info (triggers CMS verification)",
+    },
 ]
 
 
@@ -219,16 +230,24 @@ def _resolve_jurisdiction(jurisdiction_ref) -> str:
     return "US"
 
 
-def _build_page_context(legislator_id: str, jurisdiction: str) -> dict:
+def _build_page_context(
+    legislator_id: str,
+    jurisdiction: str,
+    webflow_id: str = "",
+    slug: str = "",
+) -> dict:
     """Build the critical legislator page context for API calls.
 
     This page context is unique to legislator tests and enables the API
-    to scope retrieval to the specific legislator.
+    to scope retrieval to the specific legislator. Includes webflow_id
+    and slug for Webflow CMS verification on disputes.
     """
     return {
         "type": "legislator",
         "id": legislator_id,
         "jurisdiction": jurisdiction,
+        "webflow_id": webflow_id,
+        "slug": slug,
     }
 
 
@@ -246,7 +265,9 @@ async def _run_single_mode_standalone(
         legislator_id = fields.get("openstatesid", "")
         jurisdiction_ref = fields.get("jurisdiction", "")
         jurisdiction = _resolve_jurisdiction(jurisdiction_ref)
-        page_context = _build_page_context(legislator_id, jurisdiction)
+        webflow_id = legislator.get("id", "")
+        slug = fields.get("slug", "")
+        page_context = _build_page_context(legislator_id, jurisdiction, webflow_id=webflow_id, slug=slug)
 
         if verbose:
             print(f"\n  [{i + 1}/{len(legislators)}] Testing: {name} ({jurisdiction})")
@@ -319,6 +340,8 @@ async def _run_single_mode_ground_truth(
         page_context = _build_page_context(
             tc.get("openstates_id", ""),
             tc.get("jurisdiction", "US"),
+            webflow_id=tc.get("webflow_id", ""),
+            slug=tc.get("entity_slug", ""),
         )
 
         resp = await client.send_message(tc["prompt"], page_context=page_context)
@@ -388,7 +411,9 @@ async def _run_multi_mode(
         legislator_id = fields.get("openstatesid", "")
         jurisdiction_ref = fields.get("jurisdiction", "")
         jurisdiction = _resolve_jurisdiction(jurisdiction_ref)
-        page_context = _build_page_context(legislator_id, jurisdiction)
+        webflow_id = legislator.get("id", "")
+        slug = fields.get("slug", "")
+        page_context = _build_page_context(legislator_id, jurisdiction, webflow_id=webflow_id, slug=slug)
         session_id = f"test-leg-multi-{uuid.uuid4().hex[:8]}"
 
         # Select 3-4 random questions for multi-turn conversation

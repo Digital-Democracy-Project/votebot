@@ -71,6 +71,7 @@ BILL_QUESTION_TEMPLATES = [
             "What are the main arguments in support of this bill?",
             "What are the arguments against it?",
             "What is the current status of this bill?",
+            "Are you sure about that? Can you verify?",
         ]
     },
     {
@@ -78,6 +79,7 @@ BILL_QUESTION_TEMPLATES = [
         "follow_ups": [
             "Who sponsored this legislation?",
             "What committee is it assigned to?",
+            "I don't think that's right. Double check for me.",
         ]
     },
     {
@@ -92,6 +94,7 @@ BILL_QUESTION_TEMPLATES = [
         "follow_ups": [
             "What's the bill number?",
             "Has there been any public debate on this?",
+            "That doesn't sound right. Can you confirm?",
         ]
     },
 ]
@@ -104,6 +107,7 @@ VOTE_QUESTION_TEMPLATES = [
             "Who voted yes on this bill?",
             "Who voted no?",
             "Was this a close vote?",
+            "Are you sure about that? Verify the vote results.",
         ]
     },
     {
@@ -120,6 +124,7 @@ VOTE_QUESTION_TEMPLATES = [
             "What was the final vote tally?",
             "Who were the key supporters?",
             "Were there any surprising votes?",
+            "That can't be right. Check your sources.",
         ]
     },
     {
@@ -135,6 +140,7 @@ VOTE_QUESTION_TEMPLATES = [
             "What were their reasons for voting no?",
             "How many Democrats voted against it?",
             "How many Republicans voted against it?",
+            "I don't believe that. Can you double check?",
         ]
     },
 ]
@@ -353,6 +359,14 @@ async def _run_multi_mode(
         template = random.choice(all_templates)
         session_id = f"test-bill-multi-{uuid.uuid4().hex[:8]}"
 
+        # Build page_context with webflow_id and slug for CMS verification
+        page_context = {
+            "type": "bill",
+            "webflow_id": bill.get("webflow_id", ""),
+            "slug": bill.get("slug", ""),
+            "jurisdiction": jurisdiction,
+        }
+
         initial = template["initial"].format(
             bill_title=title, jurisdiction=jurisdiction, topic=topic,
         )
@@ -365,7 +379,7 @@ async def _run_multi_mode(
         ]
 
         for turn_idx, prompt in enumerate(prompts):
-            resp = await client.send_message(prompt, session_id=session_id, page_context={"type": "bill"})
+            resp = await client.send_message(prompt, session_id=session_id, page_context=page_context)
 
             result = TestResult(
                 test_id=f"{session_id}-turn{turn_idx}",

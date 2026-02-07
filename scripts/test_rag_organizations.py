@@ -61,6 +61,9 @@ ORGANIZATION_QUESTIONS = [
     "Who funds {name}?",
     "What organizations are affiliated with {name}?",
     "Tell me about {name}'s stance on legislation.",
+    # Dispute/verification follow-ups (trigger Webflow CMS verification)
+    "Are you sure about {name}'s bill positions? Can you verify that?",
+    "I don't think that's right about {name}. Double check for me.",
 ]
 
 
@@ -260,8 +263,15 @@ async def _run_multi_mode(
         if verbose:
             print(f"\n  Multi-turn: {org['name'][:40]}")
 
+        # Build page_context with webflow_id and slug for CMS verification
+        page_context = {
+            "type": "organization",
+            "webflow_id": org.get("webflow_id", ""),
+            "slug": org.get("slug", ""),
+        }
+
         for turn_idx, prompt in enumerate(prompts):
-            resp = await client.send_message(prompt, session_id=session_id)
+            resp = await client.send_message(prompt, session_id=session_id, page_context=page_context)
 
             result = TestResult(
                 test_id=f"{session_id}-turn{turn_idx}",
