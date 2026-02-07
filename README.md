@@ -12,6 +12,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
 - **Multi-Phase Retrieval**: For bill queries, prioritizes legislative text over CMS summaries, with dedicated phases for organization positions and vote records
 - **Organization-Aware Retrieval**: Automatically detects organization-focused queries and prioritizes org documents, fetching all related chunks for complete bill position data
+- **Webflow CMS Runtime Lookup**: Fetches authoritative organization positions directly from Webflow CMS at runtime for bill→org queries, bypassing Pinecone similarity thresholds (99.1% accuracy)
 - **Bill Info Tool**: Real-time OpenStates lookups for full bill details (status, sponsors, votes) on bills not in the RAG system
   - Automatic jurisdiction detection from message text ("Virginia HB 2724" → VA)
   - Session year fallback (tries current year, then previous 2 years)
@@ -365,6 +366,7 @@ VoteBot includes a real-time bill information lookup tool that enables fetching 
 |----------|-------------|---------|
 | `BILL_VOTES_TOOL_ENABLED` | Enable the bill info tool | `true` |
 | `BILL_VOTES_RAG_CONFIDENCE_THRESHOLD` | RAG confidence below which tool is enabled | `0.4` |
+| `WEBFLOW_ORG_LOOKUP_ENABLED` | Enable runtime Webflow CMS lookup for org positions | `true` |
 
 ### Function Schema
 
@@ -628,6 +630,7 @@ votebot/
 │   │   ├── vector_store.py  # Pinecone operations
 │   │   ├── web_search.py    # Tavily web search
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
+│   │   ├── webflow_lookup.py # Runtime Webflow CMS org position lookup
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service
 │   │   ├── service.py       # UnifiedSyncService
@@ -756,12 +759,16 @@ PYTHONPATH=src python scripts/test_rag_quality.py --dynamic --limit 10
 
 | Category | Passed/Total | Rate |
 |----------|-------------|------|
-| Bills | 289/312 | 93% |
+| Bills | 310/312 | **99.4%** |
 | Legislators | 290/300 | 97% |
 | Organizations | 249/259 | 96% |
-| **Overall** | **828/871** | **95.1%** |
+| **Overall** | **849/871** | **97.5%** |
 
-Top jurisdictions: MI 100%, WA 96%, VA 96%, FL 95%, AZ 93%. Bills improved from 85%→93% after Phase 4a-i fix (searching bill's own org-position chunks). Remaining failures are primarily federal bills missing org data and test validation false positives (legislator name expansion). See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-sample) for detailed failure analysis.
+**Bill→Org positions**: 111/112 (99.1%) — up from 82.1% after Phase 4a-i, and 58.9% before that. The Webflow CMS runtime lookup (`WebflowLookupService`) fetches authoritative org position data directly from CMS, bypassing Pinecone similarity thresholds.
+
+Top jurisdictions (bills): MI 100%, WA 100%, VA 100%, FL 100%, US 100%, MA 100%, AZ 98%, UT 96%. All jurisdictions now ≥96%.
+
+See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-sample) for detailed failure analysis.
 
 ## Performance Targets
 

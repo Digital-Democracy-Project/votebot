@@ -475,15 +475,27 @@ VoteBot fails to answer questions about organization positions on bills, or retu
 #### Bill→Org: Retrieval pipeline filters out org data
 When a bill identifier is detected in a query, the retrieval pipeline activates bill-priority mode, which searches only for `document_type="bill"`, `"bill-text"`, `"bill-history"`, and `"bill-votes"`. Organization documents are excluded by these filters.
 
-**Fix (implemented February 2026)**: Added two-phase organization retrieval to `_retrieve_bill_with_text_priority()` in `retrieval.py`:
+**Fix history:**
 
-**Phase 4a-i (bill's own org positions)**: Searches the bill's own `document_type="bill"` chunks with a targeted semantic query (`"organization positions supporting opposing this bill"`) designed to match the `## Organization Positions` section added during bill sync (see `webflow.py:1597-1633`). Uses the same `webflow_id` filter to stay scoped to the current bill. Results are re-ranked to prioritize chunks containing org position markers ("organization positions", "organizations supporting", "organizations opposing"). This phase improved the bill→org template pass rate from **58.9% to 82.1%** (46→20 failures).
+**Phase 4a-i + 4a-ii (Pinecone retrieval, February 2026)**: Added two-phase organization retrieval to `_retrieve_bill_with_text_priority()` in `retrieval.py`. Phase 4a-i searches the bill's own `document_type="bill"` chunks with a targeted semantic query for org positions. Phase 4a-ii falls back to standalone `document_type="organization"` docs. This improved bill→org from **58.9% to 82.1%**, but 20/112 tests still failed due to:
+- 13 bills with org data in Pinecone but similarity scores (0.35-0.56) below the 0.7 threshold
+- 4 bills with NO org position data in Pinecone at all
+- 3 edge cases (training data collision, wrong bill matched)
 
-**Phase 4a-ii (standalone org documents, fallback)**: Searches `document_type="organization"` without the bill slug filter as a fallback. This phase:
-1. Detects org-related keywords in bill queries (e.g., "organizations", "support", "oppose", "position")
-2. Builds a query from the bill's slug words for semantic matching
-3. Post-filters results to prioritize org chunks that reference the specific bill by slug
-4. Remaining org slots are reduced by the number of chunks already found in Phase 4a-i
+**Webflow CMS Runtime Lookup (February 2026)**: Bypasses Pinecone entirely by fetching org positions directly from Webflow CMS at runtime. The `WebflowLookupService` (`services/webflow_lookup.py`) pre-fetches authoritative org data before LLM generation, similar to the vote verification pre-fetch pattern. This resolved the remaining failures, improving bill→org from **82.1% to 99.1%** (111/112 passed).
+
+How it works:
+1. `agent.py` detects org-related queries via `_is_org_position_query()` (same keyword list as `retrieval.py:314-319`)
+2. If the query is on a bill page (`page_context.type == "bill"`), `_prefetch_bill_org_positions()` is called
+3. `WebflowLookupService.get_bill_org_positions(webflow_id, slug)` fetches the bill from Webflow CMS
+4. Extracts `member-organizations` and `organizations-oppose` reference ID lists from `fieldData`
+5. Resolves each org ID to `{name, type, slug}` via parallel `asyncio.gather` calls with in-memory caching
+6. Formats as markdown labeled "Authoritative Source — Webflow CMS" and prepends to LLM context
+
+Configuration:
+- Feature flag: `WEBFLOW_ORG_LOOKUP_ENABLED` (default: `true`)
+- Requires `webflow_id` or `slug` in `page_context` (the chat widget provides these via `/content/resolve`)
+- Graceful degradation: if Webflow API fails, falls back silently to existing Pinecone retrieval
 
 #### Org type: Unfiltered semantic search
 Generic queries about an organization (e.g., "What type of organization is X?") go through the default semantic search, which may return random documents instead of the target org's profile.
@@ -1012,60 +1024,54 @@ The test suite reports:
 
 **Large sample (100 documents per category, 884 tests, 871 validated):**
 
-| Category | Passed | Total | Rate |
-|----------|--------|-------|------|
-| Bills | 289 | 312 | **93%** |
-| Legislators | 290 | 300 | **97%** |
-| Organizations | 249 | 259 | **96%** |
-| DDP | — | 8 | N/A |
-| Out-of-system votes | — | 5 | N/A |
-| **Overall** | **828** | **871** | **95.1%** |
+| Category | Passed | Total | Rate | Notes |
+|----------|--------|-------|------|-------|
+| Bills | 310 | 312 | **99.4%** | After Webflow CMS lookup (was 93% before) |
+| Legislators | 290 | 300 | **97%** | |
+| Organizations | 249 | 259 | **96%** | |
+| DDP | — | 8 | N/A | |
+| Out-of-system votes | — | 5 | N/A | |
+| **Overall** | **849** | **871** | **97.5%** | |
 
-**By jurisdiction (bills category, post Phase 4a-i fix):**
+**Bill→Org template pass rate progression:**
+- **58.9%** (66/112) — Before Phase 4a-i fix
+- **82.1%** (92/112) — After Phase 4a-i fix (Pinecone bill chunk search)
+- **99.1%** (111/112) — After Webflow CMS runtime lookup
+
+**By jurisdiction (bills category, post Webflow CMS lookup):**
 
 | Jurisdiction | Passed/Total | Rate |
 |-------------|-------------|------|
 | MA | 4/4 | 100% |
 | MI | 27/27 | 100% |
-| WA | 96/100 | 96% |
-| VA | 65/68 | 96% |
-| FL | 19/20 | 95% |
-| AZ | 38/41 | 93% |
-| UT | 24/27 | 89% |
-| US | 16/25 | 64% |
+| WA | 100/100 | 100% |
+| VA | 68/68 | 100% |
+| FL | 20/20 | 100% |
+| US | 25/25 | 100% |
+| AZ | 40/41 | 98% |
+| UT | 26/27 | 96% |
 
-Notable improvements after the Phase 4a-i fix: MI went from 78% to **100%**, WA from 85% to **96%**, VA from 88% to **96%**. US (federal) remains the weakest at 64% — many federal bills lack org positions in Pinecone.
+Notable improvements after Webflow CMS lookup: US (federal) went from 64% to **100%**, WA from 96% to **100%**, VA from 96% to **100%**, FL from 95% to **100%**. All jurisdictions now ≥96%.
 
-**Aggregate metrics:** Avg confidence 0.76, avg latency 9.7s, P95 latency 18.3s, citation rate 55.8%.
+**Aggregate metrics:** Avg confidence 0.78, avg latency 8.6s, P95 latency 18.0s, citation rate 76.5%.
 
 ### Failure Analysis (100-Document Sample)
 
-43 total failures across 4 clusters (down from 68 after Phase 4a-i fix):
+#### Bills: 2 failures (down from 43 → 23 → 2 across iterative fixes)
 
-#### Cluster 1: Bill → Org Positions (20 failures, 46.5% of all failures)
+**After Webflow CMS Lookup (current)**: 310/312 passed (99.4%). Only 2 remaining failures:
 
-**Template**: "Which organizations support/oppose [bill]?"
-**Pass rate for this template**: 92/112 (82.1%) — improved from 58.9% after Phase 4a-i fix
+1. **UT HB 88 oppose_orgs** (1 failure): Organization lookup edge case — the single remaining bill→org failure out of 112 org-position tests
+2. **AZ SB 1070 summary** (1 failure): LLM training data collision — the bill number "SB 1070" was reused, and the LLM confuses it with the famous 2010 Arizona immigration law
 
-**Before (Phase 4a only)**: The retrieval pipeline found the bill but searched only standalone `document_type="organization"` docs. These org chunks are too small (just headers) or don't contain the bill slug, leading to 46 failures.
+**Bill→Org improvement history:**
+- **58.9%** (66/112) — Before Phase 4a-i (Pinecone-only retrieval)
+- **82.1%** (92/112) — After Phase 4a-i (bill chunk search)
+- **99.1%** (111/112) — After Webflow CMS runtime lookup (**current**)
 
-**After (Phase 4a-i + 4a-ii)**: Phase 4a-i now searches the bill's own `document_type="bill"` chunks with a targeted query for org positions. Bill documents already contain `## Organization Positions` sections (added during sync), so this targeted query reliably surfaces org data. Phase 4a-ii (standalone org docs) remains as fallback. This reduced failures from 46 to 20 — a **56.5% reduction**.
+The Webflow CMS lookup eliminated the 20 remaining Pinecone-based failures by fetching org positions directly from the authoritative CMS source, bypassing similarity threshold issues entirely.
 
-The remaining 20 failures are concentrated in:
-- **Federal bills (7 failures)**: Many federal bills lack `## Organization Positions` sections in their content
-- **Scattered state bills (13)**: Bills without org position data indexed in Pinecone
-
-**Fix needed for remaining failures**: Re-ingest organization documents with larger chunks, and ensure all bills with org positions have that data in their Pinecone chunks. Federal bill coverage is a known gap.
-
-#### Cluster 2: Org → Bills Supported (10 failures, 14.7%)
-
-**Template**: "What bills does [org] support?"
-
-Same root cause as Cluster 1 but in the reverse direction. The org document chunks retrieved by `_retrieve_organization_priority()` contain the org header but not the bill position lists. Even with the all-chunks fetch mitigation, some org documents simply don't have bill position content indexed in Pinecone.
-
-**Fix needed**: Same as Cluster 1 — re-ingestion with better chunking strategy.
-
-#### Cluster 3: Legislator Validation False Failures (10 failures, 14.7%)
+#### Legislators: ~10 failures (unchanged — test validation issues)
 
 Two distinct sub-issues that are **test validation problems, not retrieval problems**:
 
@@ -1081,26 +1087,21 @@ Examples:
 
 **Fix needed**: Update legislator name validation to use `contains_any` with name parts (first name + last name separately) instead of exact `contains` for the full name string. Also skip district validation for senators (district "0").
 
-#### Cluster 4: Bill Title/Summary Edge Cases (2 failures, 2.9%)
+#### Organizations: ~10 failures (Org→Bill direction)
 
-- **HR 4090**: Zero confidence, empty response — bill not in Pinecone index
-- **AZ SB 1070**: LLM answered with the famous 2010 immigration law ("Support Our Law Enforcement and Safe Neighborhoods Act") from training data, overriding the CMS entry which is a different bill
+**Template**: "What bills does [org] support?"
 
-**Fix needed**: These are inherent edge cases. HR 4090 needs re-ingestion. SB 1070 is an LLM training data collision — the bill number was reused for a different bill in a different session.
+The org document chunks retrieved by `_retrieve_organization_priority()` contain the org header but not the bill position lists. Even with the all-chunks fetch mitigation, some org documents simply don't have bill position content indexed in Pinecone.
 
-### Adjusted Pass Rate
-
-Excluding the 10 false failures from Cluster 3 (correct responses flagged as failures due to validation issues), the true pass rate is:
-
-**828 / 861 = 96.2%** (adjusted) vs 95.1% (raw)
+**Fix needed**: Re-ingestion with better chunking strategy, or extend the Webflow CMS lookup to org→bill direction.
 
 ### Common Failure Patterns
 
-1. **Bill→Org and Org→Bill relationship queries** (30/43 failures): Organization position data not always retrievable. Phase 4a-i fix (searching bill's own chunks) reduced bill→org failures from 46 to 20. Remaining failures are bills without org position data in Pinecone. See [Organization Chunk Data Quality](#organization-chunk-data-quality).
+1. **Org→Bill relationship queries** (~10 failures): Organization-to-bill direction still relies on Pinecone. Consider extending Webflow CMS lookup for this direction.
 
-2. **Legislator name validation** (7/68 failures): LLM expands short names to legal names. Need `contains_any` validation with name parts.
+2. **Legislator name validation** (~7 false failures): LLM expands short names to legal names. Need `contains_any` validation with name parts.
 
-3. **Senator district validation** (3/68 failures): CMS stores "0" for senators. Need to skip district validation for at-large representatives.
+3. **Senator district validation** (~3 false failures): CMS stores "0" for senators. Need to skip district validation for at-large representatives.
 
 4. **Bill title exact match**: The LLM may paraphrase bill titles. The test suite uses `contains_any` with `name_keywords` (bill ID + title keywords, min 2 matches) to handle this.
 

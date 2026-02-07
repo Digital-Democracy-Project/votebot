@@ -18,6 +18,7 @@ from votebot.core.retrieval import RetrievalService
 from votebot.services.bill_votes import BillVotesService
 from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
 from votebot.services.web_search import WebSearchService, WebSearchResult
+from votebot.services.webflow_lookup import WebflowLookupService, format_org_positions_context
 
 logger = structlog.get_logger()
 
@@ -74,6 +75,7 @@ class VoteBotAgent:
         self.retrieval = RetrievalService(self.settings)
         self.web_search = WebSearchService(self.settings)
         self.bill_votes = BillVotesService(self.settings)
+        self.webflow_lookup = WebflowLookupService(self.settings)
 
     async def process_message(
         self,
@@ -148,6 +150,12 @@ class VoteBotAgent:
                     message=message[:50],
                 )
 
+        # Step 3b: Pre-fetch org positions from Webflow CMS
+        org_positions_context = ""
+        if (page_context and page_context.type == "bill"
+                and self._is_org_position_query(message)):
+            org_positions_context = await self._prefetch_bill_org_positions(page_context)
+
         # Step 4: Build page info for prompt
         page_info = self._extract_page_info(page_context)
 
@@ -156,6 +164,9 @@ class VoteBotAgent:
         if vote_verification_context:
             # Put verification context first - it's the authoritative source
             full_context = f"{vote_verification_context}\n\n{retrieved_context}"
+        if org_positions_context:
+            # Org positions from CMS are authoritative — prepend before RAG
+            full_context = f"{org_positions_context}\n\n{full_context}"
 
         system_prompt = build_system_prompt(
             page_type=page_context.type,
@@ -355,6 +366,12 @@ class VoteBotAgent:
                     message=message[:50],
                 )
 
+        # Step 2e: Pre-fetch org positions from Webflow CMS
+        org_positions_context = ""
+        if (page_context and page_context.type == "bill"
+                and self._is_org_position_query(message)):
+            org_positions_context = await self._prefetch_bill_org_positions(page_context)
+
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
 
@@ -367,6 +384,9 @@ class VoteBotAgent:
         if vote_verification_context:
             # Put verification context first - it's the authoritative source
             full_context = f"{vote_verification_context}\n\n{full_context}"
+        if org_positions_context:
+            # Org positions from CMS are authoritative — prepend before everything
+            full_context = f"{org_positions_context}\n\n{full_context}"
 
         system_prompt = build_system_prompt(
             page_type=page_context.type,
@@ -819,6 +839,76 @@ class VoteBotAgent:
 
         except Exception as e:
             logger.error("Error pre-fetching bill info", error=str(e))
+            return ""
+
+    def _is_org_position_query(self, message: str) -> bool:
+        """
+        Detect if the message is asking about organization positions on a bill.
+
+        Uses the same keyword list as retrieval.py Phase 4a.
+
+        Args:
+            message: The user's message
+
+        Returns:
+            True if the query is about org positions and the feature is enabled
+        """
+        if not self.settings.webflow_org_lookup_enabled:
+            return False
+
+        message_lower = message.lower()
+        org_keywords = [
+            "organization", "organizations", "org ", "orgs ",
+            "who supports", "who support", "who opposes", "who oppose",
+            "which groups", "which organizations",
+            "support", "oppose", "backed", "backs", "endorses", "against",
+        ]
+        return any(kw in message_lower for kw in org_keywords)
+
+    async def _prefetch_bill_org_positions(self, page_context: PageContext) -> str:
+        """
+        Pre-fetch organization positions from Webflow CMS for a bill.
+
+        Follows the pre-fetch pattern used by _prefetch_bill_info and
+        _verify_legislator_vote — fetches authoritative data before
+        LLM generation begins.
+
+        Args:
+            page_context: Bill page context with webflow_id and/or slug
+
+        Returns:
+            Formatted org positions string, or empty string on failure
+        """
+        webflow_id = getattr(page_context, "webflow_id", None)
+        slug = getattr(page_context, "slug", None)
+
+        if not webflow_id and not slug:
+            logger.debug("No webflow_id or slug in page_context for org lookup")
+            return ""
+
+        logger.info(
+            "Pre-fetching bill org positions from Webflow CMS",
+            webflow_id=webflow_id,
+            slug=slug,
+        )
+
+        try:
+            result = await self.webflow_lookup.get_bill_org_positions(
+                webflow_id=webflow_id,
+                slug=slug,
+            )
+            if result.found:
+                formatted = format_org_positions_context(result)
+                if formatted:
+                    logger.info(
+                        "Webflow org positions fetched successfully",
+                        supporting=len(result.supporting_orgs),
+                        opposing=len(result.opposing_orgs),
+                    )
+                return formatted
+            return ""
+        except Exception as e:
+            logger.error("Error pre-fetching org positions from Webflow", error=str(e))
             return ""
 
     async def _verify_legislator_vote(

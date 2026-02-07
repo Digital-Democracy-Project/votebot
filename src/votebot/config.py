@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     bill_votes_tool_enabled: bool = True
     bill_votes_rag_confidence_threshold: float = 0.4  # Enable tool when RAG confidence is low
 
+    # Webflow CMS runtime lookup for org positions
+    webflow_org_lookup_enabled: bool = True
+
     # Pinecone
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))
     pinecone_environment: str = "us-east-1"

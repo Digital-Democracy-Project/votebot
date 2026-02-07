@@ -206,6 +206,7 @@ class DynamicTestGenerator:
                     "min_matches": template.get("min_matches", 1),
                     "entity_type": "bill",
                     "entity_slug": bill.slug,
+                    "webflow_id": bill.webflow_id,
                     "jurisdiction": bill.jurisdiction,
                 })
 
