@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Test Page 2 - Different Bill</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; }
+        .nav { background: #eee; padding: 12px; border-radius: 8px; margin-bottom: 20px; }
+        .nav a { margin-right: 16px; color: #1a5f7a; }
+        .current { font-weight: bold; text-decoration: none; }
+        h1 { color: #1a5f7a; }
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <a href="test.html">Page 1: HR 1 (Bill)</a>
+        <a href="test-page2.html" class="current">Page 2: SB 100 (Bill)</a>
+        <a href="test-page3.html">Page 3: Sen. Smith (Legislator)</a>
+    </div>
+
+    <h1>SB 100 - Education Funding Act</h1>
+    <p>This is a test page simulating navigation to a different bill. The chat widget should restore your conversation and show a context-change notice.</p>
+
+    <p><strong>Expected behavior:</strong></p>
+    <ul>
+        <li>If coming from Page 1 with an active session: conversation history restored + "You're now viewing <strong>Education Funding Act (SB 100)</strong>" notice</li>
+        <li>If fresh session: welcome message about SB 100</li>
+    </ul>
+
+    <script>
+        window.DDPChatConfig = {
+            wsUrl: 'ws://localhost:8000/ws/chat',
+            pageContext: {
+                type: 'bill',
+                id: 'SB 100',
+                title: 'Education Funding Act',
+                jurisdiction: 'FL'
+            }
+        };
+    </script>
+    <script src="./dist/ddp-chat.min.js"></script>
+</body>
+</html>

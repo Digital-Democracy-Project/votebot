@@ -247,6 +247,8 @@ An embeddable JavaScript widget is available in the `chat-widget/` directory. Se
 ### Features
 
 - **Context-Aware**: Automatically detects page context from DDP URLs or manual configuration
+- **Cross-Page Session Persistence**: Chat session, conversation history, and popup state persist across full-page navigations via `sessionStorage` (scoped to browser tab, 30-minute timeout)
+- **Context-Change Notifications**: When the user navigates to a different entity, conversation is restored and a context-change notice is shown
 - **Streaming Responses**: Real-time token streaming with smooth auto-scroll
 - **Smart Auto-Scroll**: Auto-scrolling pauses when user scrolls up to read; "scroll to bottom" button appears to resume
 - **Auto-Open Modes**:

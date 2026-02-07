@@ -14,6 +14,38 @@ const DDPWebSocket = (function() {
     const maxReconnectAttempts = 4;
     const heartbeatIntervalMs = 30000;
 
+    // SessionStorage persistence — scoped to browser tab, cleared on tab close
+    const STORAGE_PREFIX = 'ddp_votebot_';
+    const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+    function _storageGet(key) {
+        try { return sessionStorage.getItem(STORAGE_PREFIX + key); } catch (e) { return null; }
+    }
+    function _storageSet(key, value) {
+        try { sessionStorage.setItem(STORAGE_PREFIX + key, value); } catch (e) {}
+    }
+    function _storageRemove(key) {
+        try { sessionStorage.removeItem(STORAGE_PREFIX + key); } catch (e) {}
+    }
+    function _isSessionExpired() {
+        var lastActivity = _storageGet('last_activity');
+        if (!lastActivity) return true;
+        return (Date.now() - parseInt(lastActivity, 10)) > SESSION_TIMEOUT_MS;
+    }
+    function _touchActivity() {
+        _storageSet('last_activity', String(Date.now()));
+    }
+    function _restoreSession() {
+        if (_isSessionExpired()) {
+            _storageRemove('session_id');
+            _storageRemove('last_activity');
+            _storageRemove('page_context');
+            _storageRemove('popup_open');
+            return null;
+        }
+        return _storageGet('session_id');
+    }
+
     /**
      * Initialize WebSocket connection.
      * @param {string} wsUrl - WebSocket server URL
@@ -23,6 +55,11 @@ const DDPWebSocket = (function() {
     function connect(wsUrl, onMessage, onStatusChange) {
         onMessageCallback = onMessage;
         onStatusChangeCallback = onStatusChange;
+
+        // Restore session ID from storage if available
+        if (!sessionId) {
+            sessionId = _restoreSession();
+        }
 
         _connect(wsUrl);
     }
@@ -89,6 +126,8 @@ const DDPWebSocket = (function() {
                 // Handle session info internally
                 if (data.type === 'session_info') {
                     sessionId = data.payload.session_id;
+                    _storageSet('session_id', sessionId);
+                    _touchActivity();
                     console.log('[DDPChat] Session ID:', sessionId);
                 }
 
@@ -125,6 +164,7 @@ const DDPWebSocket = (function() {
     function send(data) {
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(data));
+            _touchActivity();
             return true;
         }
         return false;
@@ -162,6 +202,11 @@ const DDPWebSocket = (function() {
         send: send,
         isConnected: isConnected,
         getSessionId: getSessionId,
-        disconnect: disconnect
+        disconnect: disconnect,
+        storageGet: _storageGet,
+        storageSet: _storageSet,
+        storageRemove: _storageRemove,
+        touchActivity: _touchActivity,
+        isSessionExpired: _isSessionExpired
     };
 })();

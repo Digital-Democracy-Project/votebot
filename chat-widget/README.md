@@ -10,11 +10,13 @@ Embeddable chat widget for Digital Democracy Project VoteBot.
 
 ## Features
 
-- Single JavaScript file (~27KB minified)
+- Single JavaScript file (~57KB minified)
 - Shadow DOM for style isolation
 - WebSocket streaming with auto-reconnection
 - Markdown rendering
 - **Personalized welcome messages** based on page context
+- **Cross-page navigation persistence** — session, conversation history, and popup state survive full-page navigations within the same browser tab via `sessionStorage`
+- **Context-change notifications** — when the user navigates to a different entity, conversation is restored and a notice like "You're now viewing **New Bill**" is shown
 - **Auto-detect mode** for websites (detects bill/legislator from page)
 - **Explicit context mode** for mobile apps
 - **URL parameter support** for passing DDP URLs (`?ddp_url=...`)
@@ -47,9 +49,15 @@ Output: `dist/ddp-chat.min.js`
    python -m votebot.main
    ```
 
-2. Open `test.html` in a browser
+2. Serve the widget directory over HTTP (needed for WebSocket connections):
+   ```bash
+   cd chat-widget
+   python3 -m http.server 8080
+   ```
 
-The test page is configured to connect to `ws://localhost:8000/ws/chat`.
+3. Open `http://localhost:8080/test.html` in a browser
+
+The test page connects to `ws://localhost:8000/ws/chat` and includes navigation links to `test-page2.html` and `test-page3.html` for testing cross-page session persistence.
 
 ## Page Context Modes
 
@@ -134,6 +142,46 @@ GET /votebot/v1/content/resolve?url=https://digitaldemocracyproject.org/bills/on
 - Bills: `/bills/{slug}`
 - Legislators: `/legislators/{slug}`
 - Organizations: `/member-organizations/{slug}`
+
+## Session Persistence
+
+The widget persists chat sessions across full-page navigations within the same browser tab using `sessionStorage`. This is critical for multi-page sites like Webflow where every link click triggers a full page reload.
+
+### How It Works
+
+- **Storage**: All state is stored in `sessionStorage` with the prefix `ddp_votebot_`. This is scoped to the browser tab and automatically cleared when the tab is closed.
+- **Session ID**: When the WebSocket connects and receives a `session_info` response, the session ID is saved. On subsequent page loads, the saved session ID is sent to the server, which restores the conversation.
+- **Activity timeout**: A 30-minute inactivity timeout ensures stale sessions are cleared. Each message send and server response resets the timer.
+- **Page context**: The current page context is persisted so the widget can detect when the user navigates to a different entity.
+- **Popup state**: Whether the chat popup is open or closed is persisted, so it stays open across navigations.
+
+### Cross-Page Navigation Behavior
+
+| Scenario | Behavior |
+|----------|----------|
+| **First visit** | Welcome message: "Welcome! I can answer questions about **Bill Title**." |
+| **Navigate to different entity** | Conversation history restored from server + context-change notice: "You're now viewing **New Entity**." |
+| **Same-page refresh** | Conversation history restored, no extra message |
+| **Close tab + reopen** | Fresh session (`sessionStorage` cleared) with welcome message |
+| **30-minute inactivity** | Session expires, next page load starts fresh |
+
+### Context-Change Notifications
+
+When the user navigates from one entity to another (e.g., bill → different bill, or bill → legislator), the widget shows a system message:
+
+- **Bill**: "You're now viewing **Title (ID)**. I can answer questions about this bill."
+- **Legislator**: "You're now viewing **Name**. I can answer questions about this legislator."
+- **Organization**: "You're now viewing **Name**. I can answer questions about this organization."
+- **General**: "You're now on a general page. I can answer questions about any legislation, legislator, or organization."
+
+### Storage Keys
+
+| Key | Purpose |
+|-----|---------|
+| `ddp_votebot_session_id` | WebSocket session ID for reconnection |
+| `ddp_votebot_last_activity` | Timestamp of last activity (for 30-min timeout) |
+| `ddp_votebot_page_context` | JSON-serialized page context for change detection |
+| `ddp_votebot_popup_open` | `"1"` or `"0"` — popup visibility state |
 
 ## Embedding on Your Website
 
@@ -334,8 +382,8 @@ When users request human assistance, the widget supports seamless handoff to hum
 
 ```
 src/
-├── widget.js      # Entry point, Shadow DOM, initialization
-├── websocket.js   # WebSocket connection with auto-reconnect
+├── widget.js      # Entry point, Shadow DOM, session persistence, context-change detection
+├── websocket.js   # WebSocket connection with auto-reconnect and sessionStorage layer
 ├── chat.js        # Message handling, streaming, handoff state
 ├── ui.js          # DOM manipulation, markdown rendering
 └── styles.css     # Scoped styles for Shadow DOM
@@ -350,13 +398,15 @@ dist/
 
 | File | Purpose |
 |------|---------|
-| `src/widget.js` | Entry point, reads config, creates Shadow DOM |
-| `src/websocket.js` | WebSocket with reconnection logic |
+| `src/widget.js` | Entry point, reads config, creates Shadow DOM, session persistence logic |
+| `src/websocket.js` | WebSocket with reconnection logic and `sessionStorage` persistence layer |
 | `src/chat.js` | Message handling, streaming state |
 | `src/ui.js` | DOM manipulation, markdown parser |
 | `src/styles.css` | Widget styles |
 | `build.js` | Build script (concat + minify) |
-| `test.html` | Local testing page |
+| `test.html` | Local testing page (bill context) |
+| `test-page2.html` | Navigation test page (different bill) |
+| `test-page3.html` | Navigation test page (legislator) |
 
 ### Build Process
 
@@ -369,6 +419,7 @@ The `build.js` script:
 ### Testing Changes
 
 1. Make changes to source files in `src/`
-2. Run `npm run build`
+2. Run `npm run build` (or `npm run watch` for auto-rebuild)
 3. Refresh `test.html` in browser
 4. Test with VoteBot running locally
+5. For session persistence testing, use the navigation links between `test.html`, `test-page2.html`, and `test-page3.html`

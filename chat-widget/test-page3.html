@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Test Page 3 - Legislator</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; }
+        .nav { background: #eee; padding: 12px; border-radius: 8px; margin-bottom: 20px; }
+        .nav a { margin-right: 16px; color: #1a5f7a; }
+        .current { font-weight: bold; text-decoration: none; }
+        h1 { color: #1a5f7a; }
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <a href="test.html">Page 1: HR 1 (Bill)</a>
+        <a href="test-page2.html">Page 2: SB 100 (Bill)</a>
+        <a href="test-page3.html" class="current">Page 3: Sen. Smith (Legislator)</a>
+    </div>
+
+    <h1>Sen. John Smith</h1>
+    <p>This is a test page simulating navigation to a legislator. The context type changes from "bill" to "legislator".</p>
+
+    <p><strong>Expected behavior:</strong></p>
+    <ul>
+        <li>If coming from a bill page with an active session: conversation history restored + "You're now viewing <strong>Sen. John Smith</strong>" notice</li>
+        <li>If fresh session: welcome message about Sen. John Smith</li>
+    </ul>
+
+    <script>
+        window.DDPChatConfig = {
+            wsUrl: 'ws://localhost:8000/ws/chat',
+            pageContext: {
+                type: 'legislator',
+                id: 'john-smith',
+                title: 'Sen. John Smith',
+                jurisdiction: 'FL'
+            }
+        };
+    </script>
+    <script src="./dist/ddp-chat.min.js"></script>
+</body>
+</html>

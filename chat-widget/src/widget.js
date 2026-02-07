@@ -353,6 +353,65 @@
     }
 
     /**
+     * Compare two page contexts to detect navigation to a different entity.
+     * @param {Object} oldCtx - Previous page context
+     * @param {Object} newCtx - New page context
+     * @returns {boolean} True if the context has changed
+     */
+    function contextChanged(oldCtx, newCtx) {
+        if (!oldCtx || !newCtx) return true;
+        if (oldCtx.type !== newCtx.type) return true;
+        if (newCtx.type !== 'general') {
+            if (oldCtx.slug && newCtx.slug) return oldCtx.slug !== newCtx.slug;
+            if (oldCtx.id && newCtx.id) return oldCtx.id !== newCtx.id;
+            if (oldCtx.webflow_id && newCtx.webflow_id) return oldCtx.webflow_id !== newCtx.webflow_id;
+            if (oldCtx.title && newCtx.title) return oldCtx.title !== newCtx.title;
+        }
+        return false;
+    }
+
+    /**
+     * Generate a context-change notification message (not a welcome message).
+     * @param {Object} context - New page context
+     * @returns {string} Context-change notification
+     */
+    function generateContextChangeMessage(context) {
+        if (!context || context.type === 'general') {
+            return "You're now on a general page. I can answer questions about any legislation, legislator, or organization.";
+        }
+
+        var title = context.title;
+        var id = context.id;
+
+        switch (context.type) {
+            case 'bill':
+                if (title && id && !titleContainsId(title, id)) {
+                    return "You're now viewing **" + title + ' (' + id + ")**. I can answer questions about this bill.";
+                } else if (title) {
+                    return "You're now viewing **" + title + "**. I can answer questions about this bill.";
+                } else if (id) {
+                    return "You're now viewing **" + id + "**. I can answer questions about this bill.";
+                }
+                return "You're now viewing a bill. I can answer questions about it.";
+
+            case 'legislator':
+                if (title) {
+                    return "You're now viewing **" + title + "**. I can answer questions about this legislator.";
+                }
+                return "You're now viewing a legislator. I can answer questions about them.";
+
+            case 'organization':
+                if (title) {
+                    return "You're now viewing **" + title + "**. I can answer questions about this organization.";
+                }
+                return "You're now viewing an organization. I can answer questions about it.";
+
+            default:
+                return "You're now on a general page. I can answer questions about any legislation, legislator, or organization.";
+        }
+    }
+
+    /**
      * Initialize the widget (async to support URL resolution).
      */
     function initWidget() {
@@ -376,11 +435,30 @@
      * @param {Object} pageContext - Resolved page context
      */
     function initWidgetWithContext(pageContext) {
-        // Resolve welcome message
-        var welcomeMessage = config.welcomeMessage;
-        if (!welcomeMessage) {
-            welcomeMessage = generateWelcomeMessage(pageContext);
+        // Detect returning session
+        var isReturning = !DDPWebSocket.isSessionExpired() && !!DDPWebSocket.storageGet('session_id');
+
+        // Read previous context from storage
+        var previousContext = null;
+        var previousContextJson = DDPWebSocket.storageGet('page_context');
+        if (previousContextJson) {
+            try { previousContext = JSON.parse(previousContextJson); } catch (e) {}
         }
+
+        // Persist NEW context to storage
+        DDPWebSocket.storageSet('page_context', JSON.stringify(pageContext));
+
+        // Decide initial message
+        var initialMessage = null;
+        var contextChangeMsg = null;
+        if (!isReturning) {
+            // New session — show welcome message
+            initialMessage = config.welcomeMessage || generateWelcomeMessage(pageContext);
+        } else if (contextChanged(previousContext, pageContext)) {
+            // Returning session + different page — show context-change notice after restore
+            contextChangeMsg = generateContextChangeMessage(pageContext);
+        }
+        // Returning + same context → no extra message
 
         // Create container element
         var container = document.createElement('div');
@@ -422,27 +500,53 @@
         // Initialize chat module with resolved context
         DDPChat.init(DDPUI.handleUIUpdate, pageContext);
 
-        // Connect WebSocket
+        // Connect WebSocket with intercepting message handler for returning sessions
+        var originalHandler = DDPChat.handleServerMessage;
+        var wrappedHandler = isReturning ? function(data) {
+            // Intercept session_info to detect server-side session loss
+            if (data.type === 'session_info' && !data.payload.restored) {
+                // Server lost the session — show welcome message instead
+                originalHandler(data);
+                DDPUI.addSystemMessage(config.welcomeMessage || generateWelcomeMessage(pageContext));
+                // Unwrap — no longer need interception
+                // Further messages go directly to original handler
+                return;
+            }
+
+            // After session_restored, append context-change message
+            if (data.type === 'session_restored') {
+                originalHandler(data);
+                if (contextChangeMsg) {
+                    DDPUI.addSystemMessage(contextChangeMsg);
+                }
+                return;
+            }
+
+            originalHandler(data);
+        } : originalHandler;
+
         DDPWebSocket.connect(
             config.wsUrl,
-            DDPChat.handleServerMessage,
+            wrappedHandler,
             DDPUI.updateStatus
         );
 
         // Set up event listeners
         setupEventListeners();
 
-        // Show welcome message
-        if (welcomeMessage) {
-            DDPUI.addSystemMessage(welcomeMessage);
+        // Show welcome/initial message for new sessions
+        if (initialMessage) {
+            DDPUI.addSystemMessage(initialMessage);
         }
 
-        // Auto-open popup if configured
-        if (config.autoOpen) {
+        // Restore popup open state for returning sessions
+        if (isReturning && DDPWebSocket.storageGet('popup_open') === '1') {
+            DDPUI.openPopup();
+        } else if (config.autoOpen) {
             DDPUI.openPopup();
         }
 
-        console.log('[DDPChat] Widget initialized with context:', pageContext);
+        console.log('[DDPChat] Widget initialized with context:', pageContext, isReturning ? '(returning session)' : '(new session)');
     }
 
     /**
@@ -454,11 +558,14 @@
         // Chat button click
         elements.chatButton.addEventListener('click', function() {
             DDPUI.togglePopup();
+            var isOpen = elements.chatPopup.classList.contains('open');
+            DDPWebSocket.storageSet('popup_open', isOpen ? '1' : '0');
         });
 
         // Close button click
         elements.closeButton.addEventListener('click', function() {
             DDPUI.closePopup();
+            DDPWebSocket.storageSet('popup_open', '0');
         });
 
         // Send button click
@@ -524,6 +631,7 @@
          */
         setPageContext: function(context, showWelcome) {
             DDPChat.setPageContext(context);
+            DDPWebSocket.storageSet('page_context', JSON.stringify(context));
             if (showWelcome) {
                 var message = generateWelcomeMessage(context);
                 DDPUI.addSystemMessage(message);
