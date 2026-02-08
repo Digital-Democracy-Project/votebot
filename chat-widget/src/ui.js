@@ -240,32 +240,45 @@ const DDPUI = (function() {
     function fixMobileSize() {
         if (!elements.chatPopup) return;
         var isMobile = screen.width <= 480 || screen.height <= 480;
+        console.log('[VoteBot] fixMobileSize:', {
+            isMobile: isMobile,
+            screenWidth: screen.width,
+            screenHeight: screen.height,
+            innerWidth: window.innerWidth,
+            innerHeight: window.innerHeight,
+            clientWidth: document.documentElement.clientWidth,
+            visualViewport: window.visualViewport ? {
+                width: window.visualViewport.width,
+                height: window.visualViewport.height
+            } : 'N/A'
+        });
         if (isMobile) {
-            var w = Math.min(screen.width, document.documentElement.clientWidth);
-            var s = elements.chatPopup.style;
-            s.position = 'fixed';
-            s.top = '0';
-            s.left = '0';
-            s.right = '0';
-            s.bottom = '0';
-            s.width = w + 'px';
-            s.height = window.innerHeight + 'px';
-            s.maxWidth = 'none';
-            s.maxHeight = 'none';
-            s.borderRadius = '0';
+            // Use !important via setAttribute to override all CSS including
+            // desktop rules that apply when the layout viewport is expanded
+            // beyond 480px (causing @media max-width: 480px to not match).
+            // Use inset:0 + width/height:100% instead of pixel values because
+            // on expanded layout viewports, position:fixed is relative to the
+            // layout viewport, not the physical screen.
+            elements.chatPopup.setAttribute('style',
+                'position: fixed !important; ' +
+                'top: 0 !important; ' +
+                'left: 0 !important; ' +
+                'right: 0 !important; ' +
+                'bottom: 0 !important; ' +
+                'width: 100% !important; ' +
+                'height: 100% !important; ' +
+                'max-width: none !important; ' +
+                'max-height: none !important; ' +
+                'border-radius: 0 !important; ' +
+                'margin: 0 !important; ' +
+                'box-sizing: border-box !important; ' +
+                'display: flex !important; ' +
+                'flex-direction: column !important; ' +
+                'overflow: hidden !important;'
+            );
         } else {
             // Desktop/tablet — clear inline overrides, let CSS handle it
-            var s = elements.chatPopup.style;
-            s.position = '';
-            s.top = '';
-            s.left = '';
-            s.right = '';
-            s.bottom = '';
-            s.width = '';
-            s.height = '';
-            s.maxWidth = '';
-            s.maxHeight = '';
-            s.borderRadius = '';
+            elements.chatPopup.removeAttribute('style');
         }
     }
 
