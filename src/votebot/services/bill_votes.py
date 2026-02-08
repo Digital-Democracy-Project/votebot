@@ -973,36 +973,29 @@ class BillVotesService:
 
         return "\n".join(parts)
 
-    async def lookup_legislator_vote(
+    def find_legislator_in_votes(
         self,
         legislator_name: str,
-        jurisdiction: str,
-        session: str,
+        votes: list[BillVote],
         bill_identifier: str,
     ) -> dict | None:
         """
-        Look up how a specific legislator voted on a bill.
+        Search for a legislator's vote in a list of BillVote objects.
+
+        This is the core search logic used by both lookup_legislator_vote
+        (API-backed) and _prefetch_bill_info (uses already-fetched votes).
 
         Prioritizes final passage votes over procedural votes.
 
         Args:
             legislator_name: Name of the legislator
-            jurisdiction: State code
-            session: Session identifier
-            bill_identifier: Bill identifier
+            votes: List of BillVote objects to search
+            bill_identifier: Bill identifier for the result dict
 
         Returns:
             Dict with vote info or None if not found
         """
-        result = await self.get_bill_votes(jurisdiction, session, bill_identifier)
-        if not result:
-            logger.warning(
-                "No bill votes result from get_bill_votes",
-                legislator_name=legislator_name,
-                jurisdiction=jurisdiction,
-                session=session,
-                bill_identifier=bill_identifier,
-            )
+        if not votes:
             return None
 
         # Build search terms: full name, last name, first name
@@ -1018,13 +1011,13 @@ class BillVotesService:
             "Searching for legislator in votes",
             legislator_name=legislator_name,
             search_terms=search_terms,
-            vote_events=len(result.votes),
+            vote_events=len(votes),
         )
 
         # Collect ALL votes by this legislator
         legislator_votes = []
 
-        for vote in result.votes:
+        for vote in votes:
             for record in vote.votes:
                 record_name_lower = record.legislator_name.lower()
                 # Match if ANY search term is in the record name
@@ -1037,7 +1030,7 @@ class BillVotesService:
                         "date": vote.date,
                         "chamber": vote.chamber,
                         "result": vote.result,
-                        "bill": result.bill_identifier,
+                        "bill": bill_identifier,
                     })
 
         logger.info(
@@ -1104,3 +1097,58 @@ class BillVotesService:
             best_vote["note"] = f"This legislator cast {len(legislator_votes)} votes on this bill. Showing the final passage vote."
 
         return best_vote
+
+    async def lookup_legislator_vote(
+        self,
+        legislator_name: str,
+        jurisdiction: str,
+        session: str,
+        bill_identifier: str,
+    ) -> dict | None:
+        """
+        Look up how a specific legislator voted on a bill.
+
+        Fetches votes from OpenStates (with Pinecone caching) and searches
+        for the legislator. Falls back to fresh API call if cache returns
+        empty votes.
+
+        Args:
+            legislator_name: Name of the legislator
+            jurisdiction: State code
+            session: Session identifier
+            bill_identifier: Bill identifier
+
+        Returns:
+            Dict with vote info or None if not found
+        """
+        result = await self.get_bill_votes(jurisdiction, session, bill_identifier)
+        if not result:
+            logger.warning(
+                "No bill votes result from get_bill_votes",
+                legislator_name=legislator_name,
+                jurisdiction=jurisdiction,
+                session=session,
+                bill_identifier=bill_identifier,
+            )
+            return None
+
+        vote_result = self.find_legislator_in_votes(
+            legislator_name, result.votes, result.bill_identifier,
+        )
+
+        # If no result and the data was cached (votes=[] in cache), retry fresh
+        if not vote_result and result.cached and not result.votes:
+            logger.info(
+                "Cached votes empty, retrying with fresh API call",
+                legislator_name=legislator_name,
+                bill_identifier=bill_identifier,
+            )
+            fresh_result = await self._fetch_from_openstates(
+                jurisdiction, session, bill_identifier,
+            )
+            if fresh_result and fresh_result.votes:
+                vote_result = self.find_legislator_in_votes(
+                    legislator_name, fresh_result.votes, fresh_result.bill_identifier,
+                )
+
+        return vote_result

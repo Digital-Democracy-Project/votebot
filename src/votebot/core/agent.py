@@ -981,11 +981,14 @@ class VoteBotAgent:
                 legislator_vote_context = ""
                 if page_context and page_context.type == "legislator" and page_context.title:
                     try:
-                        vote_result = await self.bill_votes.lookup_legislator_vote(
+                        # Use find_legislator_in_votes with the votes we already have
+                        # from get_bill_info (always fresh from OpenStates). This avoids
+                        # the Pinecone cache issue where get_bill_votes returns votes=[]
+                        # for cached bills, making the legislator search silently fail.
+                        vote_result = self.bill_votes.find_legislator_in_votes(
                             legislator_name=page_context.title,
-                            jurisdiction=jurisdiction,
-                            session=session,
-                            bill_identifier=bill_identifier,
+                            votes=result.votes,
+                            bill_identifier=result.bill_identifier,
                         )
                         if vote_result:
                             legislator_vote_context = (
