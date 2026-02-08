@@ -79,6 +79,8 @@ async def chat(
             page_context=request.page_context,
             navigation_context=request.navigation_context,
             conversation_history=request.conversation_history,
+            channel="rest",
+            human_active=request.human_active,
         )
 
         # Calculate latency

@@ -20,6 +20,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
   - Session year fallback (tries current year, then previous 2 years)
   - Party affiliation enrichment for vote records
 - **Web Search Fallback**: Automatically searches the web (via OpenAI web search + Tavily) when RAG confidence is low
+- **Production Query Monitoring**: All production queries and responses are logged to date-partitioned JSONL files for offline evaluation against ground truth
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
 - **Real-Time Updates**: Hourly polling for content changes
@@ -97,6 +98,8 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `SLACK_BOT_TOKEN` | Slack Bot Token (xoxb-...) | For handoff |
 | `SLACK_APP_TOKEN` | Slack App Token (xapp-...) | For handoff |
 | `SLACK_SUPPORT_CHANNEL` | Slack channel for support | For handoff |
+| `QUERY_LOG_ENABLED` | Enable production query logging (default: true) | No |
+| `QUERY_LOG_DIR` | Directory for JSONL query logs (default: logs/queries) | No |
 | `SIMILARITY_THRESHOLD` | RAG similarity threshold (default: 0.1) | No |
 
 ## API Endpoints
@@ -650,6 +653,7 @@ votebot/
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
 │   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification)
 │   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub)
+│   │   ├── query_logger.py  # Production query logger (JSONL, date-partitioned)
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service
 │   │   ├── service.py       # UnifiedSyncService
@@ -683,7 +687,8 @@ votebot/
 │   ├── test_rag_quality.py      # Quality tests (static YAML + dynamic ground truth)
 │   ├── test_rag_bills.py        # Bill-focused RAG tests
 │   ├── test_rag_legislators.py  # Legislator-focused RAG tests (with page_context)
-│   └── test_rag_organizations.py # Organization-focused RAG tests
+│   ├── test_rag_organizations.py # Organization-focused RAG tests
+│   └── evaluate_production.py    # Offline evaluation of production query logs
 ├── tests/
 │   ├── unit/
 │   ├── integration/
@@ -791,6 +796,63 @@ Top jurisdictions (bills): MI 100%, WA 100%, VA 100%, FL 100%, US 100%, MA 100%,
 
 See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-sample) for detailed failure analysis.
 
+## Production Query Monitoring
+
+VoteBot logs all production queries and LLM responses to date-partitioned JSONL files for offline quality evaluation and performance monitoring.
+
+### How It Works
+
+1. **Automatic capture**: Every call to `process_message()` and `process_message_stream()` is logged via fire-and-forget (`asyncio.create_task`) — zero impact on response latency
+2. **Date-partitioned JSONL**: Logs are written to `logs/queries/YYYY-MM-DD.jsonl`, one JSON object per line
+3. **Multi-worker safe**: Uses `aiofiles` with append mode for atomic writes across uvicorn workers
+
+### Log Entry Fields
+
+| Field | Description |
+|-------|-------------|
+| `timestamp` | ISO 8601 UTC timestamp |
+| `session_id` | Chat session identifier |
+| `message` | User's query text |
+| `response` | LLM response text |
+| `confidence` | Response confidence score (0-1) |
+| `citations` | List of citation objects |
+| `page_context` | Page context (type, id, title, jurisdiction, webflow_id, slug) |
+| `channel` | Source: "rest" or "websocket" |
+| `duration_ms` | End-to-end response time in milliseconds |
+| `human_active` | Whether a human agent was active |
+
+### Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `QUERY_LOG_ENABLED` | Enable/disable query logging | `true` |
+| `QUERY_LOG_DIR` | Directory for JSONL files | `logs/queries` |
+
+### Offline Evaluation
+
+The evaluation script reads production logs and validates responses against Webflow CMS ground truth:
+
+```bash
+# Evaluate today's queries
+PYTHONPATH=src python scripts/evaluate_production.py
+
+# Evaluate a specific date
+PYTHONPATH=src python scripts/evaluate_production.py --date 2026-02-08
+
+# Evaluate last 7 days, filtered by jurisdiction
+PYTHONPATH=src python scripts/evaluate_production.py --days 7 --jurisdiction FL --verbose
+
+# Custom log directory
+PYTHONPATH=src python scripts/evaluate_production.py --log-dir /var/log/votebot/queries
+```
+
+The evaluation report includes:
+- **Pass rate per entity type** (bill, organization, legislator) validated against ground truth
+- **Confidence distribution** with low-confidence query flagging (< 0.5)
+- **Citation rate** and average citation count
+- **Latency metrics** (average and P95)
+- **Breakdown by jurisdiction, entity type, and query category**
+
 ## Performance Targets
 
 | Metric | Target |
@@ -819,6 +881,7 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 - RAG test suite diagnostics and benchmarks
 - Full index rebuild procedures
 - Chat widget truncated on mobile (send button cut off due to layout viewport expansion on content-rich host pages — fixed with `screen.width` mobile detection)
+- Production query monitoring (JSONL logging, offline evaluation)
 
 ## Contributing
 

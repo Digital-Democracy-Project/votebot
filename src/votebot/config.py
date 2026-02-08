@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     aws_access_key_id: SecretStr = Field(default=SecretStr(""))
     aws_secret_access_key: SecretStr = Field(default=SecretStr(""))
 
+    # Query Logging (production monitoring)
+    query_log_enabled: bool = True
+    query_log_dir: str = "logs/queries"
+
     # Slack Integration (for human handoff)
     slack_bot_token: SecretStr = Field(default=SecretStr(""))
     slack_app_token: SecretStr = Field(default=SecretStr(""))

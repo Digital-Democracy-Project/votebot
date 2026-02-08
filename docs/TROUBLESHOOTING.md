@@ -27,6 +27,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Wrong Organization Returned on Org Pages](#wrong-organization-returned-on-org-pages)
 - [Sync Task Status Returns 404 in Multi-Worker Deployment](#sync-task-status-returns-404-in-multi-worker-deployment)
 - [Chat Widget Truncated on Mobile (Send Button Cut Off)](#chat-widget-truncated-on-mobile-send-button-cut-off)
+- [Production Query Monitoring](#production-query-monitoring)
 
 ---
 
@@ -2969,6 +2970,72 @@ Removed auto-scroll entirely. The chat no longer jumps to the bottom during stre
 |------|--------|
 | `chat-widget/src/ui.js` | Removed auto-scroll logic, simplified `scrollToBottom()` to only scroll when `force=true`, scroll listener only hides button at bottom |
 | `chat-widget/dist/ddp-chat.min.js` | Rebuilt |
+
+---
+
+## Production Query Monitoring
+
+### Overview
+
+VoteBot logs all production queries and LLM responses to date-partitioned JSONL files (`logs/queries/YYYY-MM-DD.jsonl`). This data powers offline quality evaluation and performance monitoring.
+
+### Architecture
+
+- **`src/votebot/services/query_logger.py`**: `QueryLogger` singleton that appends JSON lines via `aiofiles`
+- **`src/votebot/core/agent.py`**: `_log_query()` fires-and-forgets via `asyncio.create_task()` after every `process_message()` and `process_message_stream()` call
+- **`scripts/evaluate_production.py`**: Offline CLI tool that reads JSONL logs, classifies queries, and validates against Webflow CMS ground truth
+
+### Log Files Not Being Written
+
+**Symptoms:** No files appear in `logs/queries/`.
+
+**Check:**
+1. Verify `QUERY_LOG_ENABLED` is not set to `false` in `.env`
+2. Verify the `QUERY_LOG_DIR` path is writable by the uvicorn process
+3. Check application logs for `"Failed to write query log entry"` warnings
+4. Ensure `aiofiles` is installed: `pip install aiofiles`
+
+### Evaluating Production Quality
+
+```bash
+# Evaluate today's queries
+PYTHONPATH=src python scripts/evaluate_production.py
+
+# Evaluate a specific date range
+PYTHONPATH=src python scripts/evaluate_production.py --date 2026-02-08 --days 7
+
+# Filter by jurisdiction with verbose output
+PYTHONPATH=src python scripts/evaluate_production.py --jurisdiction FL --verbose
+```
+
+The evaluation:
+1. Loads entries from JSONL files for the specified date range
+2. Filters out `human_active=true` entries (Slack handoff, not LLM responses)
+3. Classifies each query by entity type (bill, org, legislator, general, out-of-scope) using page_context + message regex
+4. Matches against Webflow CMS ground truth using the existing `GroundTruthFetcher`
+5. Validates responses using `validate_response()` from `rag_test_common.py`
+6. Generates a report with pass rates, confidence analysis, citation metrics, and latency stats
+
+### Performance Monitoring
+
+Each log entry includes `duration_ms` (end-to-end response time). The evaluation report surfaces:
+- **Average latency** across all queries
+- **P95 latency** for identifying tail latency issues
+- **Per-entity-type latency** for spotting slow retrieval paths
+
+To check if the server is handling load well, look for:
+- P95 latency consistently above 5 seconds (target: < 5s)
+- Increasing average latency over time (indicates resource pressure)
+- Low confidence scores clustered at specific times (indicates retrieval issues)
+
+### Disk Space
+
+JSONL files grow continuously. Each entry is ~1-3 KB. At 1,000 queries/day, expect ~3 MB/day. Consider rotating or archiving old files periodically:
+
+```bash
+# Archive files older than 30 days
+find logs/queries/ -name "*.jsonl" -mtime +30 -exec gzip {} \;
+```
 
 ---
 

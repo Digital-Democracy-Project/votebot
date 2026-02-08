@@ -1,6 +1,8 @@
 """Single conversational agent for VoteBot."""
 
+import asyncio
 import re
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 
@@ -84,6 +86,59 @@ class VoteBotAgent:
         self.bill_votes = BillVotesService(self.settings)
         self.webflow_lookup = WebflowLookupService(self.settings)
 
+    def _log_query(
+        self,
+        *,
+        session_id: str,
+        message: str,
+        result: AgentResult,
+        page_context: PageContext,
+        channel: str,
+        start_time: float,
+        human_active: bool = False,
+    ) -> None:
+        """Fire-and-forget log of a completed query to JSONL."""
+        from votebot.services.query_logger import get_query_logger
+
+        query_logger = get_query_logger()
+        if query_logger is None:
+            return
+
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+        citations_dicts = [
+            {
+                "source": c.source,
+                "document_id": c.document_id,
+                "url": c.url,
+                "relevance_score": c.relevance_score,
+            }
+            for c in result.citations
+        ]
+
+        page_context_dict = {
+            "type": page_context.type,
+            "id": page_context.id,
+            "title": page_context.title,
+            "jurisdiction": page_context.jurisdiction,
+            "webflow_id": getattr(page_context, "webflow_id", None),
+            "slug": getattr(page_context, "slug", None),
+        }
+
+        asyncio.create_task(
+            query_logger.log_query(
+                session_id=session_id,
+                message=message,
+                response=result.response,
+                confidence=result.confidence,
+                citations=citations_dicts,
+                page_context=page_context_dict,
+                channel=channel,
+                duration_ms=duration_ms,
+                human_active=human_active,
+            )
+        )
+
     async def process_message(
         self,
         message: str,
@@ -91,6 +146,8 @@ class VoteBotAgent:
         page_context: PageContext,
         navigation_context: NavigationContext | None = None,
         conversation_history: list[dict] | None = None,
+        channel: str = "rest",
+        human_active: bool = False,
     ) -> AgentResult:
         """
         Process a user message and generate a response.
@@ -101,10 +158,14 @@ class VoteBotAgent:
             page_context: Context about the current page
             navigation_context: Optional navigation context
             conversation_history: Optional previous messages
+            channel: Source channel ("rest" or "websocket")
+            human_active: Whether a human agent is active (for logging)
 
         Returns:
             AgentResult with the response and metadata
         """
+        _start_time = time.perf_counter()
+
         logger.info(
             "Processing message",
             session_id=session_id,
@@ -293,7 +354,7 @@ class VoteBotAgent:
             bill_votes_tool_used=llm_response.bill_votes_tool_used,
         )
 
-        return AgentResult(
+        result = AgentResult(
             response=llm_response.content,
             citations=citations,
             confidence=confidence,
@@ -308,6 +369,19 @@ class VoteBotAgent:
             bill_votes_result=llm_response.bill_votes_result,
         )
 
+        # Fire-and-forget query logging
+        self._log_query(
+            session_id=session_id,
+            message=message,
+            result=result,
+            page_context=page_context,
+            channel=channel,
+            start_time=_start_time,
+            human_active=human_active,
+        )
+
+        return result
+
     async def process_message_stream(
         self,
         message: str,
@@ -315,6 +389,8 @@ class VoteBotAgent:
         page_context: PageContext,
         navigation_context: NavigationContext | None = None,
         conversation_history: list[dict] | None = None,
+        channel: str = "websocket",
+        human_active: bool = False,
     ) -> AsyncIterator[StreamChunkData]:
         """
         Process a message and stream the response.
@@ -325,10 +401,14 @@ class VoteBotAgent:
             page_context: Context about the current page
             navigation_context: Optional navigation context
             conversation_history: Optional previous messages
+            channel: Source channel ("rest" or "websocket")
+            human_active: Whether a human agent is active (for logging)
 
         Yields:
             StreamChunkData objects with text fragments
         """
+        _start_time = time.perf_counter()
+
         logger.info(
             "Processing message (streaming)",
             session_id=session_id,
@@ -488,6 +568,25 @@ class VoteBotAgent:
                         latency_ms=0,  # Calculated by caller
                         cached=False,
                     ),
+                )
+
+                # Log the completed streaming interaction
+                stream_result = AgentResult(
+                    response=full_response,
+                    citations=citations,
+                    confidence=confidence,
+                    requires_human=False,
+                    tokens_used=0,
+                    retrieval_count=retrieval_result.total_retrieved,
+                )
+                self._log_query(
+                    session_id=session_id,
+                    message=message,
+                    result=stream_result,
+                    page_context=page_context,
+                    channel=channel,
+                    start_time=_start_time,
+                    human_active=human_active,
                 )
             else:
                 yield StreamChunkData(text=chunk.text, done=False)
