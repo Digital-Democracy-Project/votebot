@@ -1946,7 +1946,7 @@ The LLM sees Buchanan is a Republican, sees the bill passed along party lines, a
 ```python
 # NEW — in _prefetch_bill_info, after fetching bill info:
 if page_context and page_context.type == "legislator" and page_context.title:
-    # Uses votes from get_bill_info (always fresh), NOT get_bill_votes (cache)
+    # Uses votes from get_bill_info (always fresh from OpenStates)
     vote_result = self.bill_votes.find_legislator_in_votes(
         legislator_name=page_context.title,
         votes=result.votes,
@@ -1978,24 +1978,18 @@ if page_context and page_context.type == "bill":
 
 Now on a legislator page, `bill_identifier` starts as `None`, causing the code to correctly extract "HR1" from the message text or conversation history.
 
-#### Bug 3: Pinecone vote cache returns empty votes list
+#### Bug 3: Pinecone vote cache returns empty votes list (RESOLVED — cache removed)
 
-Even with Bug 1 fixed, the specific legislator vote lookup was silently failing for previously-looked-up bills. The root cause was in `_check_cache()` in `bill_votes.py`:
+The Pinecone vote cache in `bill_votes.py` was fundamentally lossy: `_cache_to_pinecone()` stored votes as formatted markdown text, but `_check_cache()` returned `BillVotesResult(votes=[])` — the structured `BillVote`/`VoteRecord` objects were permanently lost. Every downstream function calling `find_legislator_in_votes()` got an empty list and silently failed.
 
-```python
-# _check_cache returns this for cached bills:
-return BillVotesResult(
-    ...
-    votes=[],  # ← Structured vote data is lost! Only text is cached.
-    cached=True,
-)
-```
+**Root cause fix (February 2026)**: The Pinecone vote cache was completely removed from `bill_votes.py`. All vote lookups now go directly to the OpenStates API:
+- `_check_cache()`, `_cache_to_pinecone()`, and `format_votes_document()` were deleted
+- `get_bill_votes()` now calls `_fetch_from_openstates()` directly (no cache layer)
+- `lookup_legislator_vote()` now uses `get_bill_info()` (which includes session fallback for state bills) instead of the old `get_bill_votes()` → cache path
+- `BillVotesResult.cached` field was removed
+- Unused imports (`IngestionPipeline`, `VectorStoreService`, `DocumentMetadata`) and `__init__` attributes (`self.pipeline`, `self.vector_store`) were cleaned up
 
-When `lookup_legislator_vote()` called `get_bill_votes()`, it hit the Pinecone cache and received `votes=[]`. With no votes to search, it returned `None`. The LLM then fell back to the massive formatted document and guessed YES for Buchanan.
-
-**Fix (two-part)**:
-1. `_prefetch_bill_info` now calls `find_legislator_in_votes()` (a new helper) directly with the votes from `get_bill_info()` — which **always fetches fresh** from OpenStates. This bypasses the cache path entirely.
-2. `lookup_legislator_vote` (used by `_verify_legislator_vote` for disputes) now detects the empty-cache scenario and retries with a fresh API call via `_fetch_from_openstates()`.
+Note: The bill sync pipeline (`bill_sync.py`) still writes `document_type: bill-votes` docs to Pinecone during ingestion — that is a separate concern and remains unchanged. The RAG retrieval pipeline still queries these docs for general vote context.
 
 ### Fix (February 2026)
 
@@ -2005,7 +1999,7 @@ All three bugs fixed across two files:
 |-----|----------|-----|
 | LLM ignores minority vote | `_prefetch_bill_info` in `agent.py` | Call `find_legislator_in_votes()` on legislator pages, prepend specific vote to context |
 | Legislator ID used as bill ID | `_verify_legislator_vote` in `agent.py` | Only use `page_context.id` as `bill_identifier` when `page_context.type == "bill"` |
-| Cached votes empty | `bill_votes.py` | Extract `find_legislator_in_votes()` helper; `_prefetch_bill_info` uses votes from `get_bill_info` (always fresh); `lookup_legislator_vote` retries fresh on cache miss |
+| Lossy Pinecone vote cache | `bill_votes.py` | Removed cache entirely (`_check_cache`, `_cache_to_pinecone`, `format_votes_document` deleted); `lookup_legislator_vote` now uses `get_bill_info()` (always fresh, with session fallback) |
 
 ### How It Works After Fix
 
@@ -2034,6 +2028,8 @@ _verify_legislator_vote():
   → _extract_bill_from_text("check again") → None
   → Search conversation history → finds "HR 1" → bill_identifier = "HR1"
   → lookup_legislator_vote("Vern Buchanan", "US", "119", "HR1")
+     → get_bill_info() fetches fresh from OpenStates (with session fallback)
+     → find_legislator_in_votes() searches structured BillVote objects
   → Returns authoritative vote → correct verification
 ```
 
@@ -2076,36 +2072,28 @@ Look for:
 "Found bill identifier in conversation history" bill_identifier="HR1"
 ```
 
-#### 4. Check if cached votes are causing empty results
+#### 4. Check if vote lookup is fetching from OpenStates
 
 ```bash
-sudo journalctl -u votebot | grep "Cached votes empty"
+sudo journalctl -u votebot | grep "Fetching bill votes from OpenStates"
 ```
 
 Look for:
 ```
-"Cached votes empty, retrying with fresh API call" legislator_name="Vern Buchanan" bill_identifier="HR1"
+"Fetching bill votes from OpenStates" jurisdiction="us" session="119" bill_identifier="HR1"
 ```
 
-If this appears, it means the bill was previously cached in Pinecone with `votes=[]`, and `lookup_legislator_vote` is retrying fresh. If it does NOT appear, either the bill wasn't cached or `find_legislator_in_votes` found the vote directly (which is the normal path for `_prefetch_bill_info`).
-
-To check if a bill is cached with empty votes:
-```bash
-redis-cli  # or use Pinecone console
-# Look for bill-votes-us-119-hr1 in Pinecone
-```
+All vote lookups now go directly to the OpenStates API (the lossy Pinecone vote cache was removed in February 2026). If votes are not being found, check OpenStates API availability.
 
 ### Why This Only Affects Legislator Pages
 
 On a **bill page**, all three bugs are irrelevant:
 1. The bill info pre-fetch doesn't need a specific legislator vote — the user can see the bill, and the LLM has the bill context
 2. `page_context.id` is already the bill identifier, and `page_context.type == "bill"` so it's used correctly
-3. The cache issue doesn't matter because `_prefetch_bill_info` uses `get_bill_info` (always fresh) and `find_legislator_in_votes` (no cache involved)
 
 On a **legislator page**:
 1. The user expects answers about THIS legislator, but the bill data contains 435 voters — the LLM has to find the needle in the haystack
 2. `page_context.id` is a legislator ID, not a bill ID — it was incorrectly used for vote lookups
-3. `lookup_legislator_vote` (used by dispute verification) could hit the empty-votes cache
 
 ### Lessons Learned
 
@@ -2113,7 +2101,7 @@ On a **legislator page**:
 2. **`page_context.id` semantics vary by page type**: On bill pages it's a bill identifier, on legislator pages it's a legislator ID. Code that uses it must check `page_context.type` first.
 3. **Minority votes are the hardest**: When 99% of a party votes one way, the LLM's training data strongly biases it toward the majority. Explicit authoritative data injection is essential.
 4. **Test from ALL page types**: This bug only manifested on legislator pages. Testing only from bill pages wouldn't catch it.
-5. **Caching structured data as text loses structure**: The Pinecone vote cache stores votes as formatted text but returns `votes=[]` for the structured list. Any code that depends on structured vote data must either bypass the cache or handle the empty-votes case.
+5. **Don't cache structured data as text**: The Pinecone vote cache stored votes as formatted markdown but returned `votes=[]` for the structured list — the data was permanently lost on write. The fix was to remove the cache entirely and always fetch fresh from OpenStates. If caching is ever re-introduced, it must preserve the structured `BillVote`/`VoteRecord` objects.
 
 ---
 

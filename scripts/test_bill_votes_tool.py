@@ -37,7 +37,6 @@ async def test_bill_votes_service():
         print(f"  Bill: {result.bill_identifier}")
         print(f"  Title: {result.title}")
         print(f"  Jurisdiction: {result.jurisdiction}")
-        print(f"  Cached: {result.cached}")
         print(f"  Number of votes: {len(result.votes)}")
         if result.votes:
             vote = result.votes[0]
