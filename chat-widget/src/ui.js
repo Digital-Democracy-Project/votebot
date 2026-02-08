@@ -7,7 +7,6 @@ const DDPUI = (function() {
     let elements = {};
     let currentStreamingMessage = null;
     let currentStreamingText = '';
-    let userScrolledUp = false;  // Track if user manually scrolled up
     let scrollThreshold = 50;    // Pixels from bottom to consider "at bottom"
 
     // Simple markdown parser (no external dependencies)
@@ -174,8 +173,14 @@ const DDPUI = (function() {
             scrollBottomButton: shadowRoot.querySelector('.ddp-scroll-bottom')
         };
 
-        // Set up scroll listener to detect when user scrolls up
-        elements.messagesContainer.addEventListener('scroll', handleUserScroll);
+        // Hide scroll-to-bottom button when user scrolls to the bottom
+        elements.messagesContainer.addEventListener('scroll', function() {
+            var container = elements.messagesContainer;
+            var isAtBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < scrollThreshold;
+            if (isAtBottom && elements.scrollBottomButton) {
+                elements.scrollBottomButton.style.display = 'none';
+            }
+        });
 
         // Fix mobile popup dimensions on resize/orientation change
         window.addEventListener('resize', fixMobileSize);
@@ -190,37 +195,11 @@ const DDPUI = (function() {
 
         // Set up click handler for scroll-to-bottom button
         elements.scrollBottomButton.addEventListener('click', function() {
-            userScrolledUp = false;
             elements.scrollBottomButton.style.display = 'none';
             elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
         });
     }
 
-    /**
-     * Handle user scroll to detect manual scrolling.
-     */
-    function handleUserScroll() {
-        var container = elements.messagesContainer;
-        var isAtBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < scrollThreshold;
-
-        if (isAtBottom) {
-            // User scrolled back to bottom, resume auto-scroll
-            userScrolledUp = false;
-            elements.scrollBottomButton.style.display = 'none';
-        } else {
-            // User scrolled up, pause auto-scroll
-            userScrolledUp = true;
-        }
-    }
-
-    /**
-     * Show the scroll-to-bottom button.
-     */
-    function showScrollButton() {
-        if (userScrolledUp && elements.scrollBottomButton) {
-            elements.scrollBottomButton.style.display = 'flex';
-        }
-    }
 
     /**
      * Get cached elements.
@@ -646,15 +625,22 @@ const DDPUI = (function() {
     }
 
     /**
-     * Scroll messages to bottom (respects user scroll position).
-     * @param {boolean} force - Force scroll even if user scrolled up
+     * Scroll messages to bottom, or show the scroll-to-bottom button.
+     * @param {boolean} force - Force scroll (used after user sends a message)
      */
     function scrollToBottom(force) {
-        if (force || !userScrolledUp) {
+        if (force) {
             elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
+            if (elements.scrollBottomButton) {
+                elements.scrollBottomButton.style.display = 'none';
+            }
         } else {
-            // User has scrolled up, show button instead of scrolling
-            showScrollButton();
+            // Don't auto-scroll — show the arrow button if there's content below
+            var container = elements.messagesContainer;
+            var isAtBottom = (container.scrollHeight - container.scrollTop - container.clientHeight) < scrollThreshold;
+            if (!isAtBottom && elements.scrollBottomButton) {
+                elements.scrollBottomButton.style.display = 'flex';
+            }
         }
     }
 
@@ -662,7 +648,6 @@ const DDPUI = (function() {
      * Reset scroll state (call when user sends a message).
      */
     function resetScrollState() {
-        userScrolledUp = false;
         if (elements.scrollBottomButton) {
             elements.scrollBottomButton.style.display = 'none';
         }
@@ -675,9 +660,9 @@ const DDPUI = (function() {
     function handleUIUpdate(event) {
         switch (event.type) {
             case 'user_message':
-                resetScrollState();  // Resume auto-scroll for the response
                 addMessage('user', event.payload.message);
                 clearInput();
+                scrollToBottom(true);  // Force-scroll to show user's own message
                 break;
 
             case 'restored_message':
