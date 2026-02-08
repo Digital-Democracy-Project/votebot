@@ -2716,100 +2716,104 @@ redis-cli TTL votebot:sync:task:{task_id}
 
 ### Symptom
 
-On mobile devices, the chat widget popup opens to be slightly larger than the visible screen. The send button and input area at the bottom are truncated/cut off, making it impossible to send messages. This only occurs when the widget is embedded on content-rich pages (e.g., the DDP homepage at `digitaldemocracyproject.org`), not on the standalone test site (`votebot.digitaldemocracyproject.org`).
+On mobile devices, the chat widget popup opens slightly wider than the visible screen. The right side of the popup is cut off, truncating the send button and making it impossible to send messages. This only occurs when the widget is embedded on content-rich host pages (e.g., the DDP homepage at `digitaldemocracyproject.org`), not on the standalone test site (`votebot.digitaldemocracyproject.org`).
 
 ### Example
 
 ```
-Mobile browser (URL bar visible):
-┌──────────────────────┐
-│ URL bar              │
-├──────────────────────┤  ← Visible viewport top
-│ VoteBot Header       │
-│                      │
-│ Chat messages...     │
-│                      │
-│                      │
-├──────────────────────┤  ← Visible viewport bottom
-│ [Input] [Send]       │  ← HIDDEN: extends below visible area
-└──────────────────────┘
+Mobile browser:
+       ┌─ Visible viewport ─┐
+       │ VoteBot Header    X │
+       │                     │  ← Right edge of popup extends
+       │ Chat messages...    │     beyond visible viewport
+       │                     │
+       │ [Input area] [Se    │  ← Send button cut off
+       └─────────────────────┘
 ```
 
 ### Root Cause
 
-The mobile full-screen CSS used `height: 100%` for the fixed-position popup:
+The mobile full-screen CSS used `width: 100%` for the fixed-position popup:
 
 ```css
 @media (max-width: 480px) {
     .ddp-chat-popup {
         position: fixed;
         top: 0; left: 0; right: 0; bottom: 0;
-        width: 100%;
-        height: 100%;       /* ← Problem */
-        max-height: 100%;   /* ← Problem */
+        width: 100%;        /* ← Problem */
     }
 }
 ```
 
-On mobile browsers, `height: 100%` for a `position: fixed` element resolves to the **layout viewport height** (also called the "large viewport"), which includes the area behind the browser's URL/address bar. When the URL bar is visible — which is the default state when browsing a content-rich, scrollable site — the actual visible area is ~50-80px shorter than the layout viewport. The widget overflows below the visible area, hiding the send button.
+For a `position: fixed` element, `width: 100%` is relative to the **containing block**, which is normally the viewport. However, if **any ancestor** of the widget has `transform`, `perspective`, `filter`, `will-change: transform`, or `contain: paint` set, the containing block changes from the viewport to that ancestor element.
+
+Webflow sites commonly apply these CSS properties for:
+- Scroll animations and page transitions
+- Performance hints (`will-change: transform`, `transform: translate3d(0,0,0)`)
+- Sticky navigation bars
+- Webflow interactions/animations engine
+
+When the containing block is a Webflow wrapper instead of the viewport, `width: 100%` resolves to 100% of that wrapper's width, which may differ from the visual viewport width.
 
 ### Why the Test Site Wasn't Affected
 
-The standalone test site at `votebot.digitaldemocracyproject.org` (`chat-widget/index.html`) is a simple single-screen splash page with minimal content. On such pages:
-1. The page doesn't scroll, so the browser URL bar doesn't transition between visible/hidden states
-2. The browser may already minimize the URL bar, making the layout viewport = the visual viewport
-3. The `maximum-scale=1.0` viewport meta tag may further constrain browser behavior
-
-On the DDP homepage (a full Webflow website with lots of scrollable content), the URL bar is typically visible when the user first opens the widget, causing the mismatch.
+The standalone test site at `votebot.digitaldemocracyproject.org` (`chat-widget/index.html`) is a simple HTML page with no transforms, animations, or frameworks. The containing block for `position: fixed` is the viewport, so `width: 100%` = viewport width.
 
 ### Fix (February 2026)
 
-Added `100dvh` (dynamic viewport height) declarations to the mobile CSS in `chat-widget/src/styles.css`:
+Two changes to `chat-widget/src/styles.css`:
+
+**1. Mobile popup: Use `vw` instead of `%` for width**
 
 ```css
 @media (max-width: 480px) {
     .ddp-chat-popup {
-        position: fixed;
-        top: 0; left: 0; right: 0; bottom: 0;
-        width: 100%;
-        height: 100%;       /* Fallback for older browsers */
-        height: 100dvh;     /* Dynamic viewport height — adjusts for mobile URL bar */
-        max-height: 100%;
+        width: 100vw;       /* vw is ALWAYS viewport-relative, immune to ancestor transforms */
+        height: 100dvh;     /* dvh adjusts for mobile URL bar */
+        max-width: 100vw;
         max-height: 100dvh;
-        border-radius: 0;
     }
 }
 ```
 
-**How `dvh` works**: The `dvh` unit represents the **dynamic viewport height**, which adjusts in real-time as the browser's URL bar shows and hides. Unlike `vh` (which equals the large viewport height and never changes), `100dvh` always matches the currently visible area.
+The `vw` unit is **always** relative to the viewport, regardless of what the containing block is. Even when `position: fixed` is affected by an ancestor transform, `100vw` = exact viewport width.
 
-**Progressive enhancement**: The double declaration (`height: 100%` followed by `height: 100dvh`) provides a fallback. Browsers that don't understand `dvh` ignore the second line and use `100%`. Browser support for `dvh` is excellent: Safari 15.4+, Chrome 108+, Firefox 101+ — covering essentially all modern mobile browsers.
+**2. Base popup: Add `max-width: 100vw` safety net**
 
-### Viewport Height Units Reference
+```css
+.ddp-chat-popup {
+    width: 400px;
+    max-width: 100vw;    /* Safety net — popup can never exceed viewport width */
+}
+```
 
-| Unit | Name | Behavior |
-|------|------|----------|
-| `vh` | Viewport Height | Equals the **large viewport** (URL bar hidden). Never changes. |
-| `svh` | Small Viewport Height | Equals the **small viewport** (URL bar visible). Never changes. |
-| `dvh` | Dynamic Viewport Height | Adjusts dynamically as the URL bar shows/hides. |
-| `%` | Percentage | For `position: fixed`, same as `vh` (large viewport). |
+This caps the popup width on all breakpoints. On desktop (where 400px < viewport width), it has no effect. On any device where the popup would otherwise overflow, it prevents the overflow.
+
+### Viewport-Relative Units vs Percentage
+
+| Unit | Relative To | Affected by ancestor transform? |
+|------|------------|------|
+| `%` | Containing block (normally viewport for `position: fixed`) | **Yes** — changes to ancestor if it has `transform` |
+| `vw` | Viewport (always) | **No** — always the viewport regardless of containing block |
+| `dvw` | Dynamic viewport (always) | **No** — same as `vw` for width (URL bar only affects height) |
+| `dvh` | Dynamic viewport (always) | **No** — adjusts as mobile URL bar shows/hides |
 
 ### Files Changed
 
 | File | Change |
 |------|--------|
-| `chat-widget/src/styles.css` | Added `height: 100dvh` and `max-height: 100dvh` in `@media (max-width: 480px)` block |
+| `chat-widget/src/styles.css` | Base: added `max-width: 100vw`. Mobile: changed `width: 100%` → `width: 100vw`, added `max-width: 100vw`, added `height: 100dvh` / `max-height: 100dvh` |
 | `chat-widget/dist/ddp-chat.min.js` | Rebuilt with updated CSS |
 
 ### Verification
 
-Test on a mobile device (or Chrome DevTools mobile emulator with "Show device toolbar" + URL bar simulation):
+Test on a mobile device (or Chrome DevTools mobile emulator):
 
 1. Open `digitaldemocracyproject.org` on a mobile device
 2. Tap the chat widget button
-3. The popup should fill exactly the visible viewport — send button fully visible
-4. Scroll the page before opening the widget (to ensure URL bar is visible)
-5. The popup should still fit within the visible area
+3. The popup should fill exactly the visible viewport — send button fully visible on the right
+4. Type a message and verify the send button is tappable
+5. Verify the popup edges align with the screen edges (no horizontal overflow)
 
 ### Deployment
 
@@ -2825,11 +2829,34 @@ scp chat-widget/dist/ddp-chat.min.js your-server:/var/www/votebot/
 
 For Webflow-hosted sites that load the widget via a `<script>` tag, ensure the script URL points to the updated file. Browser caching may delay propagation — consider adding a cache-busting query parameter if needed.
 
+### Diagnostic: Checking for Ancestor Transforms
+
+If the widget is still mispositioned on a specific site, check if any ancestor has transform-related CSS:
+
+```javascript
+// Run in browser console on the host page
+let el = document.getElementById('ddp-chat-widget');
+while (el) {
+    const style = getComputedStyle(el);
+    const props = ['transform', 'willChange', 'perspective', 'filter', 'contain'];
+    props.forEach(p => {
+        const v = style[p];
+        if (v && v !== 'none' && v !== 'auto' && v !== 'normal') {
+            console.log(`${el.tagName}.${el.className}: ${p} = ${v}`);
+        }
+    });
+    el = el.parentElement;
+}
+```
+
+If any ancestor reports a non-default value, that's the element breaking `position: fixed`.
+
 ### Lessons Learned
 
-1. **`100vh` is broken on mobile**: This is a long-standing issue across all mobile browsers. `100vh` always equals the large viewport (URL bar hidden), which is larger than what the user sees when the URL bar is visible. Use `dvh` for any element that must fill the visible viewport on mobile.
-2. **Test on real content pages**: The widget worked fine on the simple test page but broke on the content-rich production site. Always test embedded widgets on pages that match the real deployment context (scrollable content, visible URL bar).
-3. **Progressive enhancement with double declarations**: `height: 100%; height: 100dvh;` ensures the fix works on modern browsers while maintaining backward compatibility. Browsers ignore CSS properties they don't understand.
+1. **`width: 100%` is NOT always viewport width for fixed elements**: If any ancestor has `transform` (or `perspective`, `filter`, `will-change: transform`, `contain: paint`), the containing block for `position: fixed` changes from the viewport to that ancestor. Use `vw` units instead — they are always viewport-relative.
+2. **Webflow sites commonly use transforms**: The Webflow interactions engine, scroll animations, sticky navbars, and performance optimizations all apply CSS transforms. Any widget embedded on a Webflow site should assume `position: fixed` may be broken by ancestor transforms.
+3. **Test on real host pages**: The widget worked perfectly on the standalone test page (no transforms) but broke on the Webflow production site. Always test embedded widgets in the actual hosting environment.
+4. **Defensive CSS**: Adding `max-width: 100vw` to base styles is a zero-cost safety net that prevents overflow on any device, regardless of which breakpoint is active.
 
 ---
 
