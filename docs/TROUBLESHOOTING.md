@@ -2787,10 +2787,15 @@ function fixMobileSize() {
         }
         // Set full-screen inline styles — after viewport reset,
         // 100vw/100vh correctly map to device-width
+        // Use Visual Viewport API for height — 100vh on mobile includes
+        // the browser address bar/toolbar, clipping the bottom.
+        var vv = window.visualViewport;
+        var h = vv ? vv.height : window.innerHeight;
+
         var s = elements.chatPopup.style;
         s.position = 'fixed';
-        s.top = '0'; s.left = '0'; s.right = '0'; s.bottom = '0';
-        s.width = '100vw'; s.height = '100vh';
+        s.top = '0'; s.left = '0'; s.right = '0'; s.bottom = 'auto';
+        s.width = '100vw'; s.height = h + 'px';
         s.maxWidth = 'none'; s.maxHeight = 'none';
         s.borderRadius = '0';
     } else {
@@ -2813,7 +2818,18 @@ function restoreViewport() {
 
 Called from both `closePopup()` and `togglePopup()`.
 
-**3. CSS `inset: 0` with `width: auto` (baseline for well-behaved pages)**
+**3. Visual Viewport resize listener (keyboard, address bar)**
+
+```javascript
+// In cacheElements(), alongside the resize/orientationchange listeners:
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', fixMobileSize);
+}
+```
+
+This updates the popup height when the on-screen keyboard appears/disappears or the address bar auto-hides.
+
+**4. CSS `inset: 0` with `width: auto` (baseline for well-behaved pages)**
 
 ```css
 @media (max-width: 480px) {
@@ -2827,10 +2843,12 @@ Called from both `closePopup()` and `togglePopup()`.
 ```
 
 - `screen.width` detects mobile (unaffected by layout viewport expansion)
-- Viewport meta reset collapses the layout viewport to device-width, making all CSS units and media queries work correctly
-- `100vw`/`100vh` are safe after the viewport reset (they now equal device-width/height)
+- Viewport meta reset collapses the layout viewport to device-width, making `100vw` and CSS media queries work correctly
+- Height uses `visualViewport.height` pixels (not `100vh`, which includes the address bar on mobile)
+- `bottom: auto` avoids over-constraining the box when an explicit height is set
+- `visualViewport.resize` listener updates height dynamically (keyboard show/hide, address bar)
 - Original viewport meta is saved and restored when the popup closes
-- Fires on popup open, window resize, and orientation change
+- Fires on popup open, window resize, orientation change, and visual viewport resize
 
 ### What Didn't Work
 
@@ -2849,7 +2867,7 @@ Called from both `closePopup()` and `togglePopup()`.
 | File | Change |
 |------|--------|
 | `chat-widget/src/styles.css` | Mobile: `width: auto; height: auto; max-width: none; max-height: none` with `inset: 0` |
-| `chat-widget/src/ui.js` | Added `fixMobileSize()` + `restoreViewport()` — uses `screen.width` for mobile detection, resets viewport meta to force device-width, sets `100vw`/`100vh` inline styles. Restores original viewport meta on close |
+| `chat-widget/src/ui.js` | Added `fixMobileSize()` + `restoreViewport()` — uses `screen.width` for mobile detection, resets viewport meta to force device-width, sets `100vw` width + `visualViewport.height` px height. Listens for `visualViewport.resize` for keyboard/address bar changes. Restores original viewport meta on close |
 | `chat-widget/dist/ddp-chat.min.js` | Rebuilt with CSS + JS changes |
 
 ### Verification
@@ -2858,9 +2876,12 @@ Test on a mobile device (or Chrome DevTools mobile emulator):
 
 1. Open `digitaldemocracyproject.org` on a mobile device
 2. Tap the chat widget button
-3. The popup should fill exactly the visible viewport — send button fully visible on the right
-4. Type a message and verify the send button is tappable
-5. Verify the popup edges align with the screen edges (no horizontal overflow)
+3. The popup should fill exactly the visible viewport — all edges flush with the screen
+4. Verify the send button is fully visible on the right (not clipped)
+5. Verify the input area is fully visible at the bottom (not clipped by address bar)
+6. Type a message and verify the send button is tappable
+7. Close the popup with the X button — verify the underlying page returns to its original zoom/layout
+8. Open the keyboard — popup should resize to fit above the keyboard
 
 ### Deployment
 
