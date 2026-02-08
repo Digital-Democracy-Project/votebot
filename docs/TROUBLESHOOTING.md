@@ -2931,6 +2931,47 @@ If any ancestor reports a non-default value, that's the element breaking `positi
 
 ---
 
+## Chat Widget Auto-Scroll Removed (Twitchy Scroll UX)
+
+### Symptom
+
+During streaming responses, the chat widget auto-scrolled to the bottom as new content arrived. Users found this behavior twitchy — they had to pull/scroll up multiple times to stop it from snapping back to the bottom. The "smart scroll" logic (pause auto-scroll when user scrolls up, resume when at bottom) was unreliable and made the chat feel unresponsive.
+
+### Fix (February 2026)
+
+Removed auto-scroll entirely. The chat no longer jumps to the bottom during streaming responses.
+
+**What was removed:**
+- `userScrolledUp` state tracking
+- `handleUserScroll()` scroll detection function
+- `showScrollButton()` conditional button display
+- Auto-scroll during `scrollToBottom()` (previously scrolled unless user had scrolled up)
+- `resetScrollState()` no longer resets scroll tracking (just hides the button)
+
+**What was kept:**
+- **Scroll-to-bottom arrow button** — appears when there is content below the visible area. Tapping it scrolls to the bottom and hides the button.
+- **Force-scroll on user's own message** — when the user sends a message, the chat scrolls to the bottom so they can see their message appear (`scrollToBottom(true)`)
+- **Button auto-hides** — when the user manually scrolls to the bottom, the arrow button disappears
+
+### Behavior Summary
+
+| Event | Scroll behavior |
+|-------|----------------|
+| User sends a message | Force-scroll to bottom |
+| Bot streams a response | No scroll — arrow button appears if content is below |
+| User taps arrow button | Scroll to bottom, hide button |
+| User manually scrolls to bottom | Arrow button hides |
+| Session restored with history | No scroll — arrow button appears if needed |
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `chat-widget/src/ui.js` | Removed auto-scroll logic, simplified `scrollToBottom()` to only scroll when `force=true`, scroll listener only hides button at bottom |
+| `chat-widget/dist/ddp-chat.min.js` | Rebuilt |
+
+---
+
 ## Getting Help
 
 If these troubleshooting steps don't resolve your issue:
