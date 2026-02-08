@@ -20,6 +20,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
   - [Failure Analysis (100-Document Sample)](#failure-analysis-100-document-sample)
 - [Full Index Rebuild Procedure](#full-index-rebuild-procedure)
 - [Human Handoff Messages Dropped in Multi-Worker Deployment](#human-handoff-messages-dropped-in-multi-worker-deployment)
+- [Vote Lookup Fails on Legislator Pages for Specific Bills](#vote-lookup-fails-on-legislator-pages-for-specific-bills)
 
 ---
 
@@ -1727,6 +1728,181 @@ python -c "..." # (test queries script above)
 | Webpage | 10-20 |
 | Training | 2-5 |
 | **Total** | **24,000-26,000** |
+
+---
+
+## Vote Lookup Fails on Legislator Pages for Specific Bills
+
+### Symptom
+
+When on a legislator page, VoteBot cannot answer "how did he vote on HR 4405?" even when the user provides the exact bill number. VoteBot claims there is no record of the vote. But if the user navigates to the bill's page and asks the same question, VoteBot answers correctly.
+
+### Example
+
+```
+[On Vern Buchanan's legislator page]
+
+User: "how did he vote on the epstein files?"
+Bot: "There is no record of a bill specifically titled 'the Epstein files'..."
+
+User: "i'm talking about HR 4405 to release the epstein files"
+Bot: "There is no record in the DDP database of Rep. Vern Buchanan voting on H.R. 4405..."
+
+User: "check your sources"
+Bot: "Rep. Buchanan does not have a recorded vote on H.R. 4405..."
+
+[User navigates to the HR 4405 bill page]
+
+User: "how did vern buchanan vote on this?"
+Bot: "Rep. Vern Buchanan voted YES on HR 4405..."  ← works!
+```
+
+### Root Cause (Three Bugs)
+
+Three separate bugs combined to prevent vote lookups from working on legislator pages:
+
+#### Bug 1: `_prefetch_bill_info` used year instead of Congress number for federal bills
+
+When the user mentions "HR 4405", the bill info pre-fetch correctly extracts the identifier but uses `str(datetime.now().year)` = `"2026"` as the session for the OpenStates API call. Federal bills require the Congress number (`"119"` for the 119th Congress, 2025-2027), not the calendar year.
+
+The `_verify_legislator_vote` method already had the correct Congress number conversion (line 1146-1148), but `_prefetch_bill_info` was missing it.
+
+```python
+# OLD (broken) — _prefetch_bill_info line 864-868:
+session = getattr(page_context, "session", None)
+if not session:
+    session = str(datetime.now().year)  # "2026" — wrong for federal bills!
+
+# FIXED — now matches _verify_legislator_vote logic:
+if not session:
+    year = datetime.now().year
+    if jurisdiction and jurisdiction.upper() == "US":
+        congress_number = (year - 2025) // 2 + 119
+        session = str(congress_number)  # "119" — correct!
+    else:
+        session = str(year)
+```
+
+**Impact**: Every federal bill lookup from a legislator/org page (where `page_context.session` is `None`) silently failed because OpenStates returned 404 for session "2026".
+
+#### Bug 2: `_verify_legislator_vote` didn't check `page_context.title` for legislator name
+
+When the dispute trigger fires on "check your sources", `_extract_legislator_name("check your sources")` returns nothing (all lowercase, no names). The method then searches conversation history:
+
+- User messages: "how did **he** vote..." → "he" is filtered as a common word
+- User messages: "i'm talking about HR 4405..." → no names, all lowercase
+- Assistant messages: "**As** of now, there is no record..." → returns "As" (Bug 3)
+
+The legislator's name is right there in `page_context.title = "Vern Buchanan"`, but it was never checked.
+
+```python
+# FIXED — added after initial message extraction:
+if not legislator_name and page_context and page_context.type == "legislator" and page_context.title:
+    legislator_name = page_context.title
+```
+
+#### Bug 3: `_extract_legislator_name` returned "As" from assistant messages
+
+Method 4 (capitalized word extraction) greedily returns the first capitalized word that isn't in the `common_words` set. The word "As" (sentence-initial capitalization in "As of now, there is no record...") was not in `common_words`, so it was returned as a "legislator name" before the method ever reached "Vern Buchanan" later in the text.
+
+```python
+# FIXED — added "as" and other common sentence starters to common_words:
+common_words = {
+    ...,
+    "as", "at", "in", "if", "it", "or", "but", "for", "with", "from",
+    "has", "have", "had", "was", "were", "are", "been", "being",
+    "however", "therefore", "furthermore", "additionally", "currently",
+    "also", "based", "please", "note", "here", "possible", "reasons",
+}
+```
+
+### Fix (February 2026)
+
+All three bugs fixed in `src/votebot/core/agent.py`:
+
+| Bug | Location | Fix |
+|-----|----------|-----|
+| Congress number | `_prefetch_bill_info` line ~865 | Added `(year - 2025) // 2 + 119` conversion for US jurisdiction |
+| Legislator name from page context | `_verify_legislator_vote` line ~1067 | Fall back to `page_context.title` on legislator pages |
+| "As" false positive | `_extract_legislator_name` line ~1244 | Added "as", "at", "in", "if", "it", etc. to `common_words` |
+
+### How It Works After Fix
+
+```
+User on legislator page (Vern Buchanan): "i'm talking about HR 4405"
+                                          ↓
+_should_use_bill_votes_tool() → True (has_bill_identifier = "HR4405")
+                                          ↓
+_prefetch_bill_info() extracts:
+  bill_identifier = "HR4405"
+  jurisdiction = "US" (default — no jurisdiction on legislator page)
+  session = "119" ← FIXED (was "2026")
+                                          ↓
+get_bill_info(jurisdiction="US", session="119", bill_identifier="HR4405")
+                                          ↓
+OpenStates returns full bill info with vote records → LLM has context → correct answer
+
+
+User on legislator page: "check your sources" (dispute trigger)
+                                          ↓
+_verify_legislator_vote():
+  legislator_name = page_context.title = "Vern Buchanan" ← FIXED (was "As")
+  bill_identifier = "HR4405" (from conversation history)
+  session = "119"
+                                          ↓
+lookup_legislator_vote("Vern Buchanan", "US", "119", "HR4405")
+                                          ↓
+Returns: {vote: "YES", motion: "passage", ...} → authoritative context
+```
+
+### Diagnostic Steps
+
+#### 1. Check if bill info pre-fetch is using correct session
+
+```bash
+sudo journalctl -u votebot | grep "Pre-fetching bill info"
+```
+
+Look for:
+```
+"Pre-fetching bill info for streaming" jurisdiction="US" session="119" bill_identifier="HR4405"
+```
+
+If you see `session="2026"` for a US bill, the fix is not deployed.
+
+#### 2. Check if legislator name was extracted from page context
+
+```bash
+sudo journalctl -u votebot | grep -E "legislator name|page context"
+```
+
+Look for:
+```
+"Using legislator name from page context" name="Vern Buchanan"
+```
+
+If instead you see `"Could not extract legislator name for vote verification"`, the page context title may be empty.
+
+#### 3. Check if vote verification triggered and succeeded
+
+```bash
+sudo journalctl -u votebot | grep -E "dispute|verification|Verifying"
+```
+
+Look for the full chain:
+```
+"Checking dispute/verification trigger" is_dispute=True
+"Dispute detected, attempting vote verification"
+"Verifying legislator vote from OpenStates" legislator="Vern Buchanan" bill="HR4405" session="119"
+"Vote verification successful"
+```
+
+### Lessons Learned
+
+1. **Session format varies by jurisdiction**: Federal bills use Congress numbers (119, 120...), state bills use years (2025, 2026...). Any code that constructs OpenStates API calls must account for this — don't assume year format.
+2. **Page context is an underused signal**: When the user says "he" or "she" on a legislator page, the name is in `page_context.title`. The system should always consider page context as a fallback for entity resolution.
+3. **Capitalized word extraction is fragile**: English sentences start with capital letters. Any "extract names from capitalized words" heuristic needs an extensive stop list, or preferably a different approach (NER, explicit name patterns).
+4. **Test from non-bill pages**: Vote lookups were only tested from bill pages where `page_context.session` was populated. Testing from legislator pages would have caught Bug 1.
 
 ---
 
