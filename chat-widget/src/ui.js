@@ -225,43 +225,48 @@ const DDPUI = (function() {
         return elements;
     }
 
+    // Saved viewport meta content, restored when popup closes
+    var _savedViewportContent = null;
+
     /**
-     * Fix mobile popup dimensions using JavaScript.
+     * Fix mobile popup dimensions by resetting the viewport.
      *
-     * On complex host pages (e.g., Webflow), content wider than the device screen
-     * can expand the layout viewport beyond the physical screen width. When this
-     * happens:
-     * 1. CSS @media (max-width: 480px) does NOT match — desktop styles apply
-     * 2. position:fixed resolves against the expanded layout viewport, not the
-     *    physical screen — so even pixel-based widths can be wrong
+     * On host pages with wide content (embeds, iframes, tables), the mobile
+     * browser expands the layout viewport beyond device-width. This causes:
+     * 1. CSS @media (max-width: 480px) to NOT match — desktop styles apply
+     * 2. position:fixed to resolve against the expanded layout viewport
+     * 3. All CSS units (%, vw, auto) and JS dimensions to be wrong
      *
-     * Fix: use screen.width for mobile detection, then constrain the host page's
-     * overflow-x to collapse the layout viewport back to device-width. This lets
-     * CSS media queries match and position:fixed work correctly.
+     * The only reliable fix is to temporarily reset the viewport meta tag to
+     * force the layout viewport back to device-width while the popup is open.
+     * Since the popup is full-screen on mobile, the user won't see the
+     * underlying page reflow.
      */
     function fixMobileSize() {
         if (!elements.chatPopup) return;
         var isMobile = screen.width <= 480 || screen.height <= 480;
         if (isMobile) {
-            // Constrain the host page's layout viewport to device-width by
-            // preventing horizontal overflow. This is the root fix — it makes
-            // the layout viewport match the physical screen, so CSS media
-            // queries match and position:fixed works correctly.
-            document.documentElement.style.overflowX = 'hidden';
+            // Force the layout viewport to device-width by resetting the
+            // viewport meta tag. This collapses any viewport expansion caused
+            // by wide page content, making CSS media queries and position:fixed
+            // work correctly.
+            var meta = document.querySelector('meta[name="viewport"]');
+            if (meta) {
+                _savedViewportContent = meta.getAttribute('content');
+                meta.setAttribute('content',
+                    'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
+            }
 
-            // Use Visual Viewport API for precise dimensions (accounts for
-            // on-screen keyboards, pinch-zoom, etc.)
-            var vv = window.visualViewport;
-            var w = vv ? vv.width : screen.width;
-            var h = vv ? vv.height : window.innerHeight;
+            // After viewport reset, set inline overrides to ensure mobile
+            // full-screen regardless of which CSS media queries match.
             var s = elements.chatPopup.style;
             s.position = 'fixed';
             s.top = '0';
             s.left = '0';
-            s.right = 'auto';   // Override desktop right: 24px
-            s.bottom = 'auto';  // Override desktop bottom: 100px
-            s.width = w + 'px';
-            s.height = h + 'px';
+            s.right = '0';
+            s.bottom = '0';
+            s.width = '100vw';
+            s.height = '100vh';
             s.maxWidth = 'none';
             s.maxHeight = 'none';
             s.borderRadius = '0';
@@ -282,6 +287,19 @@ const DDPUI = (function() {
     }
 
     /**
+     * Restore the original viewport meta tag after mobile popup closes.
+     */
+    function restoreViewport() {
+        if (_savedViewportContent !== null) {
+            var meta = document.querySelector('meta[name="viewport"]');
+            if (meta) {
+                meta.setAttribute('content', _savedViewportContent);
+            }
+            _savedViewportContent = null;
+        }
+    }
+
+    /**
      * Toggle chat popup visibility.
      */
     function togglePopup() {
@@ -293,9 +311,8 @@ const DDPUI = (function() {
             if (!elements.chatInput.disabled) {
                 elements.chatInput.focus();
             }
-        } else if (screen.width <= 480 || screen.height <= 480) {
-            // Restore host page horizontal overflow on mobile
-            document.documentElement.style.overflowX = '';
+        } else {
+            restoreViewport();
         }
     }
 
@@ -318,10 +335,7 @@ const DDPUI = (function() {
     function closePopup() {
         elements.chatPopup.classList.remove('open');
         elements.chatButton.classList.remove('hidden');
-        // Restore host page horizontal overflow on mobile
-        if (screen.width <= 480 || screen.height <= 480) {
-            document.documentElement.style.overflowX = '';
-        }
+        restoreViewport();
     }
 
     /**

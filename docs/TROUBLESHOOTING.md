@@ -2763,29 +2763,55 @@ On this page, `window.innerWidth` correctly reports the physical screen width, C
 
 ### Fix (February 2026)
 
-**Three-layer approach: collapse layout viewport + Visual Viewport API + CSS baseline**
+**Viewport meta reset: force device-width while popup is open**
 
-The fix addresses the root cause (expanded layout viewport) rather than trying to work around it:
+The fix addresses the root cause — the expanded layout viewport — by temporarily resetting the viewport meta tag when the popup opens on mobile. Since the popup is full-screen, the user doesn't see the underlying page reflow.
 
-**1. Collapse the layout viewport (root fix)**
+**Why this works**: The test site (`votebot.digitaldemocracyproject.org`) has `maximum-scale=1.0` in its viewport meta, which prevents the browser from expanding the layout viewport. The DDP production site does not. By temporarily adding `maximum-scale=1` when the popup opens, we get the same behavior.
 
-When the popup opens on mobile, set `overflow-x: hidden` on `<html>`. This prevents the layout viewport from expanding beyond device-width, which makes CSS media queries match and `position: fixed` work correctly:
-
-```javascript
-document.documentElement.style.overflowX = 'hidden';
-```
-
-This is restored when the popup closes so the host page is unaffected when the chat is not open.
-
-**2. Visual Viewport API for precise dimensions**
-
-Use `window.visualViewport` (supported in all modern mobile browsers) for the popup width/height. This API reports the exact visible area, accounting for on-screen keyboards, pinch-zoom, and viewport offsets:
+**1. Reset viewport meta when popup opens**
 
 ```javascript
-var vv = window.visualViewport;
-var w = vv ? vv.width : screen.width;   // fallback for older browsers
-var h = vv ? vv.height : window.innerHeight;
+var _savedViewportContent = null;
+
+function fixMobileSize() {
+    if (!elements.chatPopup) return;
+    var isMobile = screen.width <= 480 || screen.height <= 480;
+    if (isMobile) {
+        // Force layout viewport to device-width
+        var meta = document.querySelector('meta[name="viewport"]');
+        if (meta) {
+            _savedViewportContent = meta.getAttribute('content');
+            meta.setAttribute('content',
+                'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
+        }
+        // Set full-screen inline styles — after viewport reset,
+        // 100vw/100vh correctly map to device-width
+        var s = elements.chatPopup.style;
+        s.position = 'fixed';
+        s.top = '0'; s.left = '0'; s.right = '0'; s.bottom = '0';
+        s.width = '100vw'; s.height = '100vh';
+        s.maxWidth = 'none'; s.maxHeight = 'none';
+        s.borderRadius = '0';
+    } else {
+        // Desktop — clear all inline overrides
+    }
+}
 ```
+
+**2. Restore viewport meta when popup closes**
+
+```javascript
+function restoreViewport() {
+    if (_savedViewportContent !== null) {
+        var meta = document.querySelector('meta[name="viewport"]');
+        if (meta) meta.setAttribute('content', _savedViewportContent);
+        _savedViewportContent = null;
+    }
+}
+```
+
+Called from both `closePopup()` and `togglePopup()`.
 
 **3. CSS `inset: 0` with `width: auto` (baseline for well-behaved pages)**
 
@@ -2794,51 +2820,16 @@ var h = vv ? vv.height : window.innerHeight;
     .ddp-chat-popup {
         position: fixed;
         top: 0; left: 0; right: 0; bottom: 0;
-        width: auto;
-        height: auto;
-        max-width: none;
-        max-height: none;
-    }
-}
-```
-
-**Combined `fixMobileSize()` function (in `ui.js`):**
-
-```javascript
-function fixMobileSize() {
-    if (!elements.chatPopup) return;
-    // screen.width = physical screen size, unaffected by layout viewport expansion
-    var isMobile = screen.width <= 480 || screen.height <= 480;
-    if (isMobile) {
-        // Collapse layout viewport to device-width
-        document.documentElement.style.overflowX = 'hidden';
-
-        // Visual Viewport API for precise dimensions
-        var vv = window.visualViewport;
-        var w = vv ? vv.width : screen.width;
-        var h = vv ? vv.height : window.innerHeight;
-        var s = elements.chatPopup.style;
-        s.position = 'fixed';
-        s.top = '0';
-        s.left = '0';
-        s.right = 'auto';   // Override desktop right: 24px
-        s.bottom = 'auto';  // Override desktop bottom: 100px
-        s.width = w + 'px';
-        s.height = h + 'px';
-        s.maxWidth = 'none';
-        s.maxHeight = 'none';
-        s.borderRadius = '0';
-    } else {
-        // Desktop/tablet — clear inline overrides, let CSS handle it
-        // ... clear all inline style properties
+        width: auto; height: auto;
+        max-width: none; max-height: none;
     }
 }
 ```
 
 - `screen.width` detects mobile (unaffected by layout viewport expansion)
-- `overflow-x: hidden` on `<html>` collapses the expanded layout viewport back to device-width
-- `right: auto; bottom: auto` cancels the desktop `right: 24px; bottom: 100px` (avoids over-constraining)
-- `overflow-x` is restored when the popup is closed (both `closePopup()` and `togglePopup()`)
+- Viewport meta reset collapses the layout viewport to device-width, making all CSS units and media queries work correctly
+- `100vw`/`100vh` are safe after the viewport reset (they now equal device-width/height)
+- Original viewport meta is saved and restored when the popup closes
 - Fires on popup open, window resize, and orientation change
 
 ### What Didn't Work
@@ -2851,13 +2842,14 @@ function fixMobileSize() {
 | 4 | JS `window.innerWidth <= 480` check + `clientWidth` | `window.innerWidth` reports the **expanded layout viewport** (e.g., 940px on a 390px phone), so the mobile detection check fails and JS fix never activates |
 | 5 | JS `screen.width` detection + pixel width from `screen.width` | Mobile detection works, but `position: fixed` resolves against the expanded layout viewport — pixel dimensions don't map to the physical screen |
 | 6 | JS `setAttribute('style', ...)` with `width: 100% !important` | `100%` of the layout viewport = wider than the physical screen. Also broke the close button because `display: flex !important` overrode the CSS `display: none` when closing |
+| 7 | JS `overflow-x: hidden` on `<html>` + Visual Viewport API | `overflow-x: hidden` clips content but doesn't collapse an already-expanded layout viewport. The viewport remains wide even with overflow hidden |
 
 ### Files Changed
 
 | File | Change |
 |------|--------|
 | `chat-widget/src/styles.css` | Mobile: `width: auto; height: auto; max-width: none; max-height: none` with `inset: 0` |
-| `chat-widget/src/ui.js` | Added `fixMobileSize()` — uses `screen.width` for mobile detection, collapses layout viewport with `overflow-x: hidden`, uses Visual Viewport API for dimensions. Restores overflow on close |
+| `chat-widget/src/ui.js` | Added `fixMobileSize()` + `restoreViewport()` — uses `screen.width` for mobile detection, resets viewport meta to force device-width, sets `100vw`/`100vh` inline styles. Restores original viewport meta on close |
 | `chat-widget/dist/ddp-chat.min.js` | Rebuilt with CSS + JS changes |
 
 ### Verification
@@ -2908,13 +2900,14 @@ If any ancestor reports a non-default value, that's the element breaking `positi
 
 ### Lessons Learned
 
-1. **Layout viewport expansion breaks everything**: On pages with wide content (embeds, iframes, tables), the mobile browser's layout viewport can expand beyond the physical screen. This breaks CSS media queries, `window.innerWidth`, `100vw`, `100%`, and even explicit pixel dimensions via `position: fixed` — all of which reference the layout viewport, not the physical screen.
-2. **Fix the root cause, not the symptoms**: Instead of fighting the expanded layout viewport with increasingly complex CSS/JS overrides, collapse it with `overflow-x: hidden` on `<html>`. This makes all standard CSS techniques work correctly again.
+1. **Layout viewport expansion breaks everything**: On pages with wide content (embeds, iframes, tables), the mobile browser's layout viewport can expand beyond the physical screen. This breaks CSS media queries, `window.innerWidth`, `100vw`, `100%`, `position: fixed` dimensions, and even `overflow-x: hidden` can't collapse it after the fact. The viewport meta tag is the only thing that controls layout viewport size.
+2. **Fix the root cause: reset the viewport meta**: Instead of fighting the expanded layout viewport with CSS/JS overrides, temporarily reset the viewport meta tag to `width=device-width, initial-scale=1, maximum-scale=1`. This forces the browser to recalculate the layout viewport at device-width, making all standard CSS techniques work correctly.
 3. **`screen.width` is the only reliable mobile detection**: Unlike `window.innerWidth` (layout viewport), `screen.width` reports the physical screen dimensions in CSS pixels. It is unaffected by page content, viewport expansion, or transforms.
-4. **Visual Viewport API for precise dimensions**: `window.visualViewport.width/height` gives the exact visible area, accounting for on-screen keyboards, pinch-zoom, and viewport offsets.
+4. **`maximum-scale=1` is the key difference**: The test site had it, the production site didn't. This single meta tag attribute determines whether the browser can expand the layout viewport beyond device-width.
 5. **Never use `setAttribute('style', ...)` with `display` on toggled elements**: It overrides the CSS show/hide mechanism. Use individual `style.xxx` properties instead, and avoid setting `display` as an inline style.
 6. **Webflow sites are particularly challenging for embedded widgets**: Wide embeds, interactions engine, scroll animations, and complex layouts can all expand the layout viewport in ways that simple test pages cannot reproduce.
 7. **Test on real host pages**: The widget worked perfectly on the standalone test page but broke on the Webflow production site. Always test embedded widgets in the actual hosting environment.
+8. **User observation is gold**: The user's report that "pinch and zoom out makes it fill the screen" immediately pointed to the viewport/zoom issue, which led to the viewport meta reset approach.
 
 ---
 
