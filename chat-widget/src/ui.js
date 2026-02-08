@@ -230,26 +230,38 @@ const DDPUI = (function() {
      *
      * On complex host pages (e.g., Webflow), content wider than the device screen
      * can expand the layout viewport beyond the physical screen width. When this
-     * happens, CSS media queries like @media (max-width: 480px) do NOT match,
-     * so the desktop styles apply (width: 400px, right: 24px) — causing the popup
-     * to be positioned partially off-screen with the send button cut off.
+     * happens:
+     * 1. CSS @media (max-width: 480px) does NOT match — desktop styles apply
+     * 2. position:fixed resolves against the expanded layout viewport, not the
+     *    physical screen — so even pixel-based widths can be wrong
      *
-     * Fix: use screen.width (physical screen, not layout viewport) for mobile
-     * detection, and set comprehensive inline styles to override the desktop CSS.
+     * Fix: use screen.width for mobile detection, then constrain the host page's
+     * overflow-x to collapse the layout viewport back to device-width. This lets
+     * CSS media queries match and position:fixed work correctly.
      */
     function fixMobileSize() {
         if (!elements.chatPopup) return;
         var isMobile = screen.width <= 480 || screen.height <= 480;
         if (isMobile) {
-            var w = Math.min(screen.width, document.documentElement.clientWidth);
+            // Constrain the host page's layout viewport to device-width by
+            // preventing horizontal overflow. This is the root fix — it makes
+            // the layout viewport match the physical screen, so CSS media
+            // queries match and position:fixed works correctly.
+            document.documentElement.style.overflowX = 'hidden';
+
+            // Use Visual Viewport API for precise dimensions (accounts for
+            // on-screen keyboards, pinch-zoom, etc.)
+            var vv = window.visualViewport;
+            var w = vv ? vv.width : screen.width;
+            var h = vv ? vv.height : window.innerHeight;
             var s = elements.chatPopup.style;
             s.position = 'fixed';
             s.top = '0';
             s.left = '0';
-            s.right = '0';
-            s.bottom = '0';
+            s.right = 'auto';   // Override desktop right: 24px
+            s.bottom = 'auto';  // Override desktop bottom: 100px
             s.width = w + 'px';
-            s.height = window.innerHeight + 'px';
+            s.height = h + 'px';
             s.maxWidth = 'none';
             s.maxHeight = 'none';
             s.borderRadius = '0';
@@ -281,6 +293,9 @@ const DDPUI = (function() {
             if (!elements.chatInput.disabled) {
                 elements.chatInput.focus();
             }
+        } else if (screen.width <= 480 || screen.height <= 480) {
+            // Restore host page horizontal overflow on mobile
+            document.documentElement.style.overflowX = '';
         }
     }
 
@@ -303,6 +318,10 @@ const DDPUI = (function() {
     function closePopup() {
         elements.chatPopup.classList.remove('open');
         elements.chatButton.classList.remove('hidden');
+        // Restore host page horizontal overflow on mobile
+        if (screen.width <= 480 || screen.height <= 480) {
+            document.documentElement.style.overflowX = '';
+        }
     }
 
     /**
