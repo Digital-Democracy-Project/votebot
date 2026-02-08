@@ -109,6 +109,20 @@ Legislator Details:
 {legislator_info}
 """
 
+ORGANIZATION_CONTEXT_PROMPT = """## Current Context: Organization Page
+
+The user is viewing a specific organization's profile page on the Digital Democracy Project website.
+
+Focus your responses on:
+- The organization's mission, type, and focus areas
+- Bills the organization supports or opposes
+- The organization's policy positions and advocacy areas
+- How the organization engages with the legislative process
+
+Organization Details:
+{org_info}
+"""
+
 GENERAL_CONTEXT_PROMPT = """## Current Context: General Browsing
 
 The user is browsing the Digital Democracy Project website. Help them:
@@ -195,6 +209,9 @@ def build_system_prompt(
             else "No specific legislator selected."
         )
         prompt_parts.append(LEGISLATOR_CONTEXT_PROMPT.format(legislator_info=legislator_info))
+    elif page_type == "organization":
+        org_info = _format_org_info(page_info) if page_info else "No specific organization selected."
+        prompt_parts.append(ORGANIZATION_CONTEXT_PROMPT.format(org_info=org_info))
     else:
         prompt_parts.append(GENERAL_CONTEXT_PROMPT)
 
@@ -252,6 +269,21 @@ def _format_legislator_info(info: dict) -> str:
         parts.append(f"- Email: {info['email']}")
 
     return "\n".join(parts) if parts else "No legislator details available."
+
+
+def _format_org_info(info: dict) -> str:
+    """Format organization information for the prompt."""
+    parts = []
+    if info.get("name") or info.get("title"):
+        parts.append(f"- Organization: {info.get('name') or info.get('title')}")
+    if info.get("id"):
+        parts.append(f"- Organization ID: {info['id']}")
+    if info.get("jurisdiction"):
+        parts.append(f"- Jurisdiction: {info['jurisdiction']}")
+    if info.get("url"):
+        parts.append(f"- Page URL: {info['url']}")
+
+    return "\n".join(parts) if parts else "No organization details available."
 
 
 def format_retrieved_chunks(chunks: list[dict]) -> str:

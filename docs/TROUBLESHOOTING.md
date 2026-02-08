@@ -24,6 +24,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Wrong Vote Reported on Legislator Pages (LLM Ignores Data)](#wrong-vote-reported-on-legislator-pages-llm-ignores-data)
 - [Bill Not Found When Referenced by Common Name](#bill-not-found-when-referenced-by-common-name)
 - [Vote Lookup Fails on Bill Pages for Specific Legislators](#vote-lookup-fails-on-bill-pages-for-specific-legislators)
+- [Wrong Organization Returned on Org Pages](#wrong-organization-returned-on-org-pages)
 
 ---
 
@@ -366,14 +367,15 @@ window.DDPChatConfig.pageContext = {
 };
 ```
 
-### Comparison: Bill vs Legislator Filter Chains
+### Comparison: Bill vs Legislator vs Organization Filter Chains
 
-| Aspect | Bills | Legislators |
-|--------|-------|-------------|
-| Primary filter | `webflow_id` | `legislator_id` (OpenStates ID) |
-| Fallback 1 | `slug` | `webflow_id` |
-| Fallback 2 | — | `slug` |
-| Pre-retrieval resolution | `_lookup_bill_slug()` (from query) | `_resolve_legislator_id()` (from Webflow CMS) |
+| Aspect | Bills | Legislators | Organizations |
+|--------|-------|-------------|---------------|
+| Primary filter | `webflow_id` | `legislator_id` (OpenStates ID) | `webflow_id` |
+| Fallback 1 | `slug` | `webflow_id` | `slug` |
+| Fallback 2 | — | `slug` | — |
+| Pre-retrieval resolution | `_lookup_bill_slug()` (from query) | `_resolve_legislator_id()` (from Webflow CMS) | — (direct filter) |
+| Context prompt | `BILL_CONTEXT_PROMPT` | `LEGISLATOR_CONTEXT_PROMPT` | `ORGANIZATION_CONTEXT_PROMPT` |
 
 ### Lessons Learned
 
@@ -883,10 +885,12 @@ Configuration:
 #### Org type: Unfiltered semantic search
 Generic queries about an organization (e.g., "What type of organization is X?") go through the default semantic search, which may return random documents instead of the target org's profile.
 
-**Fix (implemented February 2026)**: Added `_is_organization_query()` detection and `_retrieve_organization_priority()` to `retrieval.py`. This:
+**Fix 1 (implemented February 2026)**: Added `_is_organization_query()` detection and `_retrieve_organization_priority()` to `retrieval.py`. This:
 1. Detects org-focused queries by checking for strong indicators ("organization", "nonprofit", "501(c)")
 2. Routes to a dedicated retrieval path that searches `document_type="organization"` first
 3. Fetches ALL chunks for the top matching org by `document_id` to capture bill positions in separate chunks
+
+**Fix 2 (implemented February 2026)**: Added page-context awareness for organization pages. When the user is ON an org page, retrieval is now scoped by `webflow_id`/`slug` — see [Wrong Organization Returned on Org Pages](#wrong-organization-returned-on-org-pages) for full details. This fixed the case where generic queries like "tell me about this org" returned the wrong organization because the query didn't match org keyword patterns.
 
 #### Org→Bill: Webflow CMS Runtime Lookup (February 2026)
 Organization documents in Pinecone are chunked aggressively. The org header (name, type, description) often ends up in one chunk (~25 characters), while bill positions are in separate chunks. Some bill positions may be missing entirely from the index. This caused ~10 test failures out of ~259 org tests.
@@ -2451,6 +2455,178 @@ If `legislator=None` is logged, the name extraction failed entirely — neither 
 2. **Targeted vote lookups aren't just for legislator pages**: When a user asks about a specific legislator on ANY page type, the LLM can't reliably find one name among 435 voters. Targeted extraction should always run.
 3. **Pronouns need conversation history**: Users naturally say "she" or "he" in follow-up questions. Without searching conversation history for the antecedent name, every pronoun reference breaks the pipeline.
 4. **Dispute verification already worked**: `_verify_legislator_vote` already used `page_context.id` for bill pages (Bug 1 only affected `_prefetch_bill_info`). This caused the confusing behavior where "check your sources" gave the right answer but the initial response didn't.
+
+---
+
+## Wrong Organization Returned on Org Pages
+
+### Symptom
+
+When a user is on an organization page (e.g., VFW — Veterans of Foreign Wars) and asks a generic question like "tell me about this org", VoteBot returns information about a **completely different organization** (e.g., Virginia Organizing). This happens because organization retrieval had no page-context awareness — unlike bills and legislators, which filter by `webflow_id`/`slug`, org pages did unscoped semantic search across ALL organizations.
+
+### Example
+
+```
+User navigates to: digitaldemocracyproject.org/organizations/veterans-of-foreign-wars
+User: "tell me about this org"
+VoteBot: "Virginia Organizing is a nonprofit that..." ← WRONG
+```
+
+### Root Cause (Four-Layer Problem)
+
+This bug had four contributing causes, all of which had to be fixed:
+
+#### Layer 1: No organization case in `_build_filters()` (retrieval.py)
+
+`_build_filters()` handled `bill` and `legislator` page types but had **no `organization` case**. When `page_context.type == "organization"`, it returned empty filters `{}`, so no Pinecone scoping was applied.
+
+#### Layer 2: Retrieval routing based on query, not page context (retrieval.py)
+
+`retrieve()` routed to `_retrieve_organization_priority()` based on **query content** (`_is_organization_query(query)`) rather than **page context** (`page_context.type == "organization"`). A generic query like "tell me about this org" didn't match the org keyword patterns, so it fell through to the default unscoped search.
+
+#### Layer 3: `_retrieve_organization_priority()` ignored filters (retrieval.py)
+
+Phase 1 of `_retrieve_organization_priority()` searched with `{"document_type": "organization"}` only, ignoring the `filters` parameter entirely. Even if filters had been populated (which they weren't due to Layer 1), they wouldn't have been used.
+
+#### Layer 4: No `ORGANIZATION_CONTEXT_PROMPT` in prompts.py
+
+Organization pages fell through to `GENERAL_CONTEXT_PROMPT` in `build_system_prompt()`. The LLM never received "you are discussing VFW" instructions, so even if RAG pulled the right docs, there was no system prompt anchor for the correct organization.
+
+### Fix (February 2026)
+
+**Fix 1 — Organization filter case (`retrieval.py` `_build_filters()`):**
+
+Added `organization` case mirroring the bill/legislator pattern:
+
+```python
+elif page_context.type == "organization":
+    if page_context.webflow_id:
+        filters["webflow_id"] = page_context.webflow_id
+    elif page_context.slug:
+        filters["slug"] = page_context.slug
+```
+
+**Fix 2 — Context-based routing (`retrieval.py` `retrieve()`):**
+
+Changed routing to trigger on page context OR query content:
+
+```python
+# OLD: elif self._is_organization_query(query):
+# NEW:
+elif effective_context.type == "organization" or self._is_organization_query(query):
+```
+
+This ensures org pages ALWAYS route to org-priority retrieval, regardless of query wording. The existing query-based check still works for org queries on non-org pages.
+
+**Fix 3 — Use filters in Phase 1 (`retrieval.py` `_retrieve_organization_priority()`):**
+
+Merged page-context filters with `document_type` in Phase 1:
+
+```python
+org_filter = {"document_type": "organization"}
+if filters.get("webflow_id"):
+    org_filter["webflow_id"] = filters["webflow_id"]
+elif filters.get("slug"):
+    org_filter["slug"] = filters["slug"]
+```
+
+When on an org page, Phase 1 is scoped to the current organization's chunks only. When no filters exist (e.g., org query on a general page), it falls back to the existing behavior.
+
+**Fix 4 — Organization context prompt (`prompts.py`):**
+
+Added `ORGANIZATION_CONTEXT_PROMPT` with org-specific focus areas (mission, bill positions, policy areas) and `_format_org_info()` helper. Updated `build_system_prompt()` to route `page_type == "organization"` to the new prompt instead of falling through to `GENERAL_CONTEXT_PROMPT`.
+
+### Resolution Flow
+
+```
+Webflow page → {type: "organization", webflow_id: "abc123", slug: "veterans-of-foreign-wars", title: "VFW"}
+                                    ↓
+              _build_filters(page_context) → {"webflow_id": "abc123"}
+              effective_context.type == "organization" → route to org priority
+                                    ↓
+              _retrieve_organization_priority():
+                Phase 1: filter={"document_type": "organization", "webflow_id": "abc123"}
+                         → returns VFW chunks only (not Virginia Organizing)
+                Phase 2: fetch all VFW chunks by document_id
+                Phase 3: fill remaining slots with general results
+                                    ↓
+              build_system_prompt(page_type="organization", page_info={name: "VFW", ...})
+                → ORGANIZATION_CONTEXT_PROMPT: "The user is viewing VFW..."
+                                    ↓
+              LLM knows it's discussing VFW → correct answer
+```
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/votebot/core/retrieval.py` | Added `organization` case in `_build_filters()`, context-based routing in `retrieve()`, filter merging in `_retrieve_organization_priority()` |
+| `src/votebot/core/prompts.py` | Added `ORGANIZATION_CONTEXT_PROMPT`, `_format_org_info()`, org routing in `build_system_prompt()` |
+
+### Diagnostic Steps
+
+#### 1. Check if filters are populated for org pages
+
+```bash
+sudo journalctl -u votebot --since "5 minutes ago" | grep "Built retrieval filters"
+```
+
+Look for:
+```
+"Built retrieval filters" page_type=organization filters={"webflow_id": "abc123"}
+```
+
+If you see `filters={}` for an organization page, the `_build_filters()` org case is not working.
+
+#### 2. Check if org-priority retrieval is triggered
+
+```bash
+sudo journalctl -u votebot --since "5 minutes ago" | grep "Organization retrieval phase"
+```
+
+Look for:
+```
+"Organization retrieval phase 1" org_chunks_found=N
+```
+
+If you see the default "Retrieval completed" without org phase logs, the routing condition isn't matching.
+
+#### 3. Verify the Webflow template sends org context
+
+The Webflow organization CMS template custom code should include:
+```javascript
+window.DDPChatConfig = window.DDPChatConfig || {};
+window.DDPChatConfig.pageContext = {
+    type: 'organization',
+    title: '{{wf {"path":"name","type":"PlainText"} }}',
+    slug: '{{wf {"path":"slug","type":"PlainText"} }}'
+};
+```
+
+### Comparison: Bill vs Legislator vs Organization Filter Chains
+
+| Aspect | Bills | Legislators | Organizations |
+|--------|-------|-------------|---------------|
+| Primary filter | `webflow_id` | `legislator_id` (OpenStates ID) | `webflow_id` |
+| Fallback 1 | `slug` | `webflow_id` | `slug` |
+| Fallback 2 | — | `slug` | — |
+| Pre-retrieval resolution | `_lookup_bill_slug()` (from query) | `_resolve_legislator_id()` (from Webflow CMS) | — (direct filter) |
+| Context prompt | `BILL_CONTEXT_PROMPT` | `LEGISLATOR_CONTEXT_PROMPT` | `ORGANIZATION_CONTEXT_PROMPT` |
+
+### Lessons Learned
+
+1. **Symmetry across page types**: When adding page-context awareness for one entity type, all three layers must be updated: `_build_filters()`, `retrieve()` routing, and `build_system_prompt()`. Missing any one layer can cause wrong results.
+2. **Query-based routing is insufficient**: Generic questions like "tell me about this" don't trigger keyword-based detection. Page context must be the primary routing signal.
+3. **Retrieval functions must respect filters**: Adding filters to `_build_filters()` is useless if the downstream retrieval function ignores the `filters` parameter.
+
+### Prevention
+
+- When adding a new page context type, use the following checklist:
+  1. `_build_filters()` in `retrieval.py` — add filter case
+  2. `retrieve()` in `retrieval.py` — add context-based routing
+  3. Retrieval function — use filters in Pinecone queries
+  4. `build_system_prompt()` in `prompts.py` — add context prompt
+  5. `_format_*_info()` in `prompts.py` — add format helper
 
 ---
 

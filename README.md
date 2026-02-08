@@ -8,10 +8,10 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 
 ## Features
 
-- **Context-Aware Responses**: Understands the page context (bill, legislator, general) to provide relevant answers
+- **Context-Aware Responses**: Understands the page context (bill, legislator, organization, general) to provide relevant answers
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
 - **Multi-Phase Retrieval**: For bill queries, prioritizes legislative text over CMS summaries, with dedicated phases for organization positions and vote records
-- **Organization-Aware Retrieval**: Automatically detects organization-focused queries and prioritizes org documents, fetching all related chunks for complete bill position data
+- **Organization-Aware Retrieval**: Scoped retrieval on org pages via `webflow_id`/`slug` filters (mirrors bill/legislator pattern), plus query-based detection for org queries on non-org pages. Fetches all related chunks for complete bill position data
 - **Legislator Slug Resolution**: Automatically resolves legislator slugs from Webflow pages to OpenStates person IDs via Webflow CMS lookup, enabling correct Pinecone filtering even when only the URL slug is available
 - **Webflow CMS Runtime Lookup**: Bidirectional Webflow CMS pre-fetch — fetches authoritative org positions for bill→org queries (99.1%) and bill positions for org→bill queries (100%), bypassing Pinecone similarity thresholds
 - **Webflow CMS Verification on Disputes**: When users challenge information, fetches authoritative details from Webflow CMS for the current page entity (bill facts, legislator party/chamber/district, org type/website) and injects as high-priority context

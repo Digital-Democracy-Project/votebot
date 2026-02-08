@@ -195,7 +195,7 @@ class RetrievalService:
                 max_chunks=max_chunks,
                 page_context=effective_context,
             )
-        elif self._is_organization_query(query):
+        elif effective_context.type == "organization" or self._is_organization_query(query):
             # Organization-focused retrieval: prioritize org documents
             final_results = await self._retrieve_organization_priority(
                 query=query,
@@ -931,11 +931,17 @@ class RetrievalService:
         Returns:
             List of SearchResult prioritizing organization content
         """
-        # Phase 1: Search organization documents
+        # Phase 1: Search organization documents (scoped by page context if available)
+        org_filter = {"document_type": "organization"}
+        if filters.get("webflow_id"):
+            org_filter["webflow_id"] = filters["webflow_id"]
+        elif filters.get("slug"):
+            org_filter["slug"] = filters["slug"]
+
         org_results = await self.vector_store.query(
             query=query,
             top_k=max_chunks,
-            filter={"document_type": "organization"},
+            filter=org_filter,
         )
         org_results = [
             r for r in org_results if r.score >= self.config.similarity_threshold
@@ -1015,6 +1021,11 @@ class RetrievalService:
             if page_context.id:
                 filters["legislator_id"] = page_context.id
             elif page_context.webflow_id:
+                filters["webflow_id"] = page_context.webflow_id
+            elif page_context.slug:
+                filters["slug"] = page_context.slug
+        elif page_context.type == "organization":
+            if page_context.webflow_id:
                 filters["webflow_id"] = page_context.webflow_id
             elif page_context.slug:
                 filters["slug"] = page_context.slug
