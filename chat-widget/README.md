@@ -27,7 +27,7 @@ Embeddable chat widget for Digital Democracy Project VoteBot.
   - Explicit mode (`?ddp_url=...`): Widget auto-opens when URL parameter provided
   - Discovery mode: Widget stays closed, auto-detects page context when opened
 - Human agent handoff support via Slack
-- **Full-screen mobile experience** on smaller screens (<480px) using `inset: 0` with auto dimensions — robust across all host pages including Webflow sites with complex CSS
+- **Full-screen mobile experience** on smaller screens — uses `screen.width` for reliable mobile detection (immune to layout viewport expansion on content-rich host pages) with JavaScript pixel-dimension overrides and CSS `inset: 0` baseline
 - Safe area support for notched phones (iPhone X+)
 
 ## Quick Start

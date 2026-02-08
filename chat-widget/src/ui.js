@@ -227,19 +227,45 @@ const DDPUI = (function() {
 
     /**
      * Fix mobile popup dimensions using JavaScript.
-     * CSS-only approaches (100%, 100vw, auto+inset) can fail on complex host pages
-     * (e.g., Webflow) due to ancestor transforms, viewport expansion, or scrollbar
-     * inclusion. Setting explicit pixel dimensions from JS is the most reliable fix.
+     *
+     * On complex host pages (e.g., Webflow), content wider than the device screen
+     * can expand the layout viewport beyond the physical screen width. When this
+     * happens, CSS media queries like @media (max-width: 480px) do NOT match,
+     * so the desktop styles apply (width: 400px, right: 24px) — causing the popup
+     * to be positioned partially off-screen with the send button cut off.
+     *
+     * Fix: use screen.width (physical screen, not layout viewport) for mobile
+     * detection, and set comprehensive inline styles to override the desktop CSS.
      */
     function fixMobileSize() {
         if (!elements.chatPopup) return;
-        if (window.innerWidth <= 480) {
-            elements.chatPopup.style.width = document.documentElement.clientWidth + 'px';
-            elements.chatPopup.style.height = window.innerHeight + 'px';
+        var isMobile = screen.width <= 480 || screen.height <= 480;
+        if (isMobile) {
+            var w = Math.min(screen.width, document.documentElement.clientWidth);
+            var s = elements.chatPopup.style;
+            s.position = 'fixed';
+            s.top = '0';
+            s.left = '0';
+            s.right = '0';
+            s.bottom = '0';
+            s.width = w + 'px';
+            s.height = window.innerHeight + 'px';
+            s.maxWidth = 'none';
+            s.maxHeight = 'none';
+            s.borderRadius = '0';
         } else {
-            // Desktop/tablet — let CSS handle it
-            elements.chatPopup.style.width = '';
-            elements.chatPopup.style.height = '';
+            // Desktop/tablet — clear inline overrides, let CSS handle it
+            var s = elements.chatPopup.style;
+            s.position = '';
+            s.top = '';
+            s.left = '';
+            s.right = '';
+            s.bottom = '';
+            s.width = '';
+            s.height = '';
+            s.maxWidth = '';
+            s.maxHeight = '';
+            s.borderRadius = '';
         }
     }
 
