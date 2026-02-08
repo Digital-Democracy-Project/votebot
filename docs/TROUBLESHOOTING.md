@@ -2763,11 +2763,31 @@ On this page, `window.innerWidth` correctly reports the physical screen width, C
 
 ### Fix (February 2026)
 
-**Two-layer approach: CSS `inset: 0` + JavaScript with `screen.width` detection**
+**Three-layer approach: collapse layout viewport + Visual Viewport API + CSS baseline**
 
-The key insight is that `screen.width` reports the **physical screen size** in CSS pixels, unaffected by layout viewport expansion. This is the only reliable way to detect mobile on pages that expand the layout viewport.
+The fix addresses the root cause (expanded layout viewport) rather than trying to work around it:
 
-**1. CSS: `inset: 0` with `width: auto` (baseline for well-behaved pages)**
+**1. Collapse the layout viewport (root fix)**
+
+When the popup opens on mobile, set `overflow-x: hidden` on `<html>`. This prevents the layout viewport from expanding beyond device-width, which makes CSS media queries match and `position: fixed` work correctly:
+
+```javascript
+document.documentElement.style.overflowX = 'hidden';
+```
+
+This is restored when the popup closes so the host page is unaffected when the chat is not open.
+
+**2. Visual Viewport API for precise dimensions**
+
+Use `window.visualViewport` (supported in all modern mobile browsers) for the popup width/height. This API reports the exact visible area, accounting for on-screen keyboards, pinch-zoom, and viewport offsets:
+
+```javascript
+var vv = window.visualViewport;
+var w = vv ? vv.width : screen.width;   // fallback for older browsers
+var h = vv ? vv.height : window.innerHeight;
+```
+
+**3. CSS `inset: 0` with `width: auto` (baseline for well-behaved pages)**
 
 ```css
 @media (max-width: 480px) {
@@ -2782,41 +2802,43 @@ The key insight is that `screen.width` reports the **physical screen size** in C
 }
 ```
 
-**2. JavaScript: `screen.width` for mobile detection + explicit pixel dimensions (reliable override)**
+**Combined `fixMobileSize()` function (in `ui.js`):**
 
 ```javascript
-// In ui.js — called on popup open, resize, and orientation change
 function fixMobileSize() {
     if (!elements.chatPopup) return;
     // screen.width = physical screen size, unaffected by layout viewport expansion
     var isMobile = screen.width <= 480 || screen.height <= 480;
     if (isMobile) {
-        var w = Math.min(screen.width, document.documentElement.clientWidth);
+        // Collapse layout viewport to device-width
+        document.documentElement.style.overflowX = 'hidden';
+
+        // Visual Viewport API for precise dimensions
+        var vv = window.visualViewport;
+        var w = vv ? vv.width : screen.width;
+        var h = vv ? vv.height : window.innerHeight;
         var s = elements.chatPopup.style;
         s.position = 'fixed';
         s.top = '0';
         s.left = '0';
-        s.right = '0';
-        s.bottom = '0';
+        s.right = 'auto';   // Override desktop right: 24px
+        s.bottom = 'auto';  // Override desktop bottom: 100px
         s.width = w + 'px';
-        s.height = window.innerHeight + 'px';
+        s.height = h + 'px';
         s.maxWidth = 'none';
         s.maxHeight = 'none';
         s.borderRadius = '0';
     } else {
         // Desktop/tablet — clear inline overrides, let CSS handle it
-        var s = elements.chatPopup.style;
-        s.position = '';
-        s.top = '';
-        s.left = '';
-        // ... clear all inline overrides
+        // ... clear all inline style properties
     }
 }
 ```
 
-- `screen.width` detects the physical screen (e.g., 390px on iPhone) even when `window.innerWidth` reports 940px due to layout viewport expansion
-- `Math.min(screen.width, document.documentElement.clientWidth)` ensures the popup never exceeds the physical screen
-- Comprehensive inline styles override ALL desktop CSS properties (position, top/left/right/bottom, width, height, etc.)
+- `screen.width` detects mobile (unaffected by layout viewport expansion)
+- `overflow-x: hidden` on `<html>` collapses the expanded layout viewport back to device-width
+- `right: auto; bottom: auto` cancels the desktop `right: 24px; bottom: 100px` (avoids over-constraining)
+- `overflow-x` is restored when the popup is closed (both `closePopup()` and `togglePopup()`)
 - Fires on popup open, window resize, and orientation change
 
 ### What Didn't Work
@@ -2827,13 +2849,15 @@ function fixMobileSize() {
 | 2 | CSS `width: 100vw` | Can include scrollbar width; reflects expanded layout viewport, not physical screen |
 | 3 | CSS `width: auto` + `inset: 0` | Still derived from the CSS containing block; media query also fails to match |
 | 4 | JS `window.innerWidth <= 480` check + `clientWidth` | `window.innerWidth` reports the **expanded layout viewport** (e.g., 940px on a 390px phone), so the mobile detection check fails and JS fix never activates |
+| 5 | JS `screen.width` detection + pixel width from `screen.width` | Mobile detection works, but `position: fixed` resolves against the expanded layout viewport — pixel dimensions don't map to the physical screen |
+| 6 | JS `setAttribute('style', ...)` with `width: 100% !important` | `100%` of the layout viewport = wider than the physical screen. Also broke the close button because `display: flex !important` overrode the CSS `display: none` when closing |
 
 ### Files Changed
 
 | File | Change |
 |------|--------|
 | `chat-widget/src/styles.css` | Mobile: `width: auto; height: auto; max-width: none; max-height: none` with `inset: 0` |
-| `chat-widget/src/ui.js` | Added `fixMobileSize()` — uses `screen.width` for mobile detection, sets popup to pixel dimensions from JS on open, resize, and orientation change |
+| `chat-widget/src/ui.js` | Added `fixMobileSize()` — uses `screen.width` for mobile detection, collapses layout viewport with `overflow-x: hidden`, uses Visual Viewport API for dimensions. Restores overflow on close |
 | `chat-widget/dist/ddp-chat.min.js` | Rebuilt with CSS + JS changes |
 
 ### Verification
@@ -2884,12 +2908,13 @@ If any ancestor reports a non-default value, that's the element breaking `positi
 
 ### Lessons Learned
 
-1. **Layout viewport expansion breaks everything**: On pages with wide content (embeds, iframes, tables), the mobile browser's layout viewport can expand beyond the physical screen. This breaks CSS media queries, `window.innerWidth`, `100vw`, and `100%` — all of which reference the layout viewport, not the physical screen.
-2. **`screen.width` is the only reliable mobile detection**: Unlike `window.innerWidth` (layout viewport), `screen.width` reports the physical screen dimensions in CSS pixels. It is unaffected by page content, viewport expansion, or transforms.
-3. **`document.documentElement.clientWidth` is the gold standard for visible width**: For setting actual dimensions, `clientWidth` of `<html>` returns the usable viewport width, bounded by the physical screen.
-4. **Webflow sites are particularly challenging for embedded widgets**: Wide embeds, interactions engine, scroll animations, and complex layouts can all expand the layout viewport in ways that simple test pages cannot reproduce.
-5. **Test on real host pages**: The widget worked perfectly on the standalone test page but broke on the Webflow production site. Always test embedded widgets in the actual hosting environment.
-6. **Use CSS as the baseline, JavaScript as the override**: CSS `inset: 0` provides a reasonable default for well-behaved pages. The JavaScript `fixMobileSize()` override with `screen.width` detection ensures correct behavior regardless of host page quirks.
+1. **Layout viewport expansion breaks everything**: On pages with wide content (embeds, iframes, tables), the mobile browser's layout viewport can expand beyond the physical screen. This breaks CSS media queries, `window.innerWidth`, `100vw`, `100%`, and even explicit pixel dimensions via `position: fixed` — all of which reference the layout viewport, not the physical screen.
+2. **Fix the root cause, not the symptoms**: Instead of fighting the expanded layout viewport with increasingly complex CSS/JS overrides, collapse it with `overflow-x: hidden` on `<html>`. This makes all standard CSS techniques work correctly again.
+3. **`screen.width` is the only reliable mobile detection**: Unlike `window.innerWidth` (layout viewport), `screen.width` reports the physical screen dimensions in CSS pixels. It is unaffected by page content, viewport expansion, or transforms.
+4. **Visual Viewport API for precise dimensions**: `window.visualViewport.width/height` gives the exact visible area, accounting for on-screen keyboards, pinch-zoom, and viewport offsets.
+5. **Never use `setAttribute('style', ...)` with `display` on toggled elements**: It overrides the CSS show/hide mechanism. Use individual `style.xxx` properties instead, and avoid setting `display` as an inline style.
+6. **Webflow sites are particularly challenging for embedded widgets**: Wide embeds, interactions engine, scroll animations, and complex layouts can all expand the layout viewport in ways that simple test pages cannot reproduce.
+7. **Test on real host pages**: The widget worked perfectly on the standalone test page but broke on the Webflow production site. Always test embedded widgets in the actual hosting environment.
 
 ---
 
