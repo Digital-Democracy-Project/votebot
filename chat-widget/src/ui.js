@@ -182,6 +182,11 @@ const DDPUI = (function() {
         window.addEventListener('orientationchange', function() {
             setTimeout(fixMobileSize, 100); // Delay for orientation to settle
         });
+        // Update height when visual viewport changes (keyboard show/hide,
+        // address bar hide, pinch-zoom)
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', fixMobileSize);
+        }
 
         // Set up click handler for scroll-to-bottom button
         elements.scrollBottomButton.addEventListener('click', function() {
@@ -257,16 +262,20 @@ const DDPUI = (function() {
                     'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
             }
 
-            // After viewport reset, set inline overrides to ensure mobile
-            // full-screen regardless of which CSS media queries match.
+            // Use Visual Viewport API for precise height (100vh on mobile
+            // includes the browser toolbar/address bar, clipping the bottom).
+            // visualViewport.height gives the actual visible area.
+            var vv = window.visualViewport;
+            var h = vv ? vv.height : window.innerHeight;
+
             var s = elements.chatPopup.style;
             s.position = 'fixed';
             s.top = '0';
             s.left = '0';
             s.right = '0';
-            s.bottom = '0';
+            s.bottom = 'auto';
             s.width = '100vw';
-            s.height = '100vh';
+            s.height = h + 'px';
             s.maxWidth = 'none';
             s.maxHeight = 'none';
             s.borderRadius = '0';
