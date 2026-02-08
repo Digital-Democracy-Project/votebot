@@ -26,6 +26,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Vote Lookup Fails on Bill Pages for Specific Legislators](#vote-lookup-fails-on-bill-pages-for-specific-legislators)
 - [Wrong Organization Returned on Org Pages](#wrong-organization-returned-on-org-pages)
 - [Sync Task Status Returns 404 in Multi-Worker Deployment](#sync-task-status-returns-404-in-multi-worker-deployment)
+- [Chat Widget Truncated on Mobile (Send Button Cut Off)](#chat-widget-truncated-on-mobile-send-button-cut-off)
 
 ---
 
@@ -2708,6 +2709,127 @@ redis-cli TTL votebot:sync:task:{task_id}
 
 1. **Any per-process state is a multi-worker bug waiting to happen.** When adding in-memory dicts for cross-request state, always ask: "Will this work if the next request hits a different worker?"
 2. **Write-through with in-memory fast-path** is the right pattern when Redis is available but not guaranteed — same-worker reads are fast, cross-worker reads degrade gracefully, and the code works identically without Redis (single-worker mode).
+
+---
+
+## Chat Widget Truncated on Mobile (Send Button Cut Off)
+
+### Symptom
+
+On mobile devices, the chat widget popup opens to be slightly larger than the visible screen. The send button and input area at the bottom are truncated/cut off, making it impossible to send messages. This only occurs when the widget is embedded on content-rich pages (e.g., the DDP homepage at `digitaldemocracyproject.org`), not on the standalone test site (`votebot.digitaldemocracyproject.org`).
+
+### Example
+
+```
+Mobile browser (URL bar visible):
+┌──────────────────────┐
+│ URL bar              │
+├──────────────────────┤  ← Visible viewport top
+│ VoteBot Header       │
+│                      │
+│ Chat messages...     │
+│                      │
+│                      │
+├──────────────────────┤  ← Visible viewport bottom
+│ [Input] [Send]       │  ← HIDDEN: extends below visible area
+└──────────────────────┘
+```
+
+### Root Cause
+
+The mobile full-screen CSS used `height: 100%` for the fixed-position popup:
+
+```css
+@media (max-width: 480px) {
+    .ddp-chat-popup {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        width: 100%;
+        height: 100%;       /* ← Problem */
+        max-height: 100%;   /* ← Problem */
+    }
+}
+```
+
+On mobile browsers, `height: 100%` for a `position: fixed` element resolves to the **layout viewport height** (also called the "large viewport"), which includes the area behind the browser's URL/address bar. When the URL bar is visible — which is the default state when browsing a content-rich, scrollable site — the actual visible area is ~50-80px shorter than the layout viewport. The widget overflows below the visible area, hiding the send button.
+
+### Why the Test Site Wasn't Affected
+
+The standalone test site at `votebot.digitaldemocracyproject.org` (`chat-widget/index.html`) is a simple single-screen splash page with minimal content. On such pages:
+1. The page doesn't scroll, so the browser URL bar doesn't transition between visible/hidden states
+2. The browser may already minimize the URL bar, making the layout viewport = the visual viewport
+3. The `maximum-scale=1.0` viewport meta tag may further constrain browser behavior
+
+On the DDP homepage (a full Webflow website with lots of scrollable content), the URL bar is typically visible when the user first opens the widget, causing the mismatch.
+
+### Fix (February 2026)
+
+Added `100dvh` (dynamic viewport height) declarations to the mobile CSS in `chat-widget/src/styles.css`:
+
+```css
+@media (max-width: 480px) {
+    .ddp-chat-popup {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        width: 100%;
+        height: 100%;       /* Fallback for older browsers */
+        height: 100dvh;     /* Dynamic viewport height — adjusts for mobile URL bar */
+        max-height: 100%;
+        max-height: 100dvh;
+        border-radius: 0;
+    }
+}
+```
+
+**How `dvh` works**: The `dvh` unit represents the **dynamic viewport height**, which adjusts in real-time as the browser's URL bar shows and hides. Unlike `vh` (which equals the large viewport height and never changes), `100dvh` always matches the currently visible area.
+
+**Progressive enhancement**: The double declaration (`height: 100%` followed by `height: 100dvh`) provides a fallback. Browsers that don't understand `dvh` ignore the second line and use `100%`. Browser support for `dvh` is excellent: Safari 15.4+, Chrome 108+, Firefox 101+ — covering essentially all modern mobile browsers.
+
+### Viewport Height Units Reference
+
+| Unit | Name | Behavior |
+|------|------|----------|
+| `vh` | Viewport Height | Equals the **large viewport** (URL bar hidden). Never changes. |
+| `svh` | Small Viewport Height | Equals the **small viewport** (URL bar visible). Never changes. |
+| `dvh` | Dynamic Viewport Height | Adjusts dynamically as the URL bar shows/hides. |
+| `%` | Percentage | For `position: fixed`, same as `vh` (large viewport). |
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `chat-widget/src/styles.css` | Added `height: 100dvh` and `max-height: 100dvh` in `@media (max-width: 480px)` block |
+| `chat-widget/dist/ddp-chat.min.js` | Rebuilt with updated CSS |
+
+### Verification
+
+Test on a mobile device (or Chrome DevTools mobile emulator with "Show device toolbar" + URL bar simulation):
+
+1. Open `digitaldemocracyproject.org` on a mobile device
+2. Tap the chat widget button
+3. The popup should fill exactly the visible viewport — send button fully visible
+4. Scroll the page before opening the widget (to ensure URL bar is visible)
+5. The popup should still fit within the visible area
+
+### Deployment
+
+After the fix, the rebuilt `ddp-chat.min.js` must be deployed:
+
+```bash
+# On the server
+scp chat-widget/dist/ddp-chat.min.js your-server:/var/www/votebot/
+
+# If the Webflow site loads the script from the API server:
+# The static file serving in nginx will pick up the new file automatically
+```
+
+For Webflow-hosted sites that load the widget via a `<script>` tag, ensure the script URL points to the updated file. Browser caching may delay propagation — consider adding a cache-busting query parameter if needed.
+
+### Lessons Learned
+
+1. **`100vh` is broken on mobile**: This is a long-standing issue across all mobile browsers. `100vh` always equals the large viewport (URL bar hidden), which is larger than what the user sees when the URL bar is visible. Use `dvh` for any element that must fill the visible viewport on mobile.
+2. **Test on real content pages**: The widget worked fine on the simple test page but broke on the content-rich production site. Always test embedded widgets on pages that match the real deployment context (scrollable content, visible URL bar).
+3. **Progressive enhancement with double declarations**: `height: 100%; height: 100dvh;` ensures the fix works on modern browsers while maintaining backward compatibility. Browsers ignore CSS properties they don't understand.
 
 ---
 

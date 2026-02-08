@@ -818,6 +818,7 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 - Pinecone index diagnostics
 - RAG test suite diagnostics and benchmarks
 - Full index rebuild procedures
+- Chat widget truncated on mobile (send button cut off due to mobile viewport height)
 
 ## Contributing
 
