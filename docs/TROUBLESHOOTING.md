@@ -2787,10 +2787,11 @@ function fixMobileSize() {
         }
         // Set full-screen inline styles — after viewport reset,
         // 100vw/100vh correctly map to device-width
-        // Use Visual Viewport API for height — 100vh on mobile includes
-        // the browser address bar/toolbar, clipping the bottom.
-        var vv = window.visualViewport;
-        var h = vv ? vv.height : window.innerHeight;
+        // Use window.innerHeight for height (not 100vh which includes
+        // the address bar, and not visualViewport.height which shrinks
+        // when the keyboard opens). After the viewport meta reset,
+        // innerHeight gives the correct full visible height.
+        var h = window.innerHeight;
 
         var s = elements.chatPopup.style;
         s.position = 'fixed';
@@ -2818,16 +2819,9 @@ function restoreViewport() {
 
 Called from both `closePopup()` and `togglePopup()`.
 
-**3. Visual Viewport resize listener (keyboard, address bar)**
+**3. Keyboard behavior**
 
-```javascript
-// In cacheElements(), alongside the resize/orientationchange listeners:
-if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', fixMobileSize);
-}
-```
-
-This updates the popup height when the on-screen keyboard appears/disappears or the address bar auto-hides.
+The popup intentionally does **NOT** listen for `visualViewport.resize`. That event fires when the on-screen keyboard opens, which would shrink the popup to the tiny area above the keyboard. Instead, the popup stays full-height and the browser's default behavior scrolls the focused input into view above the keyboard.
 
 **4. CSS `inset: 0` with `width: auto` (baseline for well-behaved pages)**
 
@@ -2844,11 +2838,11 @@ This updates the popup height when the on-screen keyboard appears/disappears or 
 
 - `screen.width` detects mobile (unaffected by layout viewport expansion)
 - Viewport meta reset collapses the layout viewport to device-width, making `100vw` and CSS media queries work correctly
-- Height uses `visualViewport.height` pixels (not `100vh`, which includes the address bar on mobile)
+- Height uses `window.innerHeight` pixels (not `100vh`, which includes the address bar on mobile; not `visualViewport.height`, which shrinks when the keyboard opens)
 - `bottom: auto` avoids over-constraining the box when an explicit height is set
-- `visualViewport.resize` listener updates height dynamically (keyboard show/hide, address bar)
+- Popup does NOT resize when the keyboard opens — stays full-height, browser scrolls the input into view
 - Original viewport meta is saved and restored when the popup closes
-- Fires on popup open, window resize, orientation change, and visual viewport resize
+- Fires on popup open, window resize, and orientation change
 
 ### What Didn't Work
 
@@ -2867,7 +2861,7 @@ This updates the popup height when the on-screen keyboard appears/disappears or 
 | File | Change |
 |------|--------|
 | `chat-widget/src/styles.css` | Mobile: `width: auto; height: auto; max-width: none; max-height: none` with `inset: 0` |
-| `chat-widget/src/ui.js` | Added `fixMobileSize()` + `restoreViewport()` — uses `screen.width` for mobile detection, resets viewport meta to force device-width, sets `100vw` width + `visualViewport.height` px height. Listens for `visualViewport.resize` for keyboard/address bar changes. Restores original viewport meta on close |
+| `chat-widget/src/ui.js` | Added `fixMobileSize()` + `restoreViewport()` — uses `screen.width` for mobile detection, resets viewport meta to force device-width, sets `100vw` width + `window.innerHeight` px height. Intentionally does NOT resize on keyboard open. Restores original viewport meta on close |
 | `chat-widget/dist/ddp-chat.min.js` | Rebuilt with CSS + JS changes |
 
 ### Verification
@@ -2881,7 +2875,7 @@ Test on a mobile device (or Chrome DevTools mobile emulator):
 5. Verify the input area is fully visible at the bottom (not clipped by address bar)
 6. Type a message and verify the send button is tappable
 7. Close the popup with the X button — verify the underlying page returns to its original zoom/layout
-8. Open the keyboard — popup should resize to fit above the keyboard
+8. Tap the input to open the keyboard — popup stays full-height, input scrolls into view above the keyboard
 
 ### Deployment
 

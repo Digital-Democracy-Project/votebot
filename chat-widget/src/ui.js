@@ -182,11 +182,11 @@ const DDPUI = (function() {
         window.addEventListener('orientationchange', function() {
             setTimeout(fixMobileSize, 100); // Delay for orientation to settle
         });
-        // Update height when visual viewport changes (keyboard show/hide,
-        // address bar hide, pinch-zoom)
-        if (window.visualViewport) {
-            window.visualViewport.addEventListener('resize', fixMobileSize);
-        }
+        // Note: intentionally NOT listening for visualViewport.resize here.
+        // That event fires when the on-screen keyboard opens, which would
+        // shrink the popup to fit above the keyboard — leaving barely any
+        // visible chat area. Instead, the popup stays full-height and the
+        // browser scrolls the focused input into view above the keyboard.
 
         // Set up click handler for scroll-to-bottom button
         elements.scrollBottomButton.addEventListener('click', function() {
@@ -262,11 +262,13 @@ const DDPUI = (function() {
                     'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no');
             }
 
-            // Use Visual Viewport API for precise height (100vh on mobile
-            // includes the browser toolbar/address bar, clipping the bottom).
-            // visualViewport.height gives the actual visible area.
-            var vv = window.visualViewport;
-            var h = vv ? vv.height : window.innerHeight;
+            // Use window.innerHeight for the popup height. After the viewport
+            // meta reset above, innerHeight correctly reports the visible area
+            // excluding the address bar. We intentionally do NOT use
+            // visualViewport.height here because it shrinks when the on-screen
+            // keyboard opens — we want the popup to stay full-height and let
+            // the browser scroll the input into view above the keyboard.
+            var h = window.innerHeight;
 
             var s = elements.chatPopup.style;
             s.position = 'fixed';
