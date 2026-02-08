@@ -21,6 +21,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Full Index Rebuild Procedure](#full-index-rebuild-procedure)
 - [Human Handoff Messages Dropped in Multi-Worker Deployment](#human-handoff-messages-dropped-in-multi-worker-deployment)
 - [Vote Lookup Fails on Legislator Pages for Specific Bills](#vote-lookup-fails-on-legislator-pages-for-specific-bills)
+- [Wrong Vote Reported on Legislator Pages (LLM Ignores Data)](#wrong-vote-reported-on-legislator-pages-llm-ignores-data)
 
 ---
 
@@ -1903,6 +1904,172 @@ Look for the full chain:
 2. **Page context is an underused signal**: When the user says "he" or "she" on a legislator page, the name is in `page_context.title`. The system should always consider page context as a fallback for entity resolution.
 3. **Capitalized word extraction is fragile**: English sentences start with capital letters. Any "extract names from capitalized words" heuristic needs an extensive stop list, or preferably a different approach (NER, explicit name patterns).
 4. **Test from non-bill pages**: Vote lookups were only tested from bill pages where `page_context.session` was populated. Testing from legislator pages would have caught Bug 1.
+
+---
+
+## Wrong Vote Reported on Legislator Pages (LLM Ignores Data)
+
+### Symptom
+
+When on a legislator page and asking about a specific bill, VoteBot reports the wrong vote. The bill data IS fetched correctly from OpenStates, but the LLM misreads the data and gives an incorrect answer. When the user disputes the answer, the verification also fails.
+
+### Example
+
+```
+[On Vern Buchanan's legislator page]
+
+User: "i'm talking about HR 1"
+Bot: "Rep. Vern Buchanan voted YES on HR 1 (One Big Beautiful Bill Act)..."
+     ← WRONG: Buchanan was one of only 2 Republicans who voted NO
+
+User: "he definitely did not vote yes. check again"
+Bot: "I couldn't find specific information about Rep. Buchanan's vote on HR 1..."
+     ← Verification fails silently
+
+[User navigates to the HR 1 bill page]
+
+User: "how did vern buchanan vote?"
+Bot: "Rep. Vern Buchanan voted NO on HR 1..."  ← works correctly
+```
+
+### Root Cause (Two Bugs)
+
+#### Bug 1: LLM drowns in voter data for large bills
+
+The `_prefetch_bill_info` method fetches the complete bill info from OpenStates, which for HR 1 includes 435+ voter names grouped by party. The formatted document lists up to 20 names per party per vote position. For a bill where 215 Republicans voted YES and only 2 voted NO, the YES list dominates the context.
+
+The LLM sees Buchanan is a Republican, sees the bill passed along party lines, and confidently concludes he voted YES — without carefully checking the NO list where Buchanan actually appears.
+
+**Fix**: When on a legislator page and a bill is mentioned, `_prefetch_bill_info` now also calls `lookup_legislator_vote()` for the specific legislator (using `page_context.title`). The result is prepended to the context as a `## SPECIFIC VOTE LOOKUP RESULT` section with a note that it should be used as the definitive answer. This gives the LLM an unambiguous, authoritative answer instead of requiring it to find one name in hundreds.
+
+```python
+# NEW — in _prefetch_bill_info, after fetching bill info:
+if page_context and page_context.type == "legislator" and page_context.title:
+    vote_result = await self.bill_votes.lookup_legislator_vote(
+        legislator_name=page_context.title,
+        jurisdiction=jurisdiction,
+        session=session,
+        bill_identifier=bill_identifier,
+    )
+    # Prepend: "## SPECIFIC VOTE LOOKUP RESULT
+    # **Vern Buchanan** voted **NO** on **HR1**
+    # *This is the authoritative vote record...*"
+```
+
+#### Bug 2: `_verify_legislator_vote` used legislator ID as bill identifier
+
+When a user disputes on a legislator page ("check again"), `_verify_legislator_vote` extracted the bill identifier from `page_context.id`:
+
+```python
+# OLD (broken):
+bill_identifier = page_context.id if page_context else None
+```
+
+On a legislator page, `page_context.id` is the legislator's OpenStates ID (e.g., `ocd-person/7e5729d1-198d-5389-be51-d1e05969729c`), NOT a bill identifier. Since this string is truthy, the code **skipped** extracting the bill from the message text or conversation history. It then called `lookup_legislator_vote(..., bill_identifier="ocd-person/7e5729d1-...")` which always returned `None`.
+
+```python
+# FIXED — only use page_context.id on bill pages:
+bill_identifier = None
+jurisdiction = page_context.jurisdiction if page_context else None
+if page_context and page_context.type == "bill":
+    bill_identifier = page_context.id
+```
+
+Now on a legislator page, `bill_identifier` starts as `None`, causing the code to correctly extract "HR1" from the message text or conversation history.
+
+### Fix (February 2026)
+
+Both bugs fixed in `src/votebot/core/agent.py`:
+
+| Bug | Location | Fix |
+|-----|----------|-----|
+| LLM ignores minority vote | `_prefetch_bill_info` | Also call `lookup_legislator_vote()` on legislator pages and prepend specific vote to context |
+| Legislator ID used as bill ID | `_verify_legislator_vote` line ~1120 | Only use `page_context.id` as `bill_identifier` when `page_context.type == "bill"` |
+
+### How It Works After Fix
+
+```
+User on legislator page (Vern Buchanan): "i'm talking about HR 1"
+                                          ↓
+_prefetch_bill_info():
+  bill_identifier = "HR1"
+  jurisdiction = "US", session = "119"
+  → get_bill_info() returns full bill data
+  → ALSO: lookup_legislator_vote("Vern Buchanan", "US", "119", "HR1")
+  → Returns {vote: "no", legislator: "Buchanan", motion: "On Passage"}
+  → Prepends: "## SPECIFIC VOTE LOOKUP RESULT
+     **Buchanan** voted **NO** on **HR1**
+     *This is the authoritative vote record...*"
+                                          ↓
+LLM sees the specific vote result FIRST → correct answer: "Buchanan voted NO"
+
+
+User: "check again" (dispute)
+                                          ↓
+_verify_legislator_vote():
+  legislator_name = page_context.title = "Vern Buchanan"
+  bill_identifier = None ← FIXED (was "ocd-person/...")
+  → _extract_bill_from_text("check again") → None
+  → Search conversation history → finds "HR 1" → bill_identifier = "HR1"
+  → lookup_legislator_vote("Vern Buchanan", "US", "119", "HR1")
+  → Returns authoritative vote → correct verification
+```
+
+### Diagnostic Steps
+
+#### 1. Check if specific legislator vote was looked up during pre-fetch
+
+```bash
+sudo journalctl -u votebot | grep "specific legislator vote"
+```
+
+Look for:
+```
+"Found specific legislator vote during bill pre-fetch" legislator="Vern Buchanan" vote="no" bill="HR1"
+```
+
+If you see `"Legislator not found in bill votes during pre-fetch"`, the name matching may have failed.
+
+#### 2. Check if `page_context.id` is being used incorrectly
+
+```bash
+sudo journalctl -u votebot | grep "Verifying legislator vote"
+```
+
+Look for:
+```
+"Verifying legislator vote from OpenStates" legislator="Vern Buchanan" bill="HR1" session="119"
+```
+
+If you see `bill="ocd-person/..."`, the fix is not deployed — it's still using the legislator ID as the bill identifier.
+
+#### 3. Verify the dispute verification finds the bill in conversation history
+
+```bash
+sudo journalctl -u votebot | grep "bill identifier"
+```
+
+Look for:
+```
+"Found bill identifier in conversation history" bill_identifier="HR1"
+```
+
+### Why This Only Affects Legislator Pages
+
+On a **bill page**, both bugs are irrelevant:
+1. The bill info pre-fetch doesn't need a specific legislator vote — the user can see the bill, and the LLM has the bill context
+2. `page_context.id` is already the bill identifier, and `page_context.type == "bill"` so it's used correctly
+
+On a **legislator page**:
+1. The user expects answers about THIS legislator, but the bill data contains 435 voters — the LLM has to find the needle in the haystack
+2. `page_context.id` is a legislator ID, not a bill ID — it was incorrectly used for vote lookups
+
+### Lessons Learned
+
+1. **Don't rely on the LLM to find one name in hundreds**: For large vote events (435 House members), always do a targeted lookup and give the LLM the specific answer.
+2. **`page_context.id` semantics vary by page type**: On bill pages it's a bill identifier, on legislator pages it's a legislator ID. Code that uses it must check `page_context.type` first.
+3. **Minority votes are the hardest**: When 99% of a party votes one way, the LLM's training data strongly biases it toward the majority. Explicit authoritative data injection is essential.
+4. **Test from ALL page types**: This bug only manifested on legislator pages. Testing only from bill pages wouldn't catch it.
 
 ---
 

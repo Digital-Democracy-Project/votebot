@@ -890,7 +890,53 @@ class VoteBotAgent:
 
             if result and result.found:
                 formatted = self.bill_votes.format_bill_info_document(result)
-                return f"## Bill Information from OpenStates API\n\n{formatted}"
+
+                # When on a legislator page, also look up this specific legislator's
+                # vote and prepend it to the context. This prevents the LLM from
+                # drowning in hundreds of voter names and guessing incorrectly.
+                legislator_vote_context = ""
+                if page_context and page_context.type == "legislator" and page_context.title:
+                    try:
+                        vote_result = await self.bill_votes.lookup_legislator_vote(
+                            legislator_name=page_context.title,
+                            jurisdiction=jurisdiction,
+                            session=session,
+                            bill_identifier=bill_identifier,
+                        )
+                        if vote_result:
+                            legislator_vote_context = (
+                                f"## SPECIFIC VOTE LOOKUP RESULT\n\n"
+                                f"**{vote_result['legislator']}** voted **{vote_result['vote'].upper()}** "
+                                f"on **{vote_result['bill']}**\n"
+                                f"Motion: {vote_result.get('motion', 'N/A')[:100]}\n"
+                                f"Date: {vote_result.get('date', 'N/A')}\n"
+                                f"Chamber: {vote_result.get('chamber', 'N/A')}\n"
+                                f"Result: {vote_result.get('result', 'N/A').upper()}\n\n"
+                                f"*This is the authoritative vote record for this legislator. "
+                                f"Use this as the definitive answer.*\n\n"
+                            )
+                            logger.info(
+                                "Found specific legislator vote during bill pre-fetch",
+                                legislator=page_context.title,
+                                vote=vote_result['vote'],
+                                bill=bill_identifier,
+                            )
+                        else:
+                            legislator_vote_context = (
+                                f"## SPECIFIC VOTE LOOKUP RESULT\n\n"
+                                f"**{page_context.title}** was NOT found in the vote records "
+                                f"for **{bill_identifier}** in OpenStates. They may not have voted "
+                                f"on this bill, or the bill may not have had a recorded vote yet.\n\n"
+                            )
+                            logger.info(
+                                "Legislator not found in bill votes during pre-fetch",
+                                legislator=page_context.title,
+                                bill=bill_identifier,
+                            )
+                    except Exception as e:
+                        logger.warning("Error looking up specific legislator vote", error=str(e))
+
+                return f"{legislator_vote_context}## Bill Information from OpenStates API\n\n{formatted}"
             else:
                 logger.info(
                     "Bill not found in OpenStates",
@@ -1117,8 +1163,13 @@ class VoteBotAgent:
             return ""
 
         # Get bill info from page context first, then fall back to message extraction
-        bill_identifier = page_context.id if page_context else None
+        # IMPORTANT: Only use page_context.id as bill_identifier when on a BILL page.
+        # On legislator pages, page_context.id is the legislator's OpenStates ID,
+        # not a bill identifier — using it would cause the lookup to fail silently.
+        bill_identifier = None
         jurisdiction = page_context.jurisdiction if page_context else None
+        if page_context and page_context.type == "bill":
+            bill_identifier = page_context.id
 
         # If no bill identifier from page context, extract from message text
         if not bill_identifier:
