@@ -865,7 +865,14 @@ class VoteBotAgent:
         session = getattr(page_context, "session", None)
         if not session:
             from datetime import datetime
-            session = str(datetime.now().year)
+            year = datetime.now().year
+            # For federal bills (US jurisdiction), use Congress number instead of year
+            # Congress numbers: 119th = 2025-2027, 118th = 2023-2024, etc.
+            if jurisdiction and jurisdiction.upper() == "US":
+                congress_number = (year - 2025) // 2 + 119
+                session = str(congress_number)
+            else:
+                session = str(year)
 
         logger.info(
             "Pre-fetching bill info for streaming",
@@ -1064,6 +1071,11 @@ class VoteBotAgent:
         # Extract legislator name from message or conversation
         legislator_name = self._extract_legislator_name(message)
 
+        # If no name in message and we're on a legislator page, use page context title
+        if not legislator_name and page_context and page_context.type == "legislator" and page_context.title:
+            legislator_name = page_context.title
+            logger.debug("Using legislator name from page context", name=legislator_name)
+
         if not legislator_name and conversation_history:
             # Look in recent conversation for legislator names
             # Prioritize user questions (they contain "did X vote" patterns)
@@ -1251,6 +1263,10 @@ class VoteBotAgent:
             "yes", "yea", "nay", "not", "voted", "according", "official",
             "apologies", "thank", "you", "result", "result:", "your", "let",
             "sources", "source", "source:", "digital", "democracy", "project",
+            "as", "at", "in", "if", "it", "or", "but", "for", "with", "from",
+            "has", "have", "had", "was", "were", "are", "been", "being",
+            "however", "therefore", "furthermore", "additionally", "currently",
+            "also", "based", "please", "note", "here", "possible", "reasons",
         }
 
         words = text.split()
