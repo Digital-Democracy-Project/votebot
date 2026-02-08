@@ -97,47 +97,54 @@ class VoteBotAgent:
         start_time: float,
         human_active: bool = False,
     ) -> None:
-        """Fire-and-forget log of a completed query to JSONL."""
-        from votebot.services.query_logger import get_query_logger
+        """Fire-and-forget log of a completed query to JSONL.
 
-        query_logger = get_query_logger()
-        if query_logger is None:
-            return
+        Wrapped in try/except so logging failures (including missing
+        aiofiles dependency) never affect user-facing responses.
+        """
+        try:
+            from votebot.services.query_logger import get_query_logger
 
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
+            query_logger = get_query_logger()
+            if query_logger is None:
+                return
 
-        citations_dicts = [
-            {
-                "source": c.source,
-                "document_id": c.document_id,
-                "url": c.url,
-                "relevance_score": c.relevance_score,
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+            citations_dicts = [
+                {
+                    "source": c.source,
+                    "document_id": c.document_id,
+                    "url": c.url,
+                    "relevance_score": c.relevance_score,
+                }
+                for c in result.citations
+            ]
+
+            page_context_dict = {
+                "type": page_context.type,
+                "id": page_context.id,
+                "title": page_context.title,
+                "jurisdiction": page_context.jurisdiction,
+                "webflow_id": getattr(page_context, "webflow_id", None),
+                "slug": getattr(page_context, "slug", None),
             }
-            for c in result.citations
-        ]
 
-        page_context_dict = {
-            "type": page_context.type,
-            "id": page_context.id,
-            "title": page_context.title,
-            "jurisdiction": page_context.jurisdiction,
-            "webflow_id": getattr(page_context, "webflow_id", None),
-            "slug": getattr(page_context, "slug", None),
-        }
-
-        asyncio.create_task(
-            query_logger.log_query(
-                session_id=session_id,
-                message=message,
-                response=result.response,
-                confidence=result.confidence,
-                citations=citations_dicts,
-                page_context=page_context_dict,
-                channel=channel,
-                duration_ms=duration_ms,
-                human_active=human_active,
+            asyncio.create_task(
+                query_logger.log_query(
+                    session_id=session_id,
+                    message=message,
+                    response=result.response,
+                    confidence=result.confidence,
+                    citations=citations_dicts,
+                    page_context=page_context_dict,
+                    channel=channel,
+                    duration_ms=duration_ms,
+                    human_active=human_active,
+                )
             )
-        )
+        except Exception:
+            logger.warning("Query logging failed", exc_info=True)
 
     async def process_message(
         self,
