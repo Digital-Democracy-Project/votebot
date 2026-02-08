@@ -31,7 +31,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Vector Database**: Pinecone
 - **LLM**: OpenAI GPT-4.1 (via Responses API with web search)
 - **Embeddings**: OpenAI text-embedding-3-large
-- **Caching**: Redis
+- **Caching / Cross-Worker State**: Redis (thread-to-session mapping + pub/sub for multi-worker handoff)
 - **Database**: PostgreSQL (optional)
 
 ## Quick Start
@@ -93,7 +93,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `CONGRESS_API_KEY` | Congress.gov API key | For federal bills |
 | `OPENSTATES_API_KEY` | OpenStates API key | For state bills |
 | `TAVILY_API_KEY` | Tavily API key for web search fallback | For web search |
-| `REDIS_URL` | Redis connection URL | Optional |
+| `REDIS_URL` | Redis connection URL (cross-worker handoff state) | For multi-worker |
 | `SLACK_BOT_TOKEN` | Slack Bot Token (xoxb-...) | For handoff |
 | `SLACK_APP_TOKEN` | Slack App Token (xapp-...) | For handoff |
 | `SLACK_SUPPORT_CHANNEL` | Slack channel for support | For handoff |
@@ -329,9 +329,13 @@ VoteBot supports seamless handoff to human agents via Slack when users request h
 1. User sends message like "I want to talk to a human"
 2. VoteBot detects handoff request (`requires_human: true`)
 3. A thread is created in the support channel with conversation context
-4. Human agents reply in the Slack thread
-5. Agent messages are relayed to the user in real-time
-6. Agent reacts with ✅ to resolve and return to VoteBot
+4. Thread-to-session mapping is stored in both local memory and Redis (`votebot:threads` hash)
+5. Human agents reply in the Slack thread
+6. Agent messages are published via Redis pub/sub (`votebot:agent_events` channel) for cross-worker delivery
+7. The worker that owns the user's WebSocket receives the event and delivers it
+8. Agent reacts with ✅ to resolve and return to VoteBot
+
+**Multi-worker support**: VoteBot runs with 2 uvicorn workers. Redis ensures that Slack events received by one worker are delivered to the user's WebSocket on another worker. See [Troubleshooting](docs/TROUBLESHOOTING.md#human-handoff-messages-dropped-in-multi-worker-deployment) for details.
 
 ### Thread Format
 
@@ -645,6 +649,7 @@ votebot/
 │   │   ├── web_search.py    # Tavily web search
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
 │   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification)
+│   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub)
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service
 │   │   ├── service.py       # UnifiedSyncService
@@ -800,6 +805,7 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-s
 
 For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). This includes:
 
+- Human handoff messages dropped in multi-worker deployment (Redis cross-worker state)
 - Wrong legislator returned on Webflow pages (slug→ID resolution)
 - Legislator vote lookups not working
 - Corrupted legislator-votes documents (chunk boundary parsing issues)

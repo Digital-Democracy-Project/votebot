@@ -946,8 +946,22 @@ CREATE TABLE agent_metrics (
 
 ### Redis Data Structures
 
+**Implemented (February 2026) — `src/votebot/services/redis_store.py`:**
+
 ```
-# Active session (JSON)
+# Thread-to-session mapping (Redis hash — for cross-worker Slack event routing)
+HSET votebot:threads {slack_thread_ts} {session_id}
+# No TTL — cleaned up on handoff resolution
+
+# Agent event pub/sub (for cross-worker WebSocket delivery)
+PUBLISH votebot:agent_events {"event_type": "agent_message", "session_id": "abc123", "payload": {"text": "...", "agent_name": "..."}}
+PUBLISH votebot:agent_events {"event_type": "agent_left", "session_id": "abc123", "payload": {"thread_ts": "..."}}
+```
+
+**Not yet implemented (from original design):**
+
+```
+# Active session (JSON) — currently in-memory per-worker
 session:{session_id} -> {
     "session_id": "abc123",
     "created_at": 1706640000,
@@ -958,10 +972,6 @@ session:{session_id} -> {
     "slack_channel": "C123456",
     "assigned_agent": "U789"
 }
-TTL: 24 hours
-
-# Session-to-thread mapping (for Slack event routing)
-thread:{slack_thread_ts} -> session_id
 TTL: 24 hours
 
 # Rate limiting
@@ -1547,7 +1557,7 @@ class WebSocketUser(User):
 | Widget hosting | CDN vs same domain | CDN (CloudFront) for caching |
 | Session ID generation | UUID vs JWT | UUID (simpler, no auth needed) |
 | Message persistence | All vs handoff-only | All (valuable for analytics) |
-| Multi-instance coordination | Redis pub/sub vs dedicated broker | Redis pub/sub (already using Redis) |
+| Multi-instance coordination | Redis pub/sub vs dedicated broker | Redis pub/sub (already using Redis) — **IMPLEMENTED** (Feb 2026): `redis_store.py` provides thread-to-session hash + pub/sub for `agent_events` channel |
 
 ### Answered During Implementation
 

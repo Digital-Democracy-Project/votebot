@@ -31,6 +31,12 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events."""
     # Startup
     setup_logging(settings.log_level)
+
+    # Initialize Redis for cross-worker shared state
+    from votebot.services.redis_store import get_redis_store
+    redis_store = get_redis_store()
+    await redis_store.connect()
+
     logger.info(
         "Starting VoteBot API",
         version=settings.app_version,
@@ -41,6 +47,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    await redis_store.disconnect()
     logger.info("Shutting down VoteBot API")
 
 

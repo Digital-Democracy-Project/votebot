@@ -19,6 +19,161 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [RAG Test Suite Diagnostics](#rag-test-suite-diagnostics)
   - [Failure Analysis (100-Document Sample)](#failure-analysis-100-document-sample)
 - [Full Index Rebuild Procedure](#full-index-rebuild-procedure)
+- [Human Handoff Messages Dropped in Multi-Worker Deployment](#human-handoff-messages-dropped-in-multi-worker-deployment)
+
+---
+
+## Human Handoff Messages Dropped in Multi-Worker Deployment
+
+### Symptom
+
+Human agent replies in Slack are silently dropped. The agent types a reply in the Slack thread, but the user never sees it in the chat widget. Server logs show:
+
+```
+uvicorn[6163]: "Agent message received" thread_ts="1770510495.372949" agent="Ramon"
+uvicorn[6163]: "No session found for thread" thread_ts="1770510495.372949"
+```
+
+### Root Cause
+
+VoteBot runs with 2 uvicorn workers for concurrent request handling. The `thread_to_session` mapping (Slack thread_ts → WebSocket session_id) was stored in an **in-memory dict**, which is per-process:
+
+1. **Worker A** handles the user's WebSocket connection and initiates the handoff → creates Slack thread → stores `thread_to_session[thread_ts] = session_id` in its own memory
+2. **Worker B** receives the Slack Socket Mode event when the agent replies → looks up `thread_to_session[thread_ts]` → gets `None` because Worker B has a different in-memory dict
+3. Worker B logs "No session found for thread" and silently drops the message
+
+Similarly, `active_connections` (WebSocket objects) are inherently per-process — Worker B cannot send a message through Worker A's WebSocket even if it had the mapping.
+
+### Fix (February 2026)
+
+Added Redis-based cross-worker state via `src/votebot/services/redis_store.py`:
+
+**A. Thread-to-session mapping** — Redis hash `votebot:threads`:
+- `initiate_handoff()` writes to both the local dict (fast path) AND Redis
+- `_handle_agent_message()` and `_handle_handoff_resolved()` look up the local dict first, then fall back to Redis
+
+**B. Pub/sub for agent event delivery** — Redis channel `votebot:agent_events`:
+- When Worker B receives a Slack event, it publishes an `agent_message` or `agent_left` event to Redis
+- All workers subscribe to the channel; the worker that owns the WebSocket (`session_id in active_connections`) delivers the message
+- Workers that don't own the connection silently ignore the event
+
+**C. Graceful fallback** — All Redis methods no-op when `_client is None`. Single-worker deployments without Redis continue working via in-memory dicts (existing behavior).
+
+### Architecture
+
+```
+Worker A (owns WebSocket)              Worker B (receives Slack event)
+─────────────────────────              ──────────────────────────────
+1. User confirms handoff
+2. create_handoff_thread() → Slack
+3. thread_to_session → Redis HSET
+                                       4. Socket Mode event received
+                                       5. Redis HGET → session_id
+                                       6. Redis PUBLISH agent_message
+7. Redis SUBSCRIBE receives event
+8. Checks active_connections → found!
+9. WebSocket send_json → user sees it
+```
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/votebot/services/redis_store.py` | NEW — Redis client wrapper (thread mapping + pub/sub + lifecycle) |
+| `src/votebot/api/routes/websocket.py` | Redis lookup fallback in `_handle_agent_message` and `_handle_handoff_resolved`; pub/sub publish instead of direct send; `_handle_redis_event` subscriber; `_deliver_agent_message` and `_deliver_handoff_resolved` extracted |
+| `src/votebot/main.py` | Redis `connect()` in lifespan startup, `disconnect()` in shutdown |
+
+### EC2 Deployment
+
+Redis must be installed on the EC2 instance:
+
+```bash
+sudo apt update && sudo apt install -y redis-server
+sudo systemctl enable redis-server
+sudo systemctl start redis-server
+redis-cli ping  # Should return PONG
+```
+
+No changes to `.env` needed — default `redis_url=redis://localhost:6379/0` works.
+
+### Diagnostic Steps
+
+#### 1. Verify Redis is connected
+
+```bash
+sudo journalctl -u votebot | grep -i redis
+```
+
+Look for:
+```
+"Redis connected for cross-worker state" url="redis://localhost:6379/0"
+```
+
+If you see:
+```
+"Redis unavailable — falling back to in-memory state (single-worker only)"
+```
+
+Then Redis is not running or unreachable. Check:
+```bash
+redis-cli ping                    # Should return PONG
+sudo systemctl status redis-server # Should be active
+```
+
+#### 2. Verify pub/sub subscriber is running
+
+```bash
+sudo journalctl -u votebot | grep "pub/sub"
+```
+
+Look for:
+```
+"Redis pub/sub subscriber started" channel="votebot:agent_events"
+```
+
+This should appear once per worker (so twice with 2 workers).
+
+#### 3. Verify thread mapping is stored in Redis
+
+After initiating a handoff, check Redis directly:
+
+```bash
+redis-cli HGETALL votebot:threads
+```
+
+Should show `thread_ts → session_id` mappings for active handoffs.
+
+#### 4. Monitor Redis events in real-time
+
+```bash
+redis-cli SUBSCRIBE votebot:agent_events
+```
+
+Then have an agent reply in Slack — you should see the JSON event published.
+
+#### 5. Check for delivery
+
+```bash
+sudo journalctl -u votebot | grep -E "agent_event|deliver|handle_redis"
+```
+
+Look for:
+- `"Handling agent message callback"` — Slack event received
+- `"Agent message delivered to user"` — Message sent via WebSocket
+
+### Graceful Degradation
+
+If Redis goes down:
+- **Normal chat** continues working (Redis is only used for cross-worker handoff state)
+- **Handoff in the SAME worker** continues working (local `thread_to_session` dict still used as fast path)
+- **Handoff across workers** fails silently (agent messages dropped with "No session found for thread" log)
+- **Fix**: Restart Redis (`sudo systemctl restart redis-server`), then restart VoteBot
+
+### Prevention
+
+- Monitor Redis with health checks: `GET /votebot/v1/health/ready` includes Redis status
+- Ensure Redis is configured to start on boot: `sudo systemctl enable redis-server`
+- Consider Redis persistence (RDB/AOF) if thread mappings must survive Redis restarts (not critical — handoffs are short-lived)
 
 ---
 

@@ -12,6 +12,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from votebot.api.schemas.chat import PageContext
 from votebot.config import get_settings
 from votebot.core.agent import VoteBotAgent
+from votebot.services.redis_store import get_redis_store
 from votebot.services.slack import get_slack_service, SlackService
 
 logger = structlog.get_logger()
@@ -46,6 +47,11 @@ class ConnectionManager:
             )
             self._slack_started = True
             logger.info("Slack service started for handoff support")
+
+        # Start Redis pub/sub subscriber for cross-worker agent event delivery
+        redis_store = get_redis_store()
+        if redis_store.is_available:
+            await redis_store.subscribe_agent_events(self._handle_redis_event)
 
     async def connect(self, websocket: WebSocket, session_id: str):
         """Accept and register a new connection."""
@@ -140,8 +146,9 @@ class ConnectionManager:
                 slack_thread_ts=thread_ts,
             )
 
-            # Map thread to session for routing
+            # Map thread to session for routing (local + Redis)
             thread_to_session[thread_ts] = session_id
+            await get_redis_store().set_thread_mapping(thread_ts, session_id)
 
             logger.info(
                 "Handoff initiated",
@@ -167,6 +174,7 @@ class ConnectionManager:
         Handle incoming agent message from Slack.
 
         Called by SlackService when an agent replies in a thread.
+        Routes via Redis pub/sub so the worker owning the WebSocket delivers.
         """
         logger.info(
             "Handling agent message callback",
@@ -175,29 +183,31 @@ class ConnectionManager:
             message_preview=message[:50] if message else "",
         )
 
+        # Look up session: local cache first, then Redis
         session_id = thread_to_session.get(thread_ts)
+        if not session_id:
+            session_id = await get_redis_store().get_session_for_thread(thread_ts)
         if not session_id:
             logger.warning("No session found for thread", thread_ts=thread_ts)
             return
 
+        redis_store = get_redis_store()
+        if redis_store.is_available:
+            # Publish via Redis — the worker owning the WebSocket will deliver
+            await redis_store.publish_agent_event("agent_message", session_id, {
+                "text": message,
+                "agent_name": agent_name,
+            })
+        else:
+            # No Redis — deliver directly (single-worker mode)
+            await self._deliver_agent_message(session_id, message, agent_name)
+
+    async def _deliver_agent_message(self, session_id: str, message: str, agent_name: str):
+        """Deliver an agent message to the user via WebSocket (local worker)."""
         # Store message in session
         self.add_message(session_id, "agent", message)
 
-        # Send to user via WebSocket
-        logger.info(
-            "Sending agent_message to WebSocket",
-            session_id=session_id,
-            agent_name=agent_name,
-        )
-        await self.send_json(session_id, {
-            "type": "agent_message",
-            "payload": {
-                "text": message,
-                "agent_name": agent_name,
-            }
-        })
-
-        # Also send agent_joined on first message if not already sent
+        # Send agent_joined on first message if not already sent
         session = self.get_session(session_id)
         if session and not session.get("agent_joined_sent"):
             await self.send_json(session_id, {
@@ -208,8 +218,17 @@ class ConnectionManager:
             })
             self.update_session(session_id, agent_joined_sent=True)
 
+        # Send to user via WebSocket
+        await self.send_json(session_id, {
+            "type": "agent_message",
+            "payload": {
+                "text": message,
+                "agent_name": agent_name,
+            }
+        })
+
         logger.info(
-            "Agent message relayed to user",
+            "Agent message delivered to user",
             session_id=session_id,
             agent=agent_name,
         )
@@ -219,34 +238,77 @@ class ConnectionManager:
         Handle handoff resolution (checkmark reaction in Slack).
 
         Called by SlackService when an agent reacts with checkmark.
+        Routes via Redis pub/sub so the worker owning the WebSocket delivers.
         """
+        # Look up session: local cache first, then Redis
         session_id = thread_to_session.get(thread_ts)
+        if not session_id:
+            session_id = await get_redis_store().get_session_for_thread(thread_ts)
         if not session_id:
             logger.warning("No session found for thread", thread_ts=thread_ts)
             return
 
-        # Update session
-        self.update_session(
-            session_id,
-            handoff_active=False,
-            agent_joined_sent=False,
-        )
+        redis_store = get_redis_store()
+        if redis_store.is_available:
+            # Publish via Redis — the worker owning the WebSocket will deliver
+            await redis_store.publish_agent_event("agent_left", session_id, {
+                "thread_ts": thread_ts,
+            })
+        else:
+            # No Redis — deliver directly (single-worker mode)
+            await self._deliver_handoff_resolved(session_id, thread_ts)
 
-        # Remove thread mapping
-        if thread_ts in thread_to_session:
-            del thread_to_session[thread_ts]
-
-        # Notify user
-        await self.send_json(session_id, {
-            "type": "agent_left",
-            "payload": {}
-        })
+        # Clean up mappings (local + Redis) regardless of which worker
+        thread_to_session.pop(thread_ts, None)
+        await redis_store.remove_thread_mapping(thread_ts)
 
         # Send resolved message to Slack
         if self._slack_service:
             await self._slack_service.send_handoff_resolved_message(thread_ts)
 
         logger.info("Handoff resolved", session_id=session_id)
+
+    async def _deliver_handoff_resolved(self, session_id: str, thread_ts: str):
+        """Deliver handoff resolved event to user via WebSocket (local worker)."""
+        self.update_session(
+            session_id,
+            handoff_active=False,
+            agent_joined_sent=False,
+        )
+        await self.send_json(session_id, {
+            "type": "agent_left",
+            "payload": {}
+        })
+
+    async def _handle_redis_event(self, event_data: dict):
+        """Handle an agent event received via Redis pub/sub.
+
+        Only delivers if THIS worker owns the WebSocket for the session.
+        """
+        session_id = event_data.get("session_id")
+        event_type = event_data.get("event_type")
+        payload = event_data.get("payload", {})
+
+        if not session_id or not event_type:
+            return
+
+        # Only deliver if this worker owns the WebSocket connection
+        if session_id not in self.active_connections:
+            return
+
+        if event_type == "agent_message":
+            await self._deliver_agent_message(
+                session_id,
+                payload.get("text", ""),
+                payload.get("agent_name", "Agent"),
+            )
+
+        elif event_type == "agent_left":
+            thread_ts = payload.get("thread_ts")
+            await self._deliver_handoff_resolved(session_id, thread_ts)
+            # Clean up local mapping
+            if thread_ts:
+                thread_to_session.pop(thread_ts, None)
 
 
 manager = ConnectionManager()
