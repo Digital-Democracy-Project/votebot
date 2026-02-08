@@ -100,11 +100,10 @@
         left: 0;
         right: 0;
         bottom: 0;
-        width: 100vw;       /* Use vw, not % — immune to ancestor transforms breaking position:fixed */
-        height: 100%;       /* Fallback for older browsers */
-        height: 100dvh;     /* Dynamic viewport height — adjusts for mobile URL bar */
-        max-width: 100vw;
-        max-height: 100dvh;
+        width: auto;        /* Override base 400px — let inset: 0 determine width from viewport */
+        height: auto;       /* Override base 600px — let inset: 0 determine height from viewport */
+        max-width: none;    /* Override base max-width */
+        max-height: none;   /* Override base max-height */
         border-radius: 0;
         /* Support for notched phones (iPhone X+) */
         padding-top: env(safe-area-inset-top);

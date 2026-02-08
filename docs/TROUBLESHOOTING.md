@@ -2761,48 +2761,47 @@ The standalone test site at `votebot.digitaldemocracyproject.org` (`chat-widget/
 
 ### Fix (February 2026)
 
-Two changes to `chat-widget/src/styles.css`:
-
-**1. Mobile popup: Use `vw` instead of `%` for width**
+**Mobile popup: Use `inset: 0` with `width: auto` instead of explicit viewport units**
 
 ```css
 @media (max-width: 480px) {
     .ddp-chat-popup {
-        width: 100vw;       /* vw is ALWAYS viewport-relative, immune to ancestor transforms */
-        height: 100dvh;     /* dvh adjusts for mobile URL bar */
-        max-width: 100vw;
-        max-height: 100dvh;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        width: auto;        /* Override base 400px — let inset determine size */
+        height: auto;       /* Override base 600px — let inset determine size */
+        max-width: none;    /* Override base max-width */
+        max-height: none;   /* Override base max-height */
     }
 }
 ```
 
-The `vw` unit is **always** relative to the viewport, regardless of what the containing block is. Even when `position: fixed` is affected by an ancestor transform, `100vw` = exact viewport width.
+This is the standard pattern for full-screen fixed overlays. Rather than explicitly setting the width to a viewport unit (`100vw`, `100%`, etc.), we set all four inset properties to `0` and let the browser derive the dimensions from the containing block.
 
-**2. Base popup: Add `max-width: 100vw` safety net**
+**Why this works when `100vw` and `100%` don't:**
 
-```css
-.ddp-chat-popup {
-    width: 400px;
-    max-width: 100vw;    /* Safety net — popup can never exceed viewport width */
-}
-```
+- `100vw` can include scrollbar width or be miscalculated when the page has horizontal overflow that expands the layout viewport
+- `100%` resolves to the containing block width, which can change from the viewport to an ancestor element if that ancestor has `transform`, `perspective`, `filter`, `will-change: transform`, or `contain: paint`
+- `inset: 0` with `width: auto` calculates the width as `containing block width - left - right = containing block width - 0 - 0`. For `position: fixed`, the containing block is normally the viewport, so this fills the viewport exactly — matching the behavior of simple test pages where none of these issues arise
 
-This caps the popup width on all breakpoints. On desktop (where 400px < viewport width), it has no effect. On any device where the popup would otherwise overflow, it prevents the overflow.
+The base popup (desktop) retains `max-width: 100vw` as a safety net to prevent overflow on narrow viewports.
 
-### Viewport-Relative Units vs Percentage
+### What Didn't Work
 
-| Unit | Relative To | Affected by ancestor transform? |
-|------|------------|------|
-| `%` | Containing block (normally viewport for `position: fixed`) | **Yes** — changes to ancestor if it has `transform` |
-| `vw` | Viewport (always) | **No** — always the viewport regardless of containing block |
-| `dvw` | Dynamic viewport (always) | **No** — same as `vw` for width (URL bar only affects height) |
-| `dvh` | Dynamic viewport (always) | **No** — adjusts as mobile URL bar shows/hides |
+| Approach | Problem |
+|----------|---------|
+| `width: 100%` | Resolves to ancestor width if any ancestor has `transform` (common on Webflow sites) |
+| `width: 100vw` | Can include scrollbar width; may reflect expanded layout viewport on pages with horizontal overflow |
+| `width: 100dvw` | Same behavior as `100vw` for width (dynamic viewport only differs for height) |
 
 ### Files Changed
 
 | File | Change |
 |------|--------|
-| `chat-widget/src/styles.css` | Base: added `max-width: 100vw`. Mobile: changed `width: 100%` → `width: 100vw`, added `max-width: 100vw`, added `height: 100dvh` / `max-height: 100dvh` |
+| `chat-widget/src/styles.css` | Mobile: use `width: auto; height: auto; max-width: none; max-height: none` with `inset: 0` instead of explicit viewport units |
 | `chat-widget/dist/ddp-chat.min.js` | Rebuilt with updated CSS |
 
 ### Verification
@@ -2853,10 +2852,11 @@ If any ancestor reports a non-default value, that's the element breaking `positi
 
 ### Lessons Learned
 
-1. **`width: 100%` is NOT always viewport width for fixed elements**: If any ancestor has `transform` (or `perspective`, `filter`, `will-change: transform`, `contain: paint`), the containing block for `position: fixed` changes from the viewport to that ancestor. Use `vw` units instead — they are always viewport-relative.
-2. **Webflow sites commonly use transforms**: The Webflow interactions engine, scroll animations, sticky navbars, and performance optimizations all apply CSS transforms. Any widget embedded on a Webflow site should assume `position: fixed` may be broken by ancestor transforms.
-3. **Test on real host pages**: The widget worked perfectly on the standalone test page (no transforms) but broke on the Webflow production site. Always test embedded widgets in the actual hosting environment.
-4. **Defensive CSS**: Adding `max-width: 100vw` to base styles is a zero-cost safety net that prevents overflow on any device, regardless of which breakpoint is active.
+1. **For full-screen overlays, prefer `inset: 0` over explicit dimensions**: Setting `top/right/bottom/left: 0` with `width: auto; height: auto` is more robust than any explicit dimension (`100vw`, `100%`, `100dvh`). It lets the browser derive the correct size from the containing block without depending on specific viewport units.
+2. **`width: 100vw` has hidden pitfalls**: On desktop, it includes scrollbar width. On pages with horizontal overflow, the layout viewport can expand beyond the device screen, making `100vw` wider than what's visible. Avoid it for full-screen overlays.
+3. **`width: 100%` for `position: fixed` depends on ancestor transforms**: If any ancestor has `transform`, `perspective`, `filter`, `will-change: transform`, or `contain: paint`, the containing block changes from the viewport to that ancestor.
+4. **Webflow sites commonly use transforms and complex layouts**: The Webflow interactions engine, scroll animations, sticky navbars, and embeds can all affect `position: fixed` behavior. Any widget embedded on a Webflow site should use the most robust CSS patterns.
+5. **Test on real host pages**: The widget worked perfectly on the standalone test page but broke on the Webflow production site. Always test embedded widgets in the actual hosting environment.
 
 ---
 
