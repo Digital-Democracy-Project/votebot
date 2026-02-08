@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from votebot.api.middleware.auth import api_key_auth
 from votebot.config import Settings, get_settings
+from votebot.services.redis_store import get_redis_store
 from votebot.sync import (
     ContentType,
     SyncIdentifier,
@@ -132,6 +133,8 @@ async def _run_batch_sync_background(
 ) -> None:
     """Run batch sync in the background and update task status."""
     _background_tasks[task_id]["status"] = "running"
+    redis_store = get_redis_store()
+    await redis_store.set_sync_task(task_id, _background_tasks[task_id])
     start_time = time.perf_counter()
 
     try:
@@ -158,6 +161,7 @@ async def _run_batch_sync_background(
                 "document_ids": result.document_ids,
             },
         })
+        await redis_store.set_sync_task(task_id, _background_tasks[task_id])
 
         logger.info(
             "Background batch sync complete",
@@ -178,6 +182,7 @@ async def _run_batch_sync_background(
                 "errors": [str(e)],
             },
         })
+        await redis_store.set_sync_task(task_id, _background_tasks[task_id])
 
 
 @router.post(
@@ -277,6 +282,10 @@ async def sync_unified(
                 },
             }
 
+            # Write-through to Redis for cross-worker visibility
+            redis_store = get_redis_store()
+            await redis_store.set_sync_task(task_id, _background_tasks[task_id])
+
             # Start background task
             asyncio.create_task(
                 _run_batch_sync_background(task_id, content_type, options, settings)
@@ -362,13 +371,17 @@ async def get_sync_status(
 
     Returns the current status and results (if completed) of a batch sync operation.
     """
-    if task_id not in _background_tasks:
+    task = _background_tasks.get(task_id)
+    if task is None:
+        # Cross-worker fallback: check Redis
+        redis_store = get_redis_store()
+        task = await redis_store.get_sync_task(task_id)
+
+    if task is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task not found: {task_id}",
         )
-
-    task = _background_tasks[task_id]
     result = task.get("result", {})
 
     return UnifiedSyncResponse(

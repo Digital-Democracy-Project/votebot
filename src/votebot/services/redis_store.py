@@ -109,6 +109,36 @@ class RedisStore:
         except Exception as e:
             logger.error("Redis: failed to remove thread mapping", error=str(e))
 
+    # -- Sync task storage --
+
+    SYNC_TASK_PREFIX = "votebot:sync:task:"
+    SYNC_TASK_TTL = 86400  # 24 hours
+
+    async def set_sync_task(self, task_id: str, task_data: dict):
+        """Store sync task state in Redis with TTL."""
+        if not self._client:
+            return
+        try:
+            await self._client.set(
+                f"{self.SYNC_TASK_PREFIX}{task_id}",
+                json.dumps(task_data),
+                ex=self.SYNC_TASK_TTL,
+            )
+        except Exception as e:
+            logger.error("Redis: failed to set sync task", task_id=task_id, error=str(e))
+
+    async def get_sync_task(self, task_id: str) -> dict | None:
+        """Retrieve sync task state from Redis."""
+        if not self._client:
+            return None
+        try:
+            data = await self._client.get(f"{self.SYNC_TASK_PREFIX}{task_id}")
+            if data:
+                return json.loads(data)
+        except Exception as e:
+            logger.error("Redis: failed to get sync task", task_id=task_id, error=str(e))
+        return None
+
     # -- Pub/sub for agent events --
 
     async def publish_agent_event(self, event_type: str, session_id: str, payload: dict):

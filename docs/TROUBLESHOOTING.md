@@ -25,6 +25,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Bill Not Found When Referenced by Common Name](#bill-not-found-when-referenced-by-common-name)
 - [Vote Lookup Fails on Bill Pages for Specific Legislators](#vote-lookup-fails-on-bill-pages-for-specific-legislators)
 - [Wrong Organization Returned on Org Pages](#wrong-organization-returned-on-org-pages)
+- [Sync Task Status Returns 404 in Multi-Worker Deployment](#sync-task-status-returns-404-in-multi-worker-deployment)
 
 ---
 
@@ -2644,6 +2645,69 @@ Key observations:
   3. Retrieval function — use filters in Pinecone queries
   4. `build_system_prompt()` in `prompts.py` — add context prompt
   5. `_format_*_info()` in `prompts.py` — add format helper
+
+---
+
+## Sync Task Status Returns 404 in Multi-Worker Deployment
+
+### Symptom
+
+User triggers a batch sync via `POST /votebot/v1/sync/unified` and receives a `task_id`. When polling `GET /votebot/v1/sync/unified/status/{task_id}`, the response is `404 Task not found` instead of the expected status.
+
+### Root Cause
+
+Background sync task state was stored in a **per-process in-memory dict** (`_background_tasks`). With 2 uvicorn workers:
+
+1. **Worker A** handles the POST request → creates `task_id` → stores it in Worker A's `_background_tasks` → starts background `asyncio.create_task()`
+2. **Worker B** receives the GET status request → looks up `_background_tasks[task_id]` → not found (Worker B has its own empty dict) → returns 404
+
+This is the same class of bug as [Human Handoff Messages Dropped in Multi-Worker Deployment](#human-handoff-messages-dropped-in-multi-worker-deployment) — per-process state invisible across workers.
+
+### Solution
+
+**Write-through to Redis** with in-memory fast-path (commit: see git log).
+
+#### Changes to `services/redis_store.py`
+
+Added two methods to `RedisStore`:
+
+- `set_sync_task(task_id, task_data)` — stores task JSON at `votebot:sync:task:{task_id}` with 24-hour TTL
+- `get_sync_task(task_id)` — retrieves and deserializes task data; returns `None` if missing or Redis unavailable
+
+#### Changes to `api/routes/sync_unified.py`
+
+1. **POST handler** — after creating `_background_tasks[task_id]`, also writes to Redis
+2. **Background task** — writes to Redis at every state transition: `accepted` → `running` → `completed`/`failed`
+3. **GET handler** — checks `_background_tasks` first (same-worker fast path), falls back to Redis (cross-worker), then 404
+
+#### Graceful degradation
+
+If Redis is unavailable, `set_sync_task()` no-ops and `get_sync_task()` returns `None`. Same-worker requests still work via the in-memory dict — behavior is identical to the pre-fix code.
+
+### Verification
+
+```bash
+# 1. Trigger batch sync
+curl -X POST -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"content_type":"training","mode":"batch"}' \
+  https://api.digitaldemocracyproject.org/votebot/v1/sync/unified
+
+# 2. Poll status (should work even if routed to different worker)
+curl -H "Authorization: Bearer $API_KEY" \
+  https://api.digitaldemocracyproject.org/votebot/v1/sync/unified/status/{task_id}
+
+# 3. Verify Redis storage
+redis-cli GET votebot:sync:task:{task_id}
+
+# 4. Verify 24-hour TTL
+redis-cli TTL votebot:sync:task:{task_id}
+```
+
+### Lessons Learned
+
+1. **Any per-process state is a multi-worker bug waiting to happen.** When adding in-memory dicts for cross-request state, always ask: "Will this work if the next request hits a different worker?"
+2. **Write-through with in-memory fast-path** is the right pattern when Redis is available but not guaranteed — same-worker reads are fast, cross-worker reads degrade gracefully, and the code works identically without Redis (single-worker mode).
 
 ---
 
