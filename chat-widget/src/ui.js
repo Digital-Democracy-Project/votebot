@@ -177,6 +177,12 @@ const DDPUI = (function() {
         // Set up scroll listener to detect when user scrolls up
         elements.messagesContainer.addEventListener('scroll', handleUserScroll);
 
+        // Fix mobile popup dimensions on resize/orientation change
+        window.addEventListener('resize', fixMobileSize);
+        window.addEventListener('orientationchange', function() {
+            setTimeout(fixMobileSize, 100); // Delay for orientation to settle
+        });
+
         // Set up click handler for scroll-to-bottom button
         elements.scrollBottomButton.addEventListener('click', function() {
             userScrolledUp = false;
@@ -220,14 +226,35 @@ const DDPUI = (function() {
     }
 
     /**
+     * Fix mobile popup dimensions using JavaScript.
+     * CSS-only approaches (100%, 100vw, auto+inset) can fail on complex host pages
+     * (e.g., Webflow) due to ancestor transforms, viewport expansion, or scrollbar
+     * inclusion. Setting explicit pixel dimensions from JS is the most reliable fix.
+     */
+    function fixMobileSize() {
+        if (!elements.chatPopup) return;
+        if (window.innerWidth <= 480) {
+            elements.chatPopup.style.width = document.documentElement.clientWidth + 'px';
+            elements.chatPopup.style.height = window.innerHeight + 'px';
+        } else {
+            // Desktop/tablet — let CSS handle it
+            elements.chatPopup.style.width = '';
+            elements.chatPopup.style.height = '';
+        }
+    }
+
+    /**
      * Toggle chat popup visibility.
      */
     function togglePopup() {
         const isOpen = elements.chatPopup.classList.toggle('open');
         elements.chatButton.classList.toggle('hidden', isOpen);
 
-        if (isOpen && !elements.chatInput.disabled) {
-            elements.chatInput.focus();
+        if (isOpen) {
+            fixMobileSize();
+            if (!elements.chatInput.disabled) {
+                elements.chatInput.focus();
+            }
         }
     }
 
@@ -237,6 +264,7 @@ const DDPUI = (function() {
     function openPopup() {
         elements.chatPopup.classList.add('open');
         elements.chatButton.classList.add('hidden');
+        fixMobileSize();
 
         if (!elements.chatInput.disabled) {
             elements.chatInput.focus();
