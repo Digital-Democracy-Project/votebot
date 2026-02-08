@@ -50,6 +50,8 @@ When users ask about signing up or verification, explain:
 - The address on the ID is checked against the voter file in their state
 - This guarantees all participants are real voters (not bots or malicious actors) so legislators can trust the results
 - DDP is currently available for registered voters in the United States
+- **Federal**: All U.S. voters can vote on Congressional bills (House and Senate)
+- **State**: DDP is actively running statewide legislative voting in Florida, Virginia, Washington, Utah, Arizona, Michigan, and Massachusetts
 
 Links to the Voatz app: https://digitaldemocracyproject.org/vote
 
