@@ -22,6 +22,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Human Handoff Messages Dropped in Multi-Worker Deployment](#human-handoff-messages-dropped-in-multi-worker-deployment)
 - [Vote Lookup Fails on Legislator Pages for Specific Bills](#vote-lookup-fails-on-legislator-pages-for-specific-bills)
 - [Wrong Vote Reported on Legislator Pages (LLM Ignores Data)](#wrong-vote-reported-on-legislator-pages-llm-ignores-data)
+- [Bill Not Found When Referenced by Common Name](#bill-not-found-when-referenced-by-common-name)
 
 ---
 
@@ -2070,6 +2071,165 @@ On a **legislator page**:
 2. **`page_context.id` semantics vary by page type**: On bill pages it's a bill identifier, on legislator pages it's a legislator ID. Code that uses it must check `page_context.type` first.
 3. **Minority votes are the hardest**: When 99% of a party votes one way, the LLM's training data strongly biases it toward the majority. Explicit authoritative data injection is essential.
 4. **Test from ALL page types**: This bug only manifested on legislator pages. Testing only from bill pages wouldn't catch it.
+
+---
+
+## Bill Not Found When Referenced by Common Name
+
+### Symptom
+
+When on any page (especially legislator pages), VoteBot cannot find a bill when the user references it by its common name or title instead of its bill number. Even after a web search reveals the bill number, follow-up questions like "check how he voted on it" still fail.
+
+### Example
+
+```
+[On Vern Buchanan's legislator page]
+
+User: "how did he vote on one big beautiful bill act?"
+Bot: "There is no record of a bill titled 'One Big Beautiful Bill Act'..."
+     ← Bill exists as HR 1 but system can't resolve the title
+
+User: "do a web search"
+Bot: [Web search finds bill info, mentions H.R. 1, but no vote lookup happens]
+
+User: "check to see how he voted on it"
+Bot: "Currently, there is no official record..."
+     ← Still fails because "it" has no bill number to extract
+```
+
+### Root Cause
+
+The bill pre-fetch system (`_prefetch_bill_info`) only worked when the user's message contained an explicit bill number pattern (HR 1, HB 123, SB 456, etc.). It used a regex to extract the identifier:
+
+```python
+bill_pattern = r'\b(hb|sb|hr|s|hj|sj|hcr|scr|hjr|sjr)\s*(\d+)'
+match = re.search(bill_pattern, message_lower)
+if not match:
+    return ""  # ← Immediately gave up if no bill number pattern found
+```
+
+When the user said "one big beautiful bill act", no regex matched, so no bill info was fetched. The LLM had no bill data to work with and couldn't answer.
+
+Additionally, `_prefetch_bill_info` had no access to conversation history. Even when a previous web search response contained "H.R. 1", follow-up messages like "check how he voted on it" couldn't find it.
+
+### Fix (February 2026)
+
+Added three-tier bill identifier resolution to `_prefetch_bill_info`:
+
+**Method 1 — Regex extraction (existing):** Matches explicit bill numbers like "HR 1", "HB 123"
+
+**Method 2 — Pinecone title search (NEW):** When no regex match, searches Pinecone with `document_type="bill"` filter using the message as a semantic query. Extracts `bill_prefix` + `bill_number` from the top result's metadata if the similarity score exceeds 0.7.
+
+```python
+async def _resolve_bill_from_title(self, message: str) -> tuple[str | None, str | None]:
+    # Guard: only search if message contains bill-related terms
+    bill_terms = ["bill", "act", "resolution", "legislation", "law"]
+    if not any(term in message.lower() for term in bill_terms):
+        return None, None
+
+    results = await self.bill_votes.vector_store.query(
+        query=message, top_k=1, filter={"document_type": "bill"}
+    )
+    if results and results[0].score > 0.7:
+        metadata = results[0].metadata
+        bill_prefix = metadata.get("bill_prefix", "")
+        bill_number = metadata.get("bill_number", "")
+        if bill_prefix and bill_number:
+            return f"{bill_prefix}{bill_number}", metadata.get("jurisdiction")
+    return None, None
+```
+
+**Method 3 — Conversation history search (NEW):** When methods 1 and 2 fail, searches the last 6 messages in conversation history for bill identifier patterns using `_extract_bill_from_text()`. This handles follow-up questions like "check how he voted on it" after a web search revealed "H.R. 1".
+
+The same three-tier resolution was also added to `_verify_legislator_vote` for dispute scenarios.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/votebot/core/agent.py` | NEW: `_resolve_bill_from_title()` method; MODIFIED: `_prefetch_bill_info()` now accepts `conversation_history` and uses three-tier resolution; MODIFIED: `_verify_legislator_vote()` also uses Pinecone title fallback |
+
+### How It Works After Fix
+
+```
+User on legislator page: "how did he vote on one big beautiful bill act?"
+                                          ↓
+_prefetch_bill_info():
+  Method 1: regex("one big beautiful bill act") → no match
+  Method 2: Pinecone search("one big beautiful bill act", document_type="bill")
+            → top result: HR 1 (score 0.92), bill_prefix="HR", bill_number="1"
+            → bill_identifier = "HR1", jurisdiction = "US"
+  → get_bill_info("US", "119", "HR1") → full bill data
+  → lookup_legislator_vote("Vern Buchanan", ...) → specific vote
+  → LLM has complete context → correct answer
+
+
+User: "check to see how he voted on it"
+                                          ↓
+_prefetch_bill_info():
+  Method 1: regex("check to see how he voted on it") → no match
+  Method 2: Pinecone("check to see how he voted on it") → no bill terms → skip
+  Method 3: conversation history search:
+            → Previous bot response contains "HR 1" → extracted!
+            → bill_identifier = "HR1"
+  → get_bill_info("US", "119", "HR1") → correct answer
+```
+
+### Diagnostic Steps
+
+#### 1. Check if Pinecone title resolution triggered
+
+```bash
+sudo journalctl -u votebot | grep "Resolved bill from title"
+```
+
+Look for:
+```
+"Resolved bill from title via Pinecone" query="how did he vote on one big beautifu..." bill_identifier="HR1" jurisdiction="US" score=0.92
+```
+
+#### 2. Check if conversation history search found a bill
+
+```bash
+sudo journalctl -u votebot | grep "conversation history for pre-fetch"
+```
+
+Look for:
+```
+"Found bill identifier in conversation history for pre-fetch" bill_identifier="HR1"
+```
+
+#### 3. Verify bills have required metadata in Pinecone
+
+The `_resolve_bill_from_title` method depends on `bill_prefix` and `bill_number` metadata fields being populated on bill documents. These come from the `extra` dict in `WebflowSource._process_bill_item()`. If a bill was ingested without these fields, title resolution won't work.
+
+```python
+import asyncio
+from votebot.config import get_settings
+from votebot.services.vector_store import VectorStoreService
+
+async def check_bill_metadata(title_query):
+    vs = VectorStoreService(get_settings())
+    results = await vs.query(title_query, top_k=1, filter={"document_type": "bill"})
+    if results:
+        m = results[0].metadata
+        print(f"Score: {results[0].score:.3f}")
+        print(f"bill_prefix: {m.get('bill_prefix')}")
+        print(f"bill_number: {m.get('bill_number')}")
+        print(f"jurisdiction: {m.get('jurisdiction')}")
+        print(f"title: {m.get('title')}")
+    else:
+        print("No results found")
+
+asyncio.run(check_bill_metadata("one big beautiful bill act"))
+```
+
+### Lessons Learned
+
+1. **Users don't always know bill numbers**: The most common way people reference legislation is by its popular name ("one big beautiful bill act", "the epstein files"). Bill number regex is necessary but insufficient.
+2. **Pinecone is already a bill title index**: Every bill document has the title embedded in its content and metadata. A simple semantic search with `document_type="bill"` filter resolves most title-to-number lookups.
+3. **Conversation history is context**: When a user says "check how he voted on it", the "it" refers to a previous message. Without conversation history access, every message is treated in isolation.
+4. **Three-tier fallback is robust**: Regex (fast, precise) → Pinecone (semantic, handles titles) → History (handles pronouns/references). Each tier catches what the previous one misses.
 
 ---
 

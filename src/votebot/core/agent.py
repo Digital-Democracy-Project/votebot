@@ -358,7 +358,7 @@ class VoteBotAgent:
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
         bill_info_context = ""
         if self._should_use_bill_votes_tool(rag_confidence, message):
-            bill_info_context = await self._prefetch_bill_info(message, page_context)
+            bill_info_context = await self._prefetch_bill_info(message, page_context, conversation_history)
             if bill_info_context:
                 logger.info("Pre-fetched bill info for streaming", has_info=bool(bill_info_context))
 
@@ -826,38 +826,122 @@ class VoteBotAgent:
 
         return should_enable
 
+    async def _resolve_bill_from_title(
+        self,
+        message: str,
+    ) -> tuple[str | None, str | None]:
+        """
+        Resolve a bill identifier from a title/name by searching Pinecone.
+
+        When the user mentions a bill by its common name (e.g., "one big
+        beautiful bill act") instead of its number ("HR 1"), search Pinecone
+        for matching bill documents and extract the identifier from metadata.
+
+        Args:
+            message: The user's message containing a bill title
+
+        Returns:
+            Tuple of (bill_identifier, jurisdiction) — either may be None
+        """
+        message_lower = message.lower()
+
+        # Must contain bill-related terms to warrant a Pinecone search
+        bill_terms = ["bill", "act", "resolution", "legislation", "law"]
+        has_bill_term = any(term in message_lower for term in bill_terms)
+
+        if not has_bill_term:
+            return None, None
+
+        try:
+            results = await self.bill_votes.vector_store.query(
+                query=message,
+                top_k=1,
+                filter={"document_type": "bill"},
+            )
+
+            if results and results[0].score > 0.7:
+                metadata = results[0].metadata
+                bill_prefix = metadata.get("bill_prefix", "")
+                bill_number = metadata.get("bill_number", "")
+                jurisdiction = metadata.get("jurisdiction", "")
+
+                if bill_prefix and bill_number:
+                    bill_identifier = f"{bill_prefix}{bill_number}"
+                    logger.info(
+                        "Resolved bill from title via Pinecone",
+                        query=message[:50],
+                        bill_identifier=bill_identifier,
+                        jurisdiction=jurisdiction,
+                        score=results[0].score,
+                    )
+                    return bill_identifier, jurisdiction
+
+        except Exception as e:
+            logger.warning("Error resolving bill from title", error=str(e))
+
+        return None, None
+
     async def _prefetch_bill_info(
         self,
         message: str,
         page_context: PageContext,
+        conversation_history: list[dict] | None = None,
     ) -> str:
         """
         Pre-fetch bill info for streaming responses.
 
         Extracts bill identifier from message and fetches from OpenStates
-        before streaming begins.
+        before streaming begins. Uses three resolution methods:
+        1. Regex extraction from current message (e.g., "HR 1")
+        2. Pinecone title search (e.g., "one big beautiful bill act")
+        3. Conversation history search (e.g., "check how he voted on it")
 
         Args:
             message: The user's message
             page_context: Context about the current page
+            conversation_history: Optional previous messages for fallback
 
         Returns:
             Formatted bill info string to add to context, or empty string
         """
-        # Extract bill identifier from message
+        bill_identifier = None
+        jurisdiction = None
+
+        # Method 1: Extract bill identifier from message via regex
         message_lower = message.lower()
         bill_pattern = r'\b(hb|sb|hr|s|hj|sj|hcr|scr|hjr|sjr)\s*(\d+)'
         match = re.search(bill_pattern, message_lower)
 
-        if not match:
+        if match:
+            bill_type = match.group(1).upper()
+            bill_number = match.group(2)
+            bill_identifier = f"{bill_type}{bill_number}"
+
+        # Method 2: Resolve bill from title via Pinecone search
+        if not bill_identifier:
+            bill_identifier, jurisdiction = await self._resolve_bill_from_title(message)
+
+        # Method 3: Search conversation history for bill identifiers
+        if not bill_identifier and conversation_history:
+            for msg in reversed(conversation_history[-6:]):
+                content = msg.get("content", "")
+                extracted_id, extracted_jurisdiction = self._extract_bill_from_text(content)
+                if extracted_id:
+                    bill_identifier = extracted_id
+                    if extracted_jurisdiction:
+                        jurisdiction = extracted_jurisdiction
+                    logger.info(
+                        "Found bill identifier in conversation history for pre-fetch",
+                        bill_identifier=bill_identifier,
+                    )
+                    break
+
+        if not bill_identifier:
             return ""
 
-        bill_type = match.group(1).upper()
-        bill_number = match.group(2)
-        bill_identifier = f"{bill_type}{bill_number}"
-
-        # Extract jurisdiction from message or page context
-        jurisdiction = self._extract_jurisdiction_from_message(message)
+        # Extract jurisdiction from message or page context (if not already resolved)
+        if not jurisdiction:
+            jurisdiction = self._extract_jurisdiction_from_message(message)
         if not jurisdiction:
             jurisdiction = page_context.jurisdiction or "US"
 
@@ -1190,6 +1274,25 @@ class VoteBotAgent:
                         bill_identifier=bill_identifier,
                     )
                     break
+
+        # If still no bill identifier, try resolving from title via Pinecone
+        # This handles cases like "he didn't vote yes on the big beautiful bill"
+        if not bill_identifier:
+            resolved_id, resolved_jurisdiction = await self._resolve_bill_from_title(message)
+            if resolved_id:
+                bill_identifier = resolved_id
+                if resolved_jurisdiction and not jurisdiction:
+                    jurisdiction = resolved_jurisdiction
+            # Also try conversation history messages for title resolution
+            if not bill_identifier and conversation_history:
+                for msg in reversed(conversation_history[-6:]):
+                    content = msg.get("content", "")
+                    resolved_id, resolved_jurisdiction = await self._resolve_bill_from_title(content)
+                    if resolved_id:
+                        bill_identifier = resolved_id
+                        if resolved_jurisdiction and not jurisdiction:
+                            jurisdiction = resolved_jurisdiction
+                        break
 
         if not bill_identifier:
             logger.info("Could not extract bill identifier for vote verification")
