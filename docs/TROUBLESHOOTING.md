@@ -1933,7 +1933,7 @@ User: "how did vern buchanan vote?"
 Bot: "Rep. Vern Buchanan voted NO on HR 1..."  ← works correctly
 ```
 
-### Root Cause (Two Bugs)
+### Root Cause (Three Bugs)
 
 #### Bug 1: LLM drowns in voter data for large bills
 
@@ -1941,16 +1941,16 @@ The `_prefetch_bill_info` method fetches the complete bill info from OpenStates,
 
 The LLM sees Buchanan is a Republican, sees the bill passed along party lines, and confidently concludes he voted YES — without carefully checking the NO list where Buchanan actually appears.
 
-**Fix**: When on a legislator page and a bill is mentioned, `_prefetch_bill_info` now also calls `lookup_legislator_vote()` for the specific legislator (using `page_context.title`). The result is prepended to the context as a `## SPECIFIC VOTE LOOKUP RESULT` section with a note that it should be used as the definitive answer. This gives the LLM an unambiguous, authoritative answer instead of requiring it to find one name in hundreds.
+**Fix**: When on a legislator page and a bill is mentioned, `_prefetch_bill_info` now calls `find_legislator_in_votes()` using the votes already fetched from `get_bill_info` (always fresh from OpenStates). The result is prepended to the context as a `## SPECIFIC VOTE LOOKUP RESULT` section with a note that it should be used as the definitive answer.
 
 ```python
 # NEW — in _prefetch_bill_info, after fetching bill info:
 if page_context and page_context.type == "legislator" and page_context.title:
-    vote_result = await self.bill_votes.lookup_legislator_vote(
+    # Uses votes from get_bill_info (always fresh), NOT get_bill_votes (cache)
+    vote_result = self.bill_votes.find_legislator_in_votes(
         legislator_name=page_context.title,
-        jurisdiction=jurisdiction,
-        session=session,
-        bill_identifier=bill_identifier,
+        votes=result.votes,
+        bill_identifier=result.bill_identifier,
     )
     # Prepend: "## SPECIFIC VOTE LOOKUP RESULT
     # **Vern Buchanan** voted **NO** on **HR1**
@@ -1978,14 +1978,34 @@ if page_context and page_context.type == "bill":
 
 Now on a legislator page, `bill_identifier` starts as `None`, causing the code to correctly extract "HR1" from the message text or conversation history.
 
+#### Bug 3: Pinecone vote cache returns empty votes list
+
+Even with Bug 1 fixed, the specific legislator vote lookup was silently failing for previously-looked-up bills. The root cause was in `_check_cache()` in `bill_votes.py`:
+
+```python
+# _check_cache returns this for cached bills:
+return BillVotesResult(
+    ...
+    votes=[],  # ← Structured vote data is lost! Only text is cached.
+    cached=True,
+)
+```
+
+When `lookup_legislator_vote()` called `get_bill_votes()`, it hit the Pinecone cache and received `votes=[]`. With no votes to search, it returned `None`. The LLM then fell back to the massive formatted document and guessed YES for Buchanan.
+
+**Fix (two-part)**:
+1. `_prefetch_bill_info` now calls `find_legislator_in_votes()` (a new helper) directly with the votes from `get_bill_info()` — which **always fetches fresh** from OpenStates. This bypasses the cache path entirely.
+2. `lookup_legislator_vote` (used by `_verify_legislator_vote` for disputes) now detects the empty-cache scenario and retries with a fresh API call via `_fetch_from_openstates()`.
+
 ### Fix (February 2026)
 
-Both bugs fixed in `src/votebot/core/agent.py`:
+All three bugs fixed across two files:
 
 | Bug | Location | Fix |
 |-----|----------|-----|
-| LLM ignores minority vote | `_prefetch_bill_info` | Also call `lookup_legislator_vote()` on legislator pages and prepend specific vote to context |
-| Legislator ID used as bill ID | `_verify_legislator_vote` line ~1120 | Only use `page_context.id` as `bill_identifier` when `page_context.type == "bill"` |
+| LLM ignores minority vote | `_prefetch_bill_info` in `agent.py` | Call `find_legislator_in_votes()` on legislator pages, prepend specific vote to context |
+| Legislator ID used as bill ID | `_verify_legislator_vote` in `agent.py` | Only use `page_context.id` as `bill_identifier` when `page_context.type == "bill"` |
+| Cached votes empty | `bill_votes.py` | Extract `find_legislator_in_votes()` helper; `_prefetch_bill_info` uses votes from `get_bill_info` (always fresh); `lookup_legislator_vote` retries fresh on cache miss |
 
 ### How It Works After Fix
 
@@ -1995,8 +2015,9 @@ User on legislator page (Vern Buchanan): "i'm talking about HR 1"
 _prefetch_bill_info():
   bill_identifier = "HR1"
   jurisdiction = "US", session = "119"
-  → get_bill_info() returns full bill data
-  → ALSO: lookup_legislator_vote("Vern Buchanan", "US", "119", "HR1")
+  → get_bill_info() returns full bill data (always fresh from OpenStates)
+  → find_legislator_in_votes("Vern Buchanan", result.votes, "HR 1")
+     (uses votes already in hand — no cache involved)
   → Returns {vote: "no", legislator: "Buchanan", motion: "On Passage"}
   → Prepends: "## SPECIFIC VOTE LOOKUP RESULT
      **Buchanan** voted **NO** on **HR1**
@@ -2055,15 +2076,36 @@ Look for:
 "Found bill identifier in conversation history" bill_identifier="HR1"
 ```
 
+#### 4. Check if cached votes are causing empty results
+
+```bash
+sudo journalctl -u votebot | grep "Cached votes empty"
+```
+
+Look for:
+```
+"Cached votes empty, retrying with fresh API call" legislator_name="Vern Buchanan" bill_identifier="HR1"
+```
+
+If this appears, it means the bill was previously cached in Pinecone with `votes=[]`, and `lookup_legislator_vote` is retrying fresh. If it does NOT appear, either the bill wasn't cached or `find_legislator_in_votes` found the vote directly (which is the normal path for `_prefetch_bill_info`).
+
+To check if a bill is cached with empty votes:
+```bash
+redis-cli  # or use Pinecone console
+# Look for bill-votes-us-119-hr1 in Pinecone
+```
+
 ### Why This Only Affects Legislator Pages
 
-On a **bill page**, both bugs are irrelevant:
+On a **bill page**, all three bugs are irrelevant:
 1. The bill info pre-fetch doesn't need a specific legislator vote — the user can see the bill, and the LLM has the bill context
 2. `page_context.id` is already the bill identifier, and `page_context.type == "bill"` so it's used correctly
+3. The cache issue doesn't matter because `_prefetch_bill_info` uses `get_bill_info` (always fresh) and `find_legislator_in_votes` (no cache involved)
 
 On a **legislator page**:
 1. The user expects answers about THIS legislator, but the bill data contains 435 voters — the LLM has to find the needle in the haystack
 2. `page_context.id` is a legislator ID, not a bill ID — it was incorrectly used for vote lookups
+3. `lookup_legislator_vote` (used by dispute verification) could hit the empty-votes cache
 
 ### Lessons Learned
 
@@ -2071,6 +2113,7 @@ On a **legislator page**:
 2. **`page_context.id` semantics vary by page type**: On bill pages it's a bill identifier, on legislator pages it's a legislator ID. Code that uses it must check `page_context.type` first.
 3. **Minority votes are the hardest**: When 99% of a party votes one way, the LLM's training data strongly biases it toward the majority. Explicit authoritative data injection is essential.
 4. **Test from ALL page types**: This bug only manifested on legislator pages. Testing only from bill pages wouldn't catch it.
+5. **Caching structured data as text loses structure**: The Pinecone vote cache stores votes as formatted text but returns `votes=[]` for the structured list. Any code that depends on structured vote data must either bypass the cache or handle the empty-votes case.
 
 ---
 
