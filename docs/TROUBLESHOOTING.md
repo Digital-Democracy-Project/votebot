@@ -2716,7 +2716,7 @@ redis-cli TTL votebot:sync:task:{task_id}
 
 ### Symptom
 
-On mobile devices, the chat widget popup opens slightly wider than the visible screen. The right side of the popup is cut off, truncating the send button and making it impossible to send messages. This only occurs when the widget is embedded on content-rich host pages (e.g., the DDP homepage at `digitaldemocracyproject.org`), not on the standalone test site (`votebot.digitaldemocracyproject.org`).
+On mobile devices, the chat widget popup opens larger than the visible screen — truncated on the right (send button cut off) and/or at the bottom (input area hidden behind the address bar). This only occurs when the widget is embedded on content-rich host pages (e.g., the DDP homepage at `digitaldemocracyproject.org`), not on the standalone test site (`votebot.digitaldemocracyproject.org`). Pinching to zoom out on the host page makes the widget "resettle" to fill the screen correctly, suggesting a viewport zoom/scale issue.
 
 ### Example
 
@@ -2729,6 +2729,7 @@ Mobile browser:
        │                     │
        │ [Input area] [Se    │  ← Send button cut off
        └─────────────────────┘
+                              ← Bottom also clipped by address bar
 ```
 
 ### Root Cause
@@ -2761,7 +2762,7 @@ The standalone test site at `votebot.digitaldemocracyproject.org` (`chat-widget/
 
 On this page, `window.innerWidth` correctly reports the physical screen width, CSS media queries match, and mobile styles activate.
 
-### Fix (February 2026)
+### Fix (February 2026) — VERIFIED
 
 **Viewport meta reset: force device-width while popup is open**
 
@@ -2855,6 +2856,8 @@ The popup intentionally does **NOT** listen for `visualViewport.resize`. That ev
 | 5 | JS `screen.width` detection + pixel width from `screen.width` | Mobile detection works, but `position: fixed` resolves against the expanded layout viewport — pixel dimensions don't map to the physical screen |
 | 6 | JS `setAttribute('style', ...)` with `width: 100% !important` | `100%` of the layout viewport = wider than the physical screen. Also broke the close button because `display: flex !important` overrode the CSS `display: none` when closing |
 | 7 | JS `overflow-x: hidden` on `<html>` + Visual Viewport API | `overflow-x: hidden` clips content but doesn't collapse an already-expanded layout viewport. The viewport remains wide even with overflow hidden |
+| 8 | Height: `100vh` | On mobile, `100vh` includes the browser address bar/toolbar height, clipping the bottom of the popup |
+| 9 | Height: `visualViewport.height` + resize listener | Correct height initially, but `visualViewport.resize` fires when the on-screen keyboard opens, shrinking the popup to a tiny sliver above the keyboard |
 
 ### Files Changed
 
@@ -2922,7 +2925,9 @@ If any ancestor reports a non-default value, that's the element breaking `positi
 5. **Never use `setAttribute('style', ...)` with `display` on toggled elements**: It overrides the CSS show/hide mechanism. Use individual `style.xxx` properties instead, and avoid setting `display` as an inline style.
 6. **Webflow sites are particularly challenging for embedded widgets**: Wide embeds, interactions engine, scroll animations, and complex layouts can all expand the layout viewport in ways that simple test pages cannot reproduce.
 7. **Test on real host pages**: The widget worked perfectly on the standalone test page but broke on the Webflow production site. Always test embedded widgets in the actual hosting environment.
-8. **User observation is gold**: The user's report that "pinch and zoom out makes it fill the screen" immediately pointed to the viewport/zoom issue, which led to the viewport meta reset approach.
+8. **`100vh` lies on mobile, and `visualViewport.height` is too reactive**: `100vh` includes the address bar height (clipping the bottom). `visualViewport.height` shrinks when the keyboard opens (making the popup tiny). `window.innerHeight` after a viewport meta reset is the sweet spot — correct height, stable when the keyboard opens.
+9. **Don't resize the popup when the keyboard opens**: Let the browser's default behavior scroll the focused input into view above the keyboard. Resizing the popup leaves barely any visible chat area.
+10. **User observation is gold**: The user's report that "pinch and zoom out makes it fill the screen" immediately pointed to the viewport/zoom issue, which led to the viewport meta reset approach.
 
 ---
 
