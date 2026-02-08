@@ -2613,6 +2613,23 @@ window.DDPChatConfig.pageContext = {
 | Pre-retrieval resolution | `_lookup_bill_slug()` (from query) | `_resolve_legislator_id()` (from Webflow CMS) | — (direct filter) |
 | Context prompt | `BILL_CONTEXT_PROMPT` | `LEGISLATOR_CONTEXT_PROMPT` | `ORGANIZATION_CONTEXT_PROMPT` |
 
+### Verified (February 7, 2026)
+
+Tested live on the VFW organization page (`digitaldemocracyproject.org/organizations/veterans-of-foreign-wars`). All four query types passed:
+
+| Query | Before Fix | After Fix | Status |
+|-------|-----------|-----------|--------|
+| "tell me about this org" | Returned Virginia Organizing | Returned VFW — mission, type, focus areas, legislative engagement | PASS |
+| "which bills have they supported?" | Inconsistent — could return wrong org's bills | Returned HR 980 (Veterans Readiness and Employment Improvement Act) and HR 3123 (Ernest Peltz Accrued Veterans Benefits Act) from Webflow CMS | PASS |
+| "have they supported other bills not on this list?" | N/A | Stayed grounded — cited only CMS data, did not hallucinate additional bills | PASS |
+| "do a web search" | Would search for wrong org | Web search correctly anchored on VFW — returned PACT Act, Post-9/11 GI Bill, VET Act, and Georgia HB 108 (opposed) | PASS |
+
+Key observations:
+- **Welcome message** correctly identified VFW on page load (system prompt anchoring working)
+- **Webflow CMS pre-fetch** returned authoritative bill positions (HR 980 + HR 3123) — same as the CMS data
+- **Web search fallback** searched for the correct organization because `ORGANIZATION_CONTEXT_PROMPT` anchored the LLM on "Veterans of Foreign Wars"
+- **Citations** linked back to the DDP profile page
+
 ### Lessons Learned
 
 1. **Symmetry across page types**: When adding page-context awareness for one entity type, all three layers must be updated: `_build_filters()`, `retrieve()` routing, and `build_system_prompt()`. Missing any one layer can cause wrong results.
