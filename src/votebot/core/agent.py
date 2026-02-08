@@ -936,6 +936,15 @@ class VoteBotAgent:
                     )
                     break
 
+        # Method 4: Fall back to page_context.id when on a bill page
+        # This handles "how did X vote on this?" where "this" refers to the current bill
+        if not bill_identifier and page_context and page_context.type == "bill" and page_context.id:
+            bill_identifier = page_context.id
+            logger.info(
+                "Using page_context.id as bill identifier for pre-fetch",
+                bill_identifier=bill_identifier,
+            )
+
         if not bill_identifier:
             return ""
 
@@ -975,18 +984,29 @@ class VoteBotAgent:
             if result and result.found:
                 formatted = self.bill_votes.format_bill_info_document(result)
 
-                # When on a legislator page, also look up this specific legislator's
-                # vote and prepend it to the context. This prevents the LLM from
-                # drowning in hundreds of voter names and guessing incorrectly.
+                # Look up specific legislator's vote to prevent LLM from drowning
+                # in hundreds of voter names and guessing incorrectly.
                 legislator_vote_context = ""
+                legislator_name = None
+
                 if page_context and page_context.type == "legislator" and page_context.title:
+                    # Legislator pages: name is in page context
+                    legislator_name = page_context.title
+                else:
+                    # Other page types: extract name from message text
+                    legislator_name = self._extract_legislator_name(message)
+                    # Fall back to conversation history for pronoun resolution ("she", "he")
+                    if not legislator_name and conversation_history:
+                        for msg in reversed(conversation_history[-6:]):
+                            if msg.get("role") == "user":
+                                legislator_name = self._extract_legislator_name(msg.get("content", ""))
+                                if legislator_name:
+                                    break
+
+                if legislator_name and result.votes:
                     try:
-                        # Use find_legislator_in_votes with the votes we already have
-                        # from get_bill_info (always fresh from OpenStates). This avoids
-                        # the Pinecone cache issue where get_bill_votes returns votes=[]
-                        # for cached bills, making the legislator search silently fail.
                         vote_result = self.bill_votes.find_legislator_in_votes(
-                            legislator_name=page_context.title,
+                            legislator_name=legislator_name,
                             votes=result.votes,
                             bill_identifier=result.bill_identifier,
                         )
@@ -1004,20 +1024,20 @@ class VoteBotAgent:
                             )
                             logger.info(
                                 "Found specific legislator vote during bill pre-fetch",
-                                legislator=page_context.title,
+                                legislator=legislator_name,
                                 vote=vote_result['vote'],
                                 bill=bill_identifier,
                             )
                         else:
                             legislator_vote_context = (
                                 f"## SPECIFIC VOTE LOOKUP RESULT\n\n"
-                                f"**{page_context.title}** was NOT found in the vote records "
-                                f"for **{bill_identifier}** in OpenStates. They may not have voted "
+                                f"**{legislator_name}** was NOT found in the vote records "
+                                f"for **{result.bill_identifier}** in OpenStates. They may not have voted "
                                 f"on this bill, or the bill may not have had a recorded vote yet.\n\n"
                             )
                             logger.info(
                                 "Legislator not found in bill votes during pre-fetch",
-                                legislator=page_context.title,
+                                legislator=legislator_name,
                                 bill=bill_identifier,
                             )
                     except Exception as e:

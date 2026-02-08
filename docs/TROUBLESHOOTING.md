@@ -23,6 +23,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Vote Lookup Fails on Legislator Pages for Specific Bills](#vote-lookup-fails-on-legislator-pages-for-specific-bills)
 - [Wrong Vote Reported on Legislator Pages (LLM Ignores Data)](#wrong-vote-reported-on-legislator-pages-llm-ignores-data)
 - [Bill Not Found When Referenced by Common Name](#bill-not-found-when-referenced-by-common-name)
+- [Vote Lookup Fails on Bill Pages for Specific Legislators](#vote-lookup-fails-on-bill-pages-for-specific-legislators)
 
 ---
 
@@ -2261,6 +2262,195 @@ asyncio.run(check_bill_metadata("one big beautiful bill act"))
 2. **Pinecone is already a bill title index**: Every bill document has the title embedded in its content and metadata. A simple semantic search with `document_type="bill"` filter resolves most title-to-number lookups.
 3. **Conversation history is context**: When a user says "check how he voted on it", the "it" refers to a previous message. Without conversation history access, every message is treated in isolation.
 4. **Three-tier fallback is robust**: Regex (fast, precise) → Pinecone (semantic, handles titles) → History (handles pronouns/references). Each tier catches what the previous one misses.
+
+---
+
+## Vote Lookup Fails on Bill Pages for Specific Legislators
+
+### Symptom
+
+When on a **bill page**, VoteBot cannot correctly answer "how did Ashley Moody vote on this?" The LLM either hallucates from training data (e.g., "Ashley Moody is the Attorney General of Florida..."), gives a wrong vote direction, or says there is no record — even though the bill has 435+ recorded votes in OpenStates. Follow-up questions using pronouns ("how did she vote on final passage?") also fail.
+
+### Example
+
+```
+[On HR 1 bill page (One Big Beautiful Bill Act)]
+
+User: "how did ashley moody vote on this?"
+Bot: "Ashley Moody is the Attorney General of Florida, not a member of Congress..."
+     ← Wrong. She's a US Representative who voted on this bill.
+
+User: "check your sources"
+Bot: "Rep. Moody voted YES on HR 1"
+     ← Dispute verification works (it already used page_context.id),
+        but the initial answer was wrong.
+
+User: "how did she vote on final passage?"
+Bot: "I don't have a specific vote record..."
+     ← Pronoun "she" not resolved to "Ashley Moody" from history.
+```
+
+### Root Cause (Three Bugs)
+
+Three bugs in `_prefetch_bill_info` combined to break vote lookups on bill pages:
+
+#### Bug 1: `_prefetch_bill_info` never used `page_context.id` as bill identifier fallback
+
+When the user says "this" or "the bill" (no explicit bill number), the three extraction methods all fail:
+
+- Method 1 (regex): "how did ashley moody vote on this?" → no bill number pattern
+- Method 2 (Pinecone title search): not a bill title → no match
+- Method 3 (conversation history): first message, history is empty
+
+The function returns `""` immediately, so **no OpenStates fetch happens**. The `page_context.id = "HR 1"` was available but never checked.
+
+```python
+# OLD (broken):
+# Method 3: conversation history search
+if not bill_identifier and conversation_history:
+    ...
+
+if not bill_identifier:
+    return ""  # ← Gave up here. page_context.id never checked.
+```
+
+#### Bug 2: Targeted legislator vote lookup only ran on legislator pages
+
+Even when bill info IS fetched (e.g., user says "how did Moody vote on HR 1?" with the explicit bill number), the `find_legislator_in_votes()` call was gated behind `page_context.type == "legislator"`:
+
+```python
+# OLD (broken):
+if page_context and page_context.type == "legislator" and page_context.title:
+    vote_result = self.bill_votes.find_legislator_in_votes(...)
+```
+
+On bill pages (`page_context.type == "bill"`), this block was skipped entirely. The LLM received 435+ voter names in the raw bill document with no targeted result, leading to wrong answers or hallucinations.
+
+#### Bug 3: Pronoun references ("she", "he") not resolved from conversation history
+
+When the user says "how did she vote on final passage?", `_extract_legislator_name` filters out "she" as a common word and returns `None`. Without a legislator name, no targeted vote lookup runs. There was no fallback to check conversation history for the name from previous messages.
+
+### Fix (February 2026)
+
+#### Fix 1: Added `page_context.id` as Method 4 fallback
+
+After Method 3 (conversation history) and before giving up, check `page_context.id` when on a bill page:
+
+```python
+# Method 4: Fall back to page_context.id when on a bill page
+# This handles "how did X vote on this?" where "this" refers to the current bill
+if not bill_identifier and page_context and page_context.type == "bill" and page_context.id:
+    bill_identifier = page_context.id
+```
+
+This ensures OpenStates bill info (with structured votes) is always fetched on bill pages.
+
+#### Fix 2: Generalized targeted legislator vote lookup to all page types
+
+Replaced the `page_context.type == "legislator"` gate with logic that works on any page:
+
+```python
+legislator_name = None
+
+if page_context and page_context.type == "legislator" and page_context.title:
+    # Legislator pages: name is in page context (existing behavior)
+    legislator_name = page_context.title
+else:
+    # Other page types: extract name from message text
+    legislator_name = self._extract_legislator_name(message)
+    # Fall back to conversation history for pronoun resolution
+    if not legislator_name and conversation_history:
+        for msg in reversed(conversation_history[-6:]):
+            if msg.get("role") == "user":
+                legislator_name = self._extract_legislator_name(msg.get("content", ""))
+                if legislator_name:
+                    break
+
+if legislator_name and result.votes:
+    vote_result = self.bill_votes.find_legislator_in_votes(...)
+```
+
+The conversation history fallback resolves "she" → "Ashley Moody" by finding the name in earlier user messages.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/votebot/core/agent.py` | MODIFIED: `_prefetch_bill_info()` — added Method 4 (`page_context.id` fallback); generalized legislator vote lookup to all page types with conversation history pronoun resolution |
+
+### How It Works After Fix
+
+```
+User on bill page (HR1): "how did ashley moody vote on this?"
+                                          ↓
+_prefetch_bill_info():
+  Method 1: regex → no bill number in message → None
+  Method 2: Pinecone title → not a title → None
+  Method 3: conversation history → empty → None
+  Method 4 (NEW): page_context.id → "HR 1" ✓
+  → get_bill_info("US", "119", "HR 1") → fetches from OpenStates
+  → _extract_legislator_name("how did ashley moody vote on this?") → "Ashley Moody"
+  → find_legislator_in_votes("Ashley Moody", result.votes, "HR 1")
+  → Returns {vote: "yes", legislator: "Moody", motion: "On Passage"}
+  → Prepends: "## SPECIFIC VOTE LOOKUP RESULT
+     **Moody** voted **YES** on **HR 1**
+     *This is the authoritative vote record...*"
+                                          ↓
+LLM sees the specific vote result FIRST → correct answer
+
+
+User: "how did she vote on final passage?"
+                                          ↓
+_prefetch_bill_info():
+  Methods 1-3 → None
+  Method 4: page_context.id → "HR 1" ✓
+  → get_bill_info() fetches from OpenStates
+  → _extract_legislator_name("how did she vote...") → None ("she" filtered)
+  → conversation history search → finds "ashley moody" in prior message → "Ashley Moody"
+  → find_legislator_in_votes("Ashley Moody", result.votes, "HR 1")
+  → Prepends specific vote result → correct answer
+```
+
+### Diagnostic Steps
+
+#### 1. Check if page_context.id fallback triggered
+
+```bash
+sudo journalctl -u votebot | grep "page_context.id as bill identifier"
+```
+
+Look for:
+```
+"Using page_context.id as bill identifier for pre-fetch" bill_identifier="HR 1"
+```
+
+#### 2. Check if legislator vote lookup found a match on bill pages
+
+```bash
+sudo journalctl -u votebot | grep "specific legislator vote during bill pre-fetch"
+```
+
+Look for:
+```
+"Found specific legislator vote during bill pre-fetch" legislator="Ashley Moody" vote="yes" bill="HR 1"
+```
+
+#### 3. If pronoun resolution failed, check conversation history
+
+If the user uses "she"/"he" and the lookup fails, verify that there was a prior message with the legislator's name:
+
+```bash
+sudo journalctl -u votebot | grep "Legislator not found in bill votes"
+```
+
+If `legislator=None` is logged, the name extraction failed entirely — neither the message nor conversation history had a recognizable name.
+
+### Lessons Learned
+
+1. **`page_context` is always available on bill pages**: The `page_context.id` contains the bill identifier — it should always be used as a last resort before giving up on bill identification.
+2. **Targeted vote lookups aren't just for legislator pages**: When a user asks about a specific legislator on ANY page type, the LLM can't reliably find one name among 435 voters. Targeted extraction should always run.
+3. **Pronouns need conversation history**: Users naturally say "she" or "he" in follow-up questions. Without searching conversation history for the antecedent name, every pronoun reference breaks the pipeline.
+4. **Dispute verification already worked**: `_verify_legislator_vote` already used `page_context.id` for bill pages (Bug 1 only affected `_prefetch_bill_info`). This caused the confusing behavior where "check your sources" gave the right answer but the initial response didn't.
 
 ---
 
