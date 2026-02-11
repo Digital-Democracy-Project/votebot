@@ -21,7 +21,7 @@ Embeddable chat widget for Digital Democracy Project VoteBot.
 - **Explicit context mode** for mobile apps
 - **URL parameter support** for passing DDP URLs (`?ddp_url=...`)
 - **Content resolution API** to fetch metadata from Webflow CMS
-- **Manual scroll with "scroll to bottom" button** — no auto-scroll during responses; arrow button appears when content is below
+- **Partial auto-scroll** — force-scrolls to show typing indicator and start of bot response, then stops; "scroll to bottom" arrow button appears when content extends below the visible area
 - **Bill info pre-fetching** - fetches bill details from OpenStates before streaming for bills not in RAG
 - **Auto-open modes**:
   - Explicit mode (`?ddp_url=...`): Widget auto-opens when URL parameter provided

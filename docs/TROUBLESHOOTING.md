@@ -2940,18 +2940,21 @@ During streaming responses, the chat widget auto-scrolled to the bottom as new c
 
 ### Fix (February 2026)
 
-Removed auto-scroll entirely. The chat no longer jumps to the bottom during streaming responses.
+Removed continuous auto-scroll during streaming. Added partial auto-scroll: the chat force-scrolls to show the typing indicator and the start of the bot response, then stops — the user scrolls down at their own pace.
 
 **What was removed:**
 - `userScrolledUp` state tracking
 - `handleUserScroll()` scroll detection function
 - `showScrollButton()` conditional button display
-- Auto-scroll during `scrollToBottom()` (previously scrolled unless user had scrolled up)
+- Continuous auto-scroll during streaming (previously scrolled on every chunk)
 - `resetScrollState()` no longer resets scroll tracking (just hides the button)
 
-**What was kept:**
+**What was kept / added:**
 - **Scroll-to-bottom arrow button** — appears when there is content below the visible area. Tapping it scrolls to the bottom and hides the button.
 - **Force-scroll on user's own message** — when the user sends a message, the chat scrolls to the bottom so they can see their message appear (`scrollToBottom(true)`)
+- **Force-scroll on typing indicator** — when the typing dots appear, force-scroll so the user sees VoteBot is processing
+- **Force-scroll on first streaming chunk** — when the bot message element is first created, force-scroll once to show the start of the response
+- **No scroll on subsequent chunks** — after the first chunk, streaming content does not auto-scroll; the arrow button appears if content extends below the visible area
 - **Button auto-hides** — when the user manually scrolls to the bottom, the arrow button disappears
 
 ### Behavior Summary
@@ -2959,7 +2962,9 @@ Removed auto-scroll entirely. The chat no longer jumps to the bottom during stre
 | Event | Scroll behavior |
 |-------|----------------|
 | User sends a message | Force-scroll to bottom |
-| Bot streams a response | No scroll — arrow button appears if content is below |
+| Typing indicator appears | Force-scroll to bottom (dots visible) |
+| First streaming chunk arrives | Force-scroll to bottom (response start visible) |
+| Subsequent streaming chunks | No scroll — arrow button appears if content is below |
 | User taps arrow button | Scroll to bottom, hide button |
 | User manually scrolls to bottom | Arrow button hides |
 | Session restored with history | No scroll — arrow button appears if needed |
@@ -2968,7 +2973,7 @@ Removed auto-scroll entirely. The chat no longer jumps to the bottom during stre
 
 | File | Change |
 |------|--------|
-| `chat-widget/src/ui.js` | Removed auto-scroll logic, simplified `scrollToBottom()` to only scroll when `force=true`, scroll listener only hides button at bottom |
+| `chat-widget/src/ui.js` | `showTypingIndicator()`: `scrollToBottom()` → `scrollToBottom(true)`. `appendToStreamingMessage()`: force-scroll on first chunk (when message element is created), non-forced on subsequent chunks |
 | `chat-widget/dist/ddp-chat.min.js` | Rebuilt |
 
 ---

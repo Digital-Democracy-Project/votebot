@@ -478,7 +478,7 @@ const DDPUI = (function() {
 
         indicator.appendChild(typing);
         elements.messagesContainer.appendChild(indicator);
-        scrollToBottom();
+        scrollToBottom(true);  // Force-scroll so typing dots are visible
     }
 
     /**
@@ -511,6 +511,12 @@ const DDPUI = (function() {
 
             currentStreamingMessage = contentDiv;
             currentStreamingText = '';
+
+            // Force-scroll once to show the start of the bot response
+            currentStreamingText += text;
+            currentStreamingMessage.innerHTML = markdownParser.parse(currentStreamingText);
+            scrollToBottom(true);
+            return;
         }
 
         currentStreamingText += text;

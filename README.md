@@ -253,8 +253,8 @@ An embeddable JavaScript widget is available in the `chat-widget/` directory. Se
 - **Context-Aware**: Automatically detects page context from DDP URLs or manual configuration
 - **Cross-Page Session Persistence**: Chat session, conversation history, and popup state persist across full-page navigations via `sessionStorage` (scoped to browser tab, 30-minute timeout)
 - **Smart Context Handling**: When the user navigates to a different entity, a fresh session starts with a new welcome message to avoid confusing the LLM with stale context
-- **Streaming Responses**: Real-time token streaming with smooth auto-scroll
-- **Smart Auto-Scroll**: Auto-scrolling pauses when user scrolls up to read; "scroll to bottom" button appears to resume
+- **Streaming Responses**: Real-time token streaming with partial auto-scroll
+- **Partial Auto-Scroll**: Force-scrolls to show typing indicator and start of response, then stops — user scrolls down at their own pace; "scroll to bottom" button appears when content is below
 - **Auto-Open Modes**:
   - **Explicit mode** (`?ddp_url=...`): Widget auto-opens when URL parameter is provided
   - **Discovery mode**: Widget stays closed, auto-detects page context when opened
