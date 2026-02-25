@@ -2986,7 +2986,7 @@ VoteBot logs all production queries and LLM responses to date-partitioned JSONL 
 
 ### Architecture
 
-- **`src/votebot/services/query_logger.py`**: `QueryLogger` singleton that appends JSON lines via `aiofiles`
+- **`src/votebot/services/query_logger.py`**: `QueryLogger` singleton that appends JSON lines via `aiofiles`. Each entry includes `client_ip` (from `X-Forwarded-For` or direct connection) and `user_agent` for unique user analysis
 - **`src/votebot/core/agent.py`**: `_log_query()` fires-and-forgets via `asyncio.create_task()` after every `process_message()` and `process_message_stream()` call
 - **`scripts/evaluate_production.py`**: Offline CLI tool that reads JSONL logs, classifies queries, and validates against Webflow CMS ground truth
 

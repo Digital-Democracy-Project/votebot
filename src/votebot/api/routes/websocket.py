@@ -358,11 +358,17 @@ async def websocket_chat_endpoint(
             }
         })
 
+    # Extract client IP and User-Agent for query logging
+    client_ip = websocket.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+        websocket.client.host if websocket.client else None
+    )
+    user_agent = websocket.headers.get("user-agent")
+
     try:
         while True:
             # Receive message from client
             data = await websocket.receive_json()
-            await handle_client_message(session_id, data)
+            await handle_client_message(session_id, data, client_ip=client_ip, user_agent=user_agent)
     except WebSocketDisconnect:
         manager.disconnect(session_id)
     except Exception as e:
@@ -370,13 +376,18 @@ async def websocket_chat_endpoint(
         manager.disconnect(session_id)
 
 
-async def handle_client_message(session_id: str, data: dict):
+async def handle_client_message(
+    session_id: str,
+    data: dict,
+    client_ip: str | None = None,
+    user_agent: str | None = None,
+):
     """Handle incoming client message."""
     message_type = data.get("type")
     payload = data.get("payload", {})
 
     if message_type == "user_message":
-        await handle_user_message(session_id, payload)
+        await handle_user_message(session_id, payload, client_ip=client_ip, user_agent=user_agent)
     elif message_type == "context_update":
         await handle_context_update(session_id, payload)
     elif message_type == "confirm_handoff":
@@ -438,7 +449,12 @@ async def handle_context_update(session_id: str, payload: dict):
     )
 
 
-async def handle_user_message(session_id: str, payload: dict):
+async def handle_user_message(
+    session_id: str,
+    payload: dict,
+    client_ip: str | None = None,
+    user_agent: str | None = None,
+):
     """Process user message and stream response (or relay to agent)."""
     message = payload.get("message", "").strip()
     page_context_data = payload.get("page_context", {"type": "general"})
@@ -525,6 +541,8 @@ async def handle_user_message(session_id: str, payload: dict):
             session_id=session_id,
             page_context=page_context,
             conversation_history=conversation_history,
+            client_ip=client_ip,
+            user_agent=user_agent,
         ):
             if chunk.done:
                 # Final chunk with metadata

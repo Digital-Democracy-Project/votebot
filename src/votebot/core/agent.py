@@ -96,6 +96,8 @@ class VoteBotAgent:
         channel: str,
         start_time: float,
         human_active: bool = False,
+        client_ip: str | None = None,
+        user_agent: str | None = None,
     ) -> None:
         """Fire-and-forget log of a completed query to JSONL.
 
@@ -141,6 +143,8 @@ class VoteBotAgent:
                     channel=channel,
                     duration_ms=duration_ms,
                     human_active=human_active,
+                    client_ip=client_ip,
+                    user_agent=user_agent,
                 )
             )
         except Exception:
@@ -155,6 +159,8 @@ class VoteBotAgent:
         conversation_history: list[dict] | None = None,
         channel: str = "rest",
         human_active: bool = False,
+        client_ip: str | None = None,
+        user_agent: str | None = None,
     ) -> AgentResult:
         """
         Process a user message and generate a response.
@@ -385,6 +391,8 @@ class VoteBotAgent:
             channel=channel,
             start_time=_start_time,
             human_active=human_active,
+            client_ip=client_ip,
+            user_agent=user_agent,
         )
 
         return result
@@ -397,6 +405,8 @@ class VoteBotAgent:
         navigation_context: NavigationContext | None = None,
         conversation_history: list[dict] | None = None,
         channel: str = "websocket",
+        client_ip: str | None = None,
+        user_agent: str | None = None,
         human_active: bool = False,
     ) -> AsyncIterator[StreamChunkData]:
         """
@@ -594,6 +604,8 @@ class VoteBotAgent:
                     channel=channel,
                     start_time=_start_time,
                     human_active=human_active,
+                    client_ip=client_ip,
+                    user_agent=user_agent,
                 )
             else:
                 yield StreamChunkData(text=chunk.text, done=False)

@@ -4,7 +4,7 @@ import time
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from votebot.api.middleware.auth import api_key_auth
@@ -31,6 +31,7 @@ logger = structlog.get_logger()
 )
 async def chat(
     request: ChatRequest,
+    raw_request: Request,
     api_key: Annotated[str, Depends(api_key_auth)],
     settings: Settings = Depends(get_settings),
 ) -> ChatResponse:
@@ -68,6 +69,12 @@ async def chat(
             metadata=None,
         )
 
+    # Extract client IP and User-Agent for query logging
+    client_ip = raw_request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+        raw_request.client.host if raw_request.client else None
+    )
+    user_agent = raw_request.headers.get("user-agent")
+
     try:
         # Initialize the agent
         agent = VoteBotAgent(settings=settings)
@@ -81,6 +88,8 @@ async def chat(
             conversation_history=request.conversation_history,
             channel="rest",
             human_active=request.human_active,
+            client_ip=client_ip,
+            user_agent=user_agent,
         )
 
         # Calculate latency
@@ -145,6 +154,7 @@ async def chat(
 )
 async def chat_stream(
     request: ChatRequest,
+    raw_request: Request,
     api_key: Annotated[str, Depends(api_key_auth)],
     settings: Settings = Depends(get_settings),
 ) -> StreamingResponse:
@@ -171,6 +181,12 @@ async def chat_stream(
             media_type="text/event-stream",
         )
 
+    # Extract client IP and User-Agent for query logging
+    client_ip = raw_request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+        raw_request.client.host if raw_request.client else None
+    )
+    user_agent = raw_request.headers.get("user-agent")
+
     async def generate_stream():
         """Generate streaming response chunks."""
         try:
@@ -182,6 +198,8 @@ async def chat_stream(
                 page_context=request.page_context,
                 navigation_context=request.navigation_context,
                 conversation_history=request.conversation_history,
+                client_ip=client_ip,
+                user_agent=user_agent,
             ):
                 chunk = StreamChunk(
                     chunk=chunk_data.text,

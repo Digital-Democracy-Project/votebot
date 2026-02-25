@@ -52,6 +52,8 @@ class QueryLogger:
         channel: str,
         duration_ms: int,
         human_active: bool = False,
+        client_ip: str | None = None,
+        user_agent: str | None = None,
     ) -> None:
         """Append a query log entry to the date-partitioned JSONL file.
 
@@ -65,11 +67,15 @@ class QueryLogger:
             channel: "rest" or "websocket".
             duration_ms: Response time in milliseconds.
             human_active: Whether a human agent was active.
+            client_ip: Client IP address.
+            user_agent: Client User-Agent header.
         """
         now = datetime.now(timezone.utc)
         entry = {
             "timestamp": now.isoformat(),
             "session_id": session_id,
+            "client_ip": client_ip,
+            "user_agent": user_agent,
             "message": message,
             "response": response,
             "confidence": confidence,

@@ -812,6 +812,8 @@ VoteBot logs all production queries and LLM responses to date-partitioned JSONL 
 |-------|-------------|
 | `timestamp` | ISO 8601 UTC timestamp |
 | `session_id` | Chat session identifier |
+| `client_ip` | Client IP address (from X-Forwarded-For or direct connection) |
+| `user_agent` | Client User-Agent header |
 | `message` | User's query text |
 | `response` | LLM response text |
 | `confidence` | Response confidence score (0-1) |
