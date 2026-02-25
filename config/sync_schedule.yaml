@@ -5,6 +5,12 @@
 # Most scheduling is automatic based on StateLegislativeCalendar,
 # but you can override specific jurisdictions here.
 #
+# Session Detection:
+# - Primary: Live session dates from OpenStates API (fetched via warm_cache()
+#   during bill sync — uses existing OpenStatesSource.fetch_jurisdiction())
+# - Fallback: Hardcoded heuristics in StateLegislativeCalendar (start pattern
+#   + duration in weeks for all 50 states)
+#
 # The scheduler will:
 # - Sync daily for jurisdictions currently in session
 # - Sync weekly (Mondays) for jurisdictions not in session (pre-filed bills)
@@ -22,7 +28,7 @@ US:
 
 # DDP Active Jurisdictions
 # These are the states where DDP currently operates.
-# Session dates are calculated automatically from StateLegislativeCalendar.
+# Session dates come from live OpenStates data (preferred) or hardcoded heuristics (fallback).
 active_jurisdictions:
   - FL   # Florida
   - VA   # Virginia

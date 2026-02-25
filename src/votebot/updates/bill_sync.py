@@ -1210,6 +1210,27 @@ class BillSyncService:
         # Build legislator mapping for sponsor DDP links
         await self._build_legislator_mapping()
 
+        # Warm legislative calendar with live OpenStates session data
+        jurisdiction_codes = set()
+        for bill in bills:
+            fields = bill.get("fieldData", {})
+            jurisdiction_id = fields.get("jurisdiction", "")
+            code = self.JURISDICTION_MAP.get(jurisdiction_id, "")
+            if code:
+                jurisdiction_codes.add(code.upper())
+
+        jurisdiction_data = {}
+        for code in jurisdiction_codes:
+            try:
+                info = await self.get_jurisdiction_info(code)
+                if info:
+                    jurisdiction_data[code] = info
+            except Exception as e:
+                logger.warning("Failed to fetch jurisdiction for calendar warm", state=code, error=str(e))
+
+        if jurisdiction_data:
+            self.calendar.warm_cache(jurisdiction_data)
+
         total = len(bills)
         successful = 0
         failed = 0

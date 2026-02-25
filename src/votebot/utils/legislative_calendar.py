@@ -5,8 +5,12 @@ Provides start and end dates for state legislative sessions based on state code 
 Calculates actual Monday start dates and Friday end dates.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
+
+import structlog
+
+logger = structlog.get_logger()
 
 
 class StateLegislativeCalendar:
@@ -33,6 +37,10 @@ class StateLegislativeCalendar:
         # - 'first_monday_march' - First Monday in March
         # - 'first_monday_april' - First Monday in April
         # - 'first_monday_december_prev' - First Monday in December of previous year
+
+        # Live session data from OpenStates API (populated via warm_cache)
+        # Maps state_code.upper() -> list of session dicts with start_date, end_date, etc.
+        self._live_sessions: dict[str, list[dict]] = {}
 
         self.legislative_data = {
             "AL": {  # Alabama
@@ -844,6 +852,55 @@ class StateLegislativeCalendar:
 
         return end_date
 
+    def warm_cache(self, jurisdiction_data: dict) -> int:
+        """Load live session data from pre-fetched OpenStates jurisdiction info.
+
+        Args:
+            jurisdiction_data: Dict mapping state_code -> JurisdictionInfo objects
+                              (from OpenStatesSource.fetch_jurisdiction)
+
+        Returns:
+            Number of states successfully loaded.
+        """
+        loaded = 0
+        for state_code, info in jurisdiction_data.items():
+            sessions = []
+            for s in info.sessions:
+                sessions.append({
+                    "start_date": s.start_date,
+                    "end_date": s.end_date,
+                    "classification": s.classification,
+                    "identifier": s.identifier,
+                    "name": s.name,
+                })
+            if sessions:
+                self._live_sessions[state_code.upper()] = sessions
+                loaded += 1
+        logger.info("Legislative calendar cache warmed", states_loaded=loaded)
+        return loaded
+
+    def _check_live_sessions(self, state_code: str, check_date: date) -> bool | None:
+        """Check live session data. Returns True/False if data available, None to fall through."""
+        sessions = self._live_sessions.get(state_code.upper())
+        if not sessions:
+            return None  # No live data, fall through to hardcoded
+
+        for session in sessions:
+            start = self._parse_date_str(session.get("start_date"))
+            end = self._parse_date_str(session.get("end_date"))
+            if start and end and start <= check_date <= end:
+                return True
+        return False  # Had live data, no active session
+
+    def _parse_date_str(self, date_str: str | None) -> date | None:
+        """Parse a YYYY-MM-DD date string into a date object."""
+        if not date_str:
+            return None
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return None
+
     def get_session_dates(self, state_code: str, year: int) -> dict[str, Any]:
         """
         Get legislative session dates for a given state and year.
@@ -866,6 +923,28 @@ class StateLegislativeCalendar:
         if not isinstance(year, int) or year < 1900 or year > 2100:
             raise ValueError(f"Invalid year: {year}")
 
+        # Check live session data first
+        live_sessions = self._live_sessions.get(state_code)
+        if live_sessions:
+            for session in live_sessions:
+                start = self._parse_date_str(session.get("start_date"))
+                end = self._parse_date_str(session.get("end_date"))
+                if start and end and start.year <= year <= end.year:
+                    state_info = self.legislative_data[state_code]
+                    return {
+                        "state_code": state_code,
+                        "year": year,
+                        "start_date": start,
+                        "end_date": end,
+                        "session_type": session.get("classification", "primary"),
+                        "notes": session.get("name", ""),
+                        "full_time_legislature": state_info["full_time"],
+                        "biennial_odd_only": state_info["biennial_odd_only"],
+                        "duration_weeks": (end - start).days // 7,
+                        "session_length_days": (end - start).days + 1,
+                    }
+
+        # Fallback: hardcoded heuristics
         state_info = self.legislative_data[state_code]
         is_odd_year = year % 2 == 1
 
@@ -932,6 +1011,8 @@ class StateLegislativeCalendar:
         """
         Check if a state is currently in session.
 
+        Uses live OpenStates data when available, falls back to hardcoded heuristics.
+
         Args:
             state_code: Two-letter state code
             check_date: Date to check (defaults to today)
@@ -940,8 +1021,14 @@ class StateLegislativeCalendar:
             True if the state is in session on the given date
         """
         check_date = check_date or date.today()
-        year = check_date.year
 
+        # Prefer live OpenStates data when available
+        live_result = self._check_live_sessions(state_code, check_date)
+        if live_result is not None:
+            return live_result
+
+        # Fallback: hardcoded heuristics
+        year = check_date.year
         try:
             session = self.get_session_dates(state_code, year)
         except ValueError:

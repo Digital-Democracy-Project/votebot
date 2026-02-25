@@ -23,7 +23,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Production Query Monitoring**: All production queries and responses are logged to date-partitioned JSONL files for offline evaluation against ground truth
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
-- **Real-Time Updates**: Hourly polling for content changes
+- **Real-Time Updates**: Hourly polling for content changes, session-aware daily/weekly sync scheduling using live OpenStates session dates
 - **High Performance**: Designed for 1000+ concurrent conversations
 
 ## Tech Stack
@@ -597,6 +597,22 @@ python scripts/sync.py clear --confirm
 python scripts/seed_data.py
 ```
 
+### Sync Scheduling
+
+VoteBot uses session-aware sync scheduling to minimize unnecessary API calls:
+
+- **In session**: Bills are synced **daily** at 4 AM UTC
+- **Off session**: Bills are synced **weekly** (Mondays only) to catch pre-filed bills
+- **Biennial off-years**: No sync for states that only meet in odd years
+
+**Session detection** uses a two-tier approach:
+
+1. **Live data (preferred)**: Before each bill sync run, `BillSyncService.sync_current_session_bills()` fetches jurisdiction info from the OpenStates API (via `OpenStatesSource.fetch_jurisdiction()`) and warms `StateLegislativeCalendar` with real session start/end dates. This reuses the existing cached `get_jurisdiction_info()` method — each state is fetched at most once per sync run.
+
+2. **Hardcoded fallback**: If the OpenStates API is unavailable or a state has no live data, the calendar falls back to hardcoded heuristics (start patterns + duration in weeks for all 50 states + DC).
+
+Configuration is in `config/sync_schedule.yaml`. The `StateLegislativeCalendar` class is at `src/votebot/utils/legislative_calendar.py`.
+
 ## Development
 
 ### Running Tests
@@ -674,8 +690,11 @@ votebot/
 │   │   │   ├── webflow.py   # Webflow CMS
 │   │   │   └── pdf.py       # PDF extraction
 │   │   └── chunking.py      # Text chunking
+│   ├── utils/               # Utility modules
+│   │   └── legislative_calendar.py  # Session date lookup (live OpenStates + hardcoded fallback)
 │   └── updates/             # Real-time updates
 │       ├── scheduler.py     # Scheduled polling
+│       ├── bill_sync.py     # OpenStates bill sync (status, votes, actions)
 │       └── change_detection.py
 ├── scripts/
 │   ├── sync.py              # Unified sync CLI
