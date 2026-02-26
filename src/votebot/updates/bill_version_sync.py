@@ -176,13 +176,11 @@ class BillVersionSyncService:
     def _extract_latest_action(bill_data: dict) -> str | None:
         """Extract the latest action description from OpenStates bill data.
 
-        Returns the human-readable action text (e.g., "Referred to Committee on
-        Judiciary", "Signed by Governor"), or None if no latest_action exists.
+        OpenStates v3 API returns `latest_action_description` as a top-level
+        string field (e.g., "Referred to Committee on Judiciary",
+        "Signed by Governor"). Returns None if the field is missing or empty.
         """
-        latest_action = bill_data.get("latest_action")
-        if not latest_action:
-            return None
-        description = latest_action.get("description")
+        description = bill_data.get("latest_action_description")
         return description if description else None
 
     async def _update_webflow_status(
