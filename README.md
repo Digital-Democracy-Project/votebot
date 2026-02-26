@@ -200,6 +200,8 @@ POST /votebot/v1/sync/unified
 
 Sync content to the vector store. Supports bills, legislators, organizations, webpages, and training documents.
 
+> **Proxy note**: In production, requests go through the DDP-API proxy on port 5000, which strips `/v1` from the path. External callers (e.g., Postman) use `POST https://api.digitaldemocracyproject.org/votebot/sync/unified`. The DDP-API re-authenticates to VoteBot internally. See [DDP-API](https://github.com/VotingRightsBrigade/DDP-API) for the full endpoint map.
+
 **Request Body (single item):**
 ```json
 {
@@ -241,6 +243,11 @@ For batch operations, the sync runs in the background. Check status with:
 
 ```
 GET /votebot/v1/sync/unified/status/{task_id}
+```
+
+Via the DDP-API proxy:
+```
+GET https://api.digitaldemocracyproject.org/votebot/sync/unified/status/{task_id}
 ```
 
 **Sync all content types:**
