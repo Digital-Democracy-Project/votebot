@@ -350,6 +350,22 @@ class BillHandler:
                 total_chunks += os_result.chunks_created
                 errors.extend(os_result.errors)
 
+                # Chain bill version check — updates gov-url, status, status-date in Webflow CMS
+                from votebot.updates.bill_version_sync import BillVersionSyncService
+                version_sync = BillVersionSyncService(self.settings)
+                version_result = await version_sync.sync_bill_versions(raw_items)
+                total_chunks += version_result.chunks_created
+                errors.extend(version_result.errors)
+
+                if version_result.status_updates > 0 or version_result.updated > 0:
+                    logger.info(
+                        "Bill version sync included in batch",
+                        version_checked=version_result.checked,
+                        version_updated=version_result.updated,
+                        status_updates=version_result.status_updates,
+                        webflow_updates=version_result.webflow_updates,
+                    )
+
             duration = time.perf_counter() - start_time
             success = total_successful > 0
 

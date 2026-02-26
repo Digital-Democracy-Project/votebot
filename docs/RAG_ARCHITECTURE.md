@@ -119,7 +119,7 @@ The entry point for actual sync operations. The `UnifiedSyncService` dispatches 
 
 | Handler | What it does |
 |---------|-------------|
-| `BillHandler` | Fetches bills from Webflow CMS, enriches with OpenStates data (legislative history, vote records, PDF text), creates multiple document types per bill (`bill`, `bill-text`, `bill-history`, `bill-votes`) |
+| `BillHandler` | Fetches bills from Webflow CMS, enriches with OpenStates data (legislative history, vote records, PDF text), creates multiple document types per bill (`bill`, `bill-text`, `bill-history`, `bill-votes`). Batch mode chains `BillVersionSyncService` after OpenStates history sync to check for newer bill text versions and update Webflow CMS `status`/`status-date` |
 | `LegislatorHandler` | Fetches legislators from Webflow CMS + OpenStates, creates `legislator` and `legislator-votes` documents |
 | `OrganizationHandler` | Fetches orgs from Webflow CMS with their bill positions, creates `organization` documents |
 | `TrainingHandler` | Ingests static training docs (DDP FAQ, etc.) |

@@ -222,6 +222,8 @@ Sync content to the vector store. Supports bills, legislators, organizations, we
 }
 ```
 
+> **Note**: Batch bill sync with `include_openstates` (default: true) automatically chains `BillVersionSyncService` after the OpenStates history sync. This checks for newer bill text versions (PDF/HTML), re-ingests updated text into Pinecone, and updates Webflow CMS fields (`gov-url`, `status`, `status-date`). The same version sync also runs independently on the daily scheduler (04:00 UTC).
+
 **Response:**
 ```json
 {
