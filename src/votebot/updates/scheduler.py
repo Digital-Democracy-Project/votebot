@@ -406,6 +406,7 @@ class UpdateScheduler:
                 failed=result.failed,
                 chunks_created=result.chunks_created,
                 webflow_updates=result.webflow_updates,
+                status_updates=result.status_updates,
                 errors=result.errors[:5] if result.errors else [],
             )
 
@@ -431,6 +432,7 @@ class UpdateScheduler:
                 "failed": result.failed,
                 "chunks_created": result.chunks_created,
                 "webflow_updates": result.webflow_updates,
+                "status_updates": result.status_updates,
                 "errors": result.errors[:10] if result.errors else [],
             }
 

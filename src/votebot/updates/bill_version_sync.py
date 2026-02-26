@@ -37,6 +37,7 @@ class VersionCheckResult:
     text_url: str = ""
     chunks_created: int = 0
     webflow_updated: bool = False
+    status_updated: bool = False
     error: str | None = None
 
 
@@ -53,6 +54,7 @@ class VersionSyncBatchResult:
     failed: int = 0
     chunks_created: int = 0
     webflow_updates: int = 0
+    status_updates: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -170,6 +172,54 @@ class BillVersionSyncService:
 
         return False
 
+    @staticmethod
+    def _extract_latest_action(bill_data: dict) -> str | None:
+        """Extract the latest action description from OpenStates bill data.
+
+        Returns the human-readable action text (e.g., "Referred to Committee on
+        Judiciary", "Signed by Governor"), or None if no latest_action exists.
+        """
+        latest_action = bill_data.get("latest_action")
+        if not latest_action:
+            return None
+        description = latest_action.get("description")
+        return description if description else None
+
+    async def _update_webflow_status(
+        self,
+        webflow_id: str,
+        bill_title: str,
+        new_status: str,
+    ) -> bool:
+        """Update the status field for a bill in Webflow CMS.
+
+        Args:
+            webflow_id: Webflow item ID
+            bill_title: For logging
+            new_status: Latest action description from OpenStates
+
+        Returns:
+            True on success, False on failure
+        """
+        try:
+            from votebot.services.webflow_lookup import WebflowLookupService
+
+            lookup = WebflowLookupService(self.settings)
+            scheduler_key = self.settings.webflow_scheduler_api_key.get_secret_value()
+            return await lookup.update_bill_fields(
+                webflow_id,
+                {"status": new_status},
+                api_key=scheduler_key or None,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to update Webflow status",
+                webflow_id=webflow_id,
+                bill_title=bill_title,
+                error=str(e),
+            )
+            return False
+
     async def check_and_update_bill(
         self,
         webflow_id: str,
@@ -251,9 +301,28 @@ class BillVersionSyncService:
         cached = await redis_store.get_bill_version(webflow_id)
 
         if not self._is_newer_version(latest_version, cached):
-            # Update last_checked timestamp
+            # Text version unchanged — but status may have changed
+            latest_action = self._extract_latest_action(bill_data)
+            status_updated = False
+
+            if latest_action and latest_action != (cached or {}).get("last_status"):
+                skip_webflow = self._config.get("skip_webflow_update", False)
+                if not skip_webflow:
+                    status_updated = await self._update_webflow_status(
+                        webflow_id, bill_title, latest_action,
+                    )
+                    if status_updated:
+                        logger.info(
+                            "Bill status updated (version unchanged)",
+                            bill_title=bill_title,
+                            new_status=latest_action,
+                        )
+
+            # Update last_checked (and last_status if changed) in cache
             if cached:
                 cached["last_checked"] = datetime.utcnow().isoformat()
+                if latest_action:
+                    cached["last_status"] = latest_action
                 await redis_store.set_bill_version(webflow_id, cached)
 
             return VersionCheckResult(
@@ -264,6 +333,7 @@ class BillVersionSyncService:
                 version_note=latest_version.get("note", ""),
                 version_date=latest_version.get("date", ""),
                 text_url=text_url,
+                status_updated=status_updated,
             )
 
         # 6. Newer version detected — re-ingest bill text
@@ -305,25 +375,35 @@ class BillVersionSyncService:
                 error=f"Ingestion failed: {e}",
             )
 
-        # 7. Update Webflow gov-url if enabled
+        # 7. Update Webflow fields (gov-url + status) in a single PATCH if enabled
         webflow_updated = False
+        status_updated = False
+        latest_action = self._extract_latest_action(bill_data)
         skip_webflow = self._config.get("skip_webflow_update", False)
         if not skip_webflow:
             try:
                 from votebot.services.webflow_lookup import WebflowLookupService
 
                 lookup = WebflowLookupService(self.settings)
-                # Use scheduler-specific key (CMS:write scope) if configured,
-                # keeping the default read-only key for query-time lookups
                 scheduler_key = self.settings.webflow_scheduler_api_key.get_secret_value()
-                webflow_updated = await lookup.update_bill_gov_url(
+
+                # Batch gov-url and status into a single PATCH call
+                field_data: dict[str, str] = {"gov-url": text_url}
+                if latest_action:
+                    field_data["status"] = latest_action
+
+                success = await lookup.update_bill_fields(
                     webflow_id,
-                    text_url,
+                    field_data,
                     api_key=scheduler_key or None,
                 )
+                if success:
+                    webflow_updated = True
+                    if latest_action:
+                        status_updated = True
             except Exception as e:
                 logger.warning(
-                    "Failed to update Webflow gov-url (bill text still ingested)",
+                    "Failed to update Webflow fields (bill text still ingested)",
                     webflow_id=webflow_id,
                     error=str(e),
                 )
@@ -335,6 +415,7 @@ class BillVersionSyncService:
             "text_url": text_url,
             "media_type": media_type,
             "last_checked": datetime.utcnow().isoformat(),
+            "last_status": latest_action or "",
         }
         await redis_store.set_bill_version(webflow_id, version_data)
 
@@ -348,6 +429,7 @@ class BillVersionSyncService:
             text_url=text_url,
             chunks_created=chunks_created,
             webflow_updated=webflow_updated,
+            status_updated=status_updated,
         )
 
     async def _ingest_bill_text(
@@ -541,6 +623,8 @@ class BillVersionSyncService:
                     result.chunks_created += check_result.chunks_created
                     if check_result.webflow_updated:
                         result.webflow_updates += 1
+                    if check_result.status_updated:
+                        result.status_updates += 1
                     updates_this_run += 1
                     logger.info(
                         "Bill version updated",
@@ -548,10 +632,18 @@ class BillVersionSyncService:
                         version=check_result.version_note,
                         date=check_result.version_date,
                         chunks=check_result.chunks_created,
+                        status_updated=check_result.status_updated,
                     )
                 elif check_result.status == "unchanged":
                     result.unchanged += 1
-                    logger.debug("Bill version unchanged", bill=title, version=check_result.version_note)
+                    if check_result.status_updated:
+                        result.status_updates += 1
+                    logger.debug(
+                        "Bill version unchanged",
+                        bill=title,
+                        version=check_result.version_note,
+                        status_updated=check_result.status_updated,
+                    )
                 elif check_result.status == "no_versions":
                     result.no_versions += 1
                     logger.debug("Bill has no versions in OpenStates", bill=title)
@@ -587,6 +679,7 @@ class BillVersionSyncService:
             failed=result.failed,
             chunks_created=result.chunks_created,
             webflow_updates=result.webflow_updates,
+            status_updates=result.status_updates,
         )
 
         return result

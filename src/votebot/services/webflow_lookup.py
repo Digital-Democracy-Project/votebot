@@ -836,28 +836,28 @@ class WebflowLookupService:
         )
 
 
-    async def update_bill_gov_url(
+    async def update_bill_fields(
         self,
         webflow_id: str,
-        new_url: str,
+        field_data: dict[str, str],
         api_key: str | None = None,
     ) -> bool:
-        """Update the gov-url field for a bill in Webflow CMS.
+        """Update arbitrary fields for a bill in Webflow CMS.
 
         Uses PATCH /v2/collections/{collection_id}/items/{item_id}/live
         to publish changes immediately. Requires CMS:write scope on the API token.
 
         Args:
             webflow_id: Webflow item ID for the bill
-            new_url: New government URL to set
+            field_data: Dict of field names to values (e.g., {"gov-url": url, "status": status})
             api_key: Optional API key override (e.g., scheduler key with write scope).
                      Falls back to self.api_key if not provided.
 
         Returns:
             True on success, False on failure
         """
-        if not webflow_id or not new_url:
-            logger.warning("Missing webflow_id or new_url for gov-url update")
+        if not webflow_id or not field_data:
+            logger.warning("Missing webflow_id or field_data for bill update")
             return False
 
         key = api_key or self.api_key
@@ -867,33 +867,57 @@ class WebflowLookupService:
             "accept": "application/json",
             "content-type": "application/json",
         }
-        payload = {"fieldData": {"gov-url": new_url}}
+        payload = {"fieldData": field_data}
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
                 response = await client.patch(url, headers=headers, json=payload)
                 if response.status_code == 200:
                     logger.info(
-                        "Updated bill gov-url in Webflow CMS",
+                        "Updated bill fields in Webflow CMS",
                         webflow_id=webflow_id,
-                        new_url=new_url,
+                        fields=list(field_data.keys()),
                     )
                     return True
                 else:
                     logger.error(
-                        "Failed to update bill gov-url in Webflow CMS",
+                        "Failed to update bill fields in Webflow CMS",
                         webflow_id=webflow_id,
+                        fields=list(field_data.keys()),
                         status_code=response.status_code,
                         response_text=response.text[:200],
                     )
                     return False
             except Exception as e:
                 logger.error(
-                    "Error updating bill gov-url in Webflow CMS",
+                    "Error updating bill fields in Webflow CMS",
                     webflow_id=webflow_id,
                     error=str(e),
                 )
                 return False
+
+    async def update_bill_gov_url(
+        self,
+        webflow_id: str,
+        new_url: str,
+        api_key: str | None = None,
+    ) -> bool:
+        """Update the gov-url field for a bill in Webflow CMS.
+
+        Thin wrapper around update_bill_fields() for backward compatibility.
+
+        Args:
+            webflow_id: Webflow item ID for the bill
+            new_url: New government URL to set
+            api_key: Optional API key override (e.g., scheduler key with write scope).
+
+        Returns:
+            True on success, False on failure
+        """
+        if not new_url:
+            logger.warning("Missing new_url for gov-url update")
+            return False
+        return await self.update_bill_fields(webflow_id, {"gov-url": new_url}, api_key)
 
 
 def format_org_positions_context(result: BillOrgPositionsResult) -> str:
