@@ -59,7 +59,7 @@ class OrganizationSyncService:
             logger.warning("No bills collection ID configured, skipping bill mapping")
             return
 
-        webflow_api_key = self.settings.webflow_api_key.get_secret_value()
+        webflow_api_key = self.settings.webflow_votebot_api_key.get_secret_value()
         if not webflow_api_key:
             logger.warning("No Webflow API key configured, skipping bill mapping")
             return
@@ -171,7 +171,7 @@ class OrganizationSyncService:
         if not bills_collection_id:
             return None
 
-        webflow_api_key = self.settings.webflow_api_key.get_secret_value()
+        webflow_api_key = self.settings.webflow_votebot_api_key.get_secret_value()
         if not webflow_api_key:
             return None
 

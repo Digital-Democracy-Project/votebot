@@ -41,7 +41,7 @@ class WebflowSource:
         """
         self.settings = settings or get_settings()
         self.metadata_extractor = metadata_extractor or MetadataExtractor()
-        self.api_key = self.settings.webflow_api_key.get_secret_value()
+        self.api_key = self.settings.webflow_votebot_api_key.get_secret_value()
         self.site_id = self.settings.webflow_site_id
         self.bills_collection_id = self.settings.webflow_bills_collection_id
         self.legislators_collection_id = self.settings.webflow_legislators_collection_id

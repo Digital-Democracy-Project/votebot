@@ -109,7 +109,7 @@ class WebflowLookupService:
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
-        self.api_key = self.settings.webflow_api_key.get_secret_value()
+        self.api_key = self.settings.webflow_votebot_api_key.get_secret_value()
         self.bills_collection_id = self.settings.webflow_bills_collection_id
         self.organizations_collection_id = self.settings.webflow_organizations_collection_id
         self.legislators_collection_id = self.settings.webflow_legislators_collection_id

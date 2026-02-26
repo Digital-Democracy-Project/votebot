@@ -220,7 +220,7 @@ class BillSyncService:
             logger.warning("No legislators collection ID configured, skipping legislator mapping")
             return
 
-        webflow_api_key = self.settings.webflow_api_key.get_secret_value()
+        webflow_api_key = self.settings.webflow_votebot_api_key.get_secret_value()
         if not webflow_api_key:
             logger.warning("No Webflow API key configured, skipping legislator mapping")
             return

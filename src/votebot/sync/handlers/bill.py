@@ -166,7 +166,7 @@ class BillHandler:
             # Build organization mapping for bill content
             async with httpx.AsyncClient(timeout=60.0) as client:
                 headers = {
-                    "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
+                    "Authorization": f"Bearer {self.settings.webflow_votebot_api_key.get_secret_value()}",
                     "accept": "application/json",
                 }
                 await self.webflow._build_organization_mapping(client, headers)
@@ -257,7 +257,7 @@ class BillHandler:
             # Fetch raw items first to enable jurisdiction filtering
             async with httpx.AsyncClient(timeout=60.0) as client:
                 headers = {
-                    "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
+                    "Authorization": f"Bearer {self.settings.webflow_votebot_api_key.get_secret_value()}",
                     "accept": "application/json",
                 }
 

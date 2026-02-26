@@ -223,7 +223,7 @@ async def fetch_ground_truth(
     load_dotenv()
 
     fetcher = GroundTruthFetcher(
-        webflow_api_key=os.environ["WEBFLOW_API_KEY"],
+        webflow_api_key=os.environ["WEBFLOW_VOTEBOT_API_KEY"],
         bills_collection_id=os.environ["WEBFLOW_BILLS_COLLECTION_ID"],
         legislators_collection_id=os.environ["WEBFLOW_LEGISLATORS_COLLECTION_ID"],
         organizations_collection_id=os.environ["WEBFLOW_ORGANIZATIONS_COLLECTION_ID"],

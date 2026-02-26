@@ -65,7 +65,7 @@ async def fetch_jurisdiction_mapping() -> dict[str, str]:
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         headers = {
-            "Authorization": f"Bearer {settings.webflow_api_key.get_secret_value()}",
+            "Authorization": f"Bearer {settings.webflow_votebot_api_key.get_secret_value()}",
             "accept": "application/json",
         }
 
@@ -153,7 +153,7 @@ async def fetch_sample_legislators(sample_size: int = 10) -> list[dict]:
     """Fetch sample legislators from Webflow CMS."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         headers = {
-            "Authorization": f"Bearer {settings.webflow_api_key.get_secret_value()}",
+            "Authorization": f"Bearer {settings.webflow_votebot_api_key.get_secret_value()}",
             "accept": "application/json",
         }
 

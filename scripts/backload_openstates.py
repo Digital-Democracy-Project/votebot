@@ -44,7 +44,7 @@ async def fetch_all_bills(settings, limit: int = 0, jurisdiction: str = None) ->
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         headers = {
-            "Authorization": f"Bearer {settings.webflow_api_key.get_secret_value()}",
+            "Authorization": f"Bearer {settings.webflow_votebot_api_key.get_secret_value()}",
             "accept": "application/json",
         }
 

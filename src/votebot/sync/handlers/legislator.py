@@ -148,7 +148,7 @@ class LegislatorHandler:
             # Build jurisdiction mapping for Webflow content processing
             async with httpx.AsyncClient(timeout=60.0) as client:
                 headers = {
-                    "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
+                    "Authorization": f"Bearer {self.settings.webflow_votebot_api_key.get_secret_value()}",
                     "accept": "application/json",
                 }
                 await self.webflow._build_jurisdiction_mapping(client, headers)

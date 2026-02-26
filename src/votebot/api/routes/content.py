@@ -85,7 +85,7 @@ async def resolve_content(
         item = await fetch_webflow_item_by_slug(
             collection_id=collection_id,
             slug=slug,
-            api_key=settings.webflow_api_key.get_secret_value(),
+            api_key=settings.webflow_votebot_api_key.get_secret_value(),
         )
     except Exception as e:
         logger.error(

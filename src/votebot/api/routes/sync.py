@@ -170,7 +170,7 @@ async def sync_bill(
         # Build organization mapping for bill content
         async with httpx.AsyncClient(timeout=60.0) as client:
             headers = {
-                "Authorization": f"Bearer {settings.webflow_api_key.get_secret_value()}",
+                "Authorization": f"Bearer {settings.webflow_votebot_api_key.get_secret_value()}",
                 "accept": "application/json",
             }
             await webflow._build_organization_mapping(client, headers)
@@ -288,7 +288,7 @@ async def sync_legislator(
         # Build jurisdiction mapping for Webflow content processing
         async with httpx.AsyncClient(timeout=60.0) as client:
             headers = {
-                "Authorization": f"Bearer {settings.webflow_api_key.get_secret_value()}",
+                "Authorization": f"Bearer {settings.webflow_votebot_api_key.get_secret_value()}",
                 "accept": "application/json",
             }
             await webflow._build_jurisdiction_mapping(client, headers)

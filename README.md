@@ -87,7 +87,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `PINECONE_INDEX_NAME` | Pinecone index name (default: votebot-large) | Yes |
 | `PINECONE_NAMESPACE` | Pinecone namespace (default: default) | No |
 | `API_KEY` | API key for authentication | Yes |
-| `WEBFLOW_API_KEY` | Webflow CMS API key (read-only, used at query time) | For sync |
+| `WEBFLOW_VOTEBOT_API_KEY` | Webflow CMS API key (read-only, used at query time) | For sync |
 | `WEBFLOW_SCHEDULER_API_KEY` | Webflow CMS API key with CMS:write scope (used by scheduler for gov-url updates) | For scheduler |
 | `WEBFLOW_BILLS_COLLECTION_ID` | Webflow bills collection | For sync |
 | `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection | For sync |
@@ -627,7 +627,7 @@ Configuration in `config/sync_schedule.yaml`:
 - `bill_version_check.max_updates_per_run`: Limits re-ingestions per run (default: 50). First run populates the Redis cache for all bills, cycling through remaining bills on subsequent runs.
 - `bill_version_check.skip_webflow_update`: Disables CMS writes for testing (default: false)
 
-> **Prerequisite**: Set `WEBFLOW_SCHEDULER_API_KEY` to a Webflow API token with `CMS:write` scope. This key is used only by the scheduler for `gov-url` updates. The main `WEBFLOW_API_KEY` remains read-only for query-time CMS lookups. If `WEBFLOW_SCHEDULER_API_KEY` is not set, the scheduler falls back to `WEBFLOW_API_KEY` (which will fail on writes unless it also has write scope).
+> **Prerequisite**: Set `WEBFLOW_SCHEDULER_API_KEY` to a Webflow API token with `CMS:write` scope. This key is used only by the scheduler for `gov-url` updates. The main `WEBFLOW_VOTEBOT_API_KEY` remains read-only for query-time CMS lookups. If `WEBFLOW_SCHEDULER_API_KEY` is not set, the scheduler falls back to `WEBFLOW_VOTEBOT_API_KEY` (which will fail on writes unless it also has write scope).
 
 **Session detection** uses a two-tier approach:
 
