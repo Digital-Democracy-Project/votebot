@@ -1,23 +1,25 @@
-# OpenStates Bill Sync Schedule Configuration
-# ============================================
+# VoteBot Sync Schedule Configuration
+# ====================================
 #
-# This config controls when bills are synced from OpenStates.
-# Most scheduling is automatic based on StateLegislativeCalendar,
-# but you can override specific jurisdictions here.
+# Controls when bills, legislators, and organizations are synced.
+# Activated by setting SCHEDULER_ENABLED=true in the environment.
+# In multi-worker deployments, only one worker runs the scheduler
+# (Redis-based leader election).
+#
+# Schedule Summary:
+# - Bills:         Daily at 04:00 UTC (session-aware — daily in session, weekly off)
+# - Legislators:   Weekly on Sundays at 06:00 UTC
+# - Organizations: Monthly on the 1st at 08:00 UTC
+# - Content poll:  Hourly (Congress/OpenStates change detection)
 #
 # Session Detection:
 # - Primary: Live session dates from OpenStates API (fetched via warm_cache()
 #   during bill sync — uses existing OpenStatesSource.fetch_jurisdiction())
 # - Fallback: Hardcoded heuristics in StateLegislativeCalendar (start pattern
 #   + duration in weeks for all 50 states)
-#
-# The scheduler will:
-# - Sync daily for jurisdictions currently in session
-# - Sync weekly (Mondays) for jurisdictions not in session (pre-filed bills)
-# - Skip biennial states in off-years
 
 # Global settings
-sync_time_utc: "04:00"  # When to run daily sync (4 AM UTC = 11 PM EST)
+sync_time_utc: "04:00"  # When to run daily bill sync (4 AM UTC = 11 PM EST)
 
 # Federal Congress settings (not covered by StateLegislativeCalendar)
 US:
@@ -69,16 +71,17 @@ retry:
   backoff_seconds: 5
 
 # Legislator Sync Configuration
-# Syncs sponsored bills and voting records for each legislator from OpenStates
-# Runs separately from bill sync to spread API usage
+# Syncs sponsored bills and voting records for each legislator from OpenStates.
+# Runs weekly to spread API usage. Uses date-based rotation to cycle through
+# all legislators over multiple runs (max_legislators_per_run per week).
 legislator_sync:
   enabled: true
-  sync_time_utc: "06:00"  # 6 AM UTC = 1 AM EST (2 hours after main sync)
-  frequency: daily        # Run daily with upgraded API tier (30k calls/day)
-  sync_day: sunday        # Only used if frequency is weekly
+  sync_time_utc: "06:00"  # 6 AM UTC = 1 AM EST (2 hours after bill sync)
+  frequency: weekly        # Weekly sync to conserve API quota
+  sync_day: sunday         # Run on Sundays
   # Rate limiting (aligned with API tier: 2 calls/second)
   delay_between_legislators_ms: 500   # 500ms between legislators (2 calls/sec)
-  max_legislators_per_run: 200        # Process more per run with upgraded API
+  max_legislators_per_run: 200        # Rotate through full list across weeks
 
   # Sponsored bills sync
   sync_sponsored_bills: true
@@ -90,12 +93,20 @@ legislator_sync:
 
 # Legacy alias (deprecated, use legislator_sync instead)
 legislator_bills:
-  enabled: true
+  enabled: false  # Disabled — superseded by legislator_sync above
   sync_time_utc: "06:00"
-  frequency: daily
+  frequency: weekly
   sync_day: sunday
   delay_between_legislators_ms: 500
   max_legislators_per_run: 200
+
+# Organization Sync Configuration
+# Re-ingests all organization profiles from Webflow CMS.
+# Monthly is sufficient since org data changes infrequently.
+organization_sync:
+  enabled: true
+  sync_time_utc: "08:00"  # 8 AM UTC = 3 AM EST (4 hours after bill sync)
+  day_of_month: 1          # 1st of each month
 
 # Notification Settings (future use)
 notifications:

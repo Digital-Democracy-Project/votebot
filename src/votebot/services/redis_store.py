@@ -20,6 +20,8 @@ logger = structlog.get_logger()
 THREAD_HASH_KEY = "votebot:threads"
 AGENT_EVENTS_CHANNEL = "votebot:agent_events"
 ACTIVE_JURISDICTIONS_KEY = "votebot:active_jurisdictions"
+SCHEDULER_LOCK_KEY = "votebot:scheduler:leader"
+SCHEDULER_LOCK_TTL = 300  # 5 minutes
 
 
 class RedisStore:
@@ -160,6 +162,47 @@ class RedisStore:
         except Exception as e:
             logger.warning("Redis: failed to get active jurisdictions", error=str(e))
             return set()
+
+    # -- Scheduler leader election --
+
+    async def acquire_scheduler_lock(self, worker_id: str) -> bool:
+        """Try to become the scheduler leader. Returns True if lock acquired."""
+        if not self._client:
+            return True  # No Redis = single-worker mode, always lead
+        try:
+            acquired = await self._client.set(
+                SCHEDULER_LOCK_KEY, worker_id, nx=True, ex=SCHEDULER_LOCK_TTL
+            )
+            return bool(acquired)
+        except Exception as e:
+            logger.warning("Redis: failed to acquire scheduler lock", error=str(e))
+            return True  # Degrade gracefully: run scheduler anyway
+
+    async def refresh_scheduler_lock(self, worker_id: str) -> bool:
+        """Refresh the scheduler leader lock. Returns False if lock was lost."""
+        if not self._client:
+            return True
+        try:
+            # Only refresh if we still own the lock
+            current = await self._client.get(SCHEDULER_LOCK_KEY)
+            if current == worker_id:
+                await self._client.expire(SCHEDULER_LOCK_KEY, SCHEDULER_LOCK_TTL)
+                return True
+            return False
+        except Exception as e:
+            logger.warning("Redis: failed to refresh scheduler lock", error=str(e))
+            return True  # Keep running on error
+
+    async def release_scheduler_lock(self, worker_id: str):
+        """Release the scheduler leader lock if we still own it."""
+        if not self._client:
+            return
+        try:
+            current = await self._client.get(SCHEDULER_LOCK_KEY)
+            if current == worker_id:
+                await self._client.delete(SCHEDULER_LOCK_KEY)
+        except Exception as e:
+            logger.warning("Redis: failed to release scheduler lock", error=str(e))
 
     # -- Pub/sub for agent events --
 

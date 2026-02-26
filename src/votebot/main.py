@@ -1,5 +1,8 @@
 """FastAPI application entry point for VoteBot."""
 
+import asyncio
+import uuid
+
 import structlog
 import uvicorn
 from contextlib import asynccontextmanager
@@ -43,10 +46,54 @@ async def lifespan(app: FastAPI):
         environment=settings.environment,
     )
 
-    # Initialize services (lazy initialization is also supported)
+    # Start scheduler if enabled (with leader election for multi-worker safety)
+    scheduler = None
+    scheduler_worker_id = str(uuid.uuid4())[:8]
+    lock_refresh_task = None
+
+    if settings.scheduler_enabled:
+        is_leader = await redis_store.acquire_scheduler_lock(scheduler_worker_id)
+        if is_leader:
+            from votebot.updates.scheduler import UpdateSchedulerFactory
+            scheduler = UpdateSchedulerFactory.get_instance(settings)
+            scheduler.start()
+            logger.info(
+                "Scheduler started (this worker is leader)",
+                worker_id=scheduler_worker_id,
+            )
+
+            # Background task to refresh the leader lock
+            async def _refresh_lock():
+                while True:
+                    await asyncio.sleep(120)  # Refresh every 2 minutes (TTL is 5 min)
+                    ok = await redis_store.refresh_scheduler_lock(scheduler_worker_id)
+                    if not ok:
+                        logger.warning("Lost scheduler leader lock, stopping scheduler")
+                        if scheduler and scheduler.is_running:
+                            scheduler.stop()
+                        break
+
+            lock_refresh_task = asyncio.create_task(_refresh_lock())
+        else:
+            logger.info(
+                "Scheduler not started (another worker is leader)",
+                worker_id=scheduler_worker_id,
+            )
+
     yield
 
     # Shutdown
+    if lock_refresh_task and not lock_refresh_task.done():
+        lock_refresh_task.cancel()
+        try:
+            await lock_refresh_task
+        except asyncio.CancelledError:
+            pass
+
+    if scheduler and scheduler.is_running:
+        scheduler.stop()
+        await redis_store.release_scheduler_lock(scheduler_worker_id)
+
     await redis_store.disconnect()
     logger.info("Shutting down VoteBot API")
 

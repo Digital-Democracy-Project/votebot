@@ -23,7 +23,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Production Query Monitoring**: All production queries and responses are logged to date-partitioned JSONL files for offline evaluation against ground truth
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
-- **Real-Time Updates**: Hourly polling for content changes, session-aware daily/weekly sync scheduling using live OpenStates session dates
+- **Automated Sync Scheduling**: Bills daily (session-aware), legislators weekly, organizations monthly — with Redis leader election for multi-worker safety
 - **High Performance**: Designed for 1000+ concurrent conversations
 
 ## Tech Stack
@@ -100,6 +100,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `SLACK_SUPPORT_CHANNEL` | Slack channel for support | For handoff |
 | `QUERY_LOG_ENABLED` | Enable production query logging (default: true) | No |
 | `QUERY_LOG_DIR` | Directory for JSONL query logs (default: logs/queries) | No |
+| `SCHEDULER_ENABLED` | Enable automated sync scheduler (default: false) | For production |
 | `SIMILARITY_THRESHOLD` | RAG similarity threshold (default: 0.1) | No |
 
 ## API Endpoints
@@ -599,11 +600,16 @@ python scripts/seed_data.py
 
 ### Sync Scheduling
 
-VoteBot uses session-aware sync scheduling to minimize unnecessary API calls:
+VoteBot uses an automated sync scheduler to keep content fresh. Enable it by setting `SCHEDULER_ENABLED=true` in the environment. In multi-worker deployments, only one worker runs the scheduler (Redis-based leader election).
 
-- **In session**: Bills are synced **daily** at 4 AM UTC
-- **Off session**: Bills are synced **weekly** (Mondays only) to catch pre-filed bills
-- **Biennial off-years**: No sync for states that only meet in odd years
+**Schedule:**
+
+| Content | Frequency | Time (UTC) | Details |
+|---------|-----------|------------|---------|
+| **Bills** | Daily | 04:00 | Session-aware: daily during session, weekly (Mondays) off-session, skip biennial off-years |
+| **Legislators** | Weekly | 06:00 Sunday | Sponsored bills + voting records, date-based rotation (200/run) |
+| **Organizations** | Monthly | 08:00 1st | Full re-ingest of org profiles from Webflow CMS |
+| **Content poll** | Hourly | — | Congress/OpenStates change detection |
 
 **Session detection** uses a two-tier approach:
 
@@ -612,6 +618,8 @@ VoteBot uses session-aware sync scheduling to minimize unnecessary API calls:
 2. **Hardcoded fallback**: If the OpenStates API is unavailable or a state has no live data, the calendar falls back to hardcoded heuristics (start patterns + duration in weeks for all 50 states + DC).
 
 **Auto-tracking jurisdictions**: When a bill from a new state is synced, the system automatically detects the jurisdiction via `resolve_jurisdiction_code()` — which checks the `JURISDICTION_MAP` first, then falls back to parsing the bill's OpenStates URL (e.g., `https://openstates.org/ca/bills/...` → `CA`). Discovered jurisdictions are registered in Redis (`votebot:active_jurisdictions` set) for cross-worker visibility. No manual config changes are needed to add new states — just add bills from the new state to Webflow CMS and sync.
+
+**Multi-worker safety**: The scheduler uses a Redis-based leader lock (`votebot:scheduler:leader`, 5-min TTL, refreshed every 2 min). Only the leader worker runs scheduled jobs. If the leader dies, another worker can acquire the lock. If Redis is unavailable, the scheduler starts anyway (single-worker fallback).
 
 Configuration is in `config/sync_schedule.yaml`. The `StateLegislativeCalendar` class is at `src/votebot/utils/legislative_calendar.py`.
 

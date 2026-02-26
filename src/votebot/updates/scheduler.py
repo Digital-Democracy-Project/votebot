@@ -105,41 +105,38 @@ class UpdateScheduler:
             replace_existing=True,
         )
 
-        # Add legislator bills sync job (daily or weekly based on config)
-        leg_bills_config = self._sync_config.get("legislator_bills", {})
-        if leg_bills_config.get("enabled", False):
-            leg_sync_time = leg_bills_config.get("sync_time_utc", "06:00")
+        # Add legislator sync job (daily or weekly based on config)
+        # Prefer new legislator_sync config, fall back to legacy legislator_bills
+        leg_config = self._sync_config.get("legislator_sync", {})
+        if not leg_config:
+            leg_config = self._sync_config.get("legislator_bills", {})
+
+        if leg_config.get("enabled", False):
+            leg_sync_time = leg_config.get("sync_time_utc", "06:00")
             leg_hour, leg_minute = map(int, leg_sync_time.split(":"))
-            frequency = leg_bills_config.get("frequency", "weekly")
+            frequency = leg_config.get("frequency", "weekly")
+
+            # Map day name to cron day_of_week (0=Monday, 6=Sunday)
+            day_map = {
+                "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                "friday": 4, "saturday": 5, "sunday": 6
+            }
 
             if frequency == "daily":
-                # Daily sync - runs every day at the specified time
                 self.scheduler.add_job(
                     self._run_legislator_bills_sync,
-                    trigger=CronTrigger(
-                        hour=leg_hour,
-                        minute=leg_minute,
-                    ),
-                    id="daily_legislator_bills_sync",
-                    name="Daily Legislator Bills Sync",
+                    trigger=CronTrigger(hour=leg_hour, minute=leg_minute),
+                    id="daily_legislator_sync",
+                    name="Daily Legislator Sync",
                     replace_existing=True,
                 )
                 logger.info(
-                    "Legislator bills sync scheduled (daily)",
+                    "Legislator sync scheduled (daily)",
                     sync_time=leg_sync_time,
-                    frequency=frequency,
                 )
             else:
-                # Weekly sync - runs on specified day
-                sync_day = leg_bills_config.get("sync_day", "sunday")
-
-                # Map day name to cron day_of_week (0=Monday, 6=Sunday)
-                day_map = {
-                    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-                    "friday": 4, "saturday": 5, "sunday": 6
-                }
+                sync_day = leg_config.get("sync_day", "sunday")
                 day_of_week = day_map.get(sync_day.lower(), 6)
-
                 self.scheduler.add_job(
                     self._run_legislator_bills_sync,
                     trigger=CronTrigger(
@@ -147,15 +144,39 @@ class UpdateScheduler:
                         hour=leg_hour,
                         minute=leg_minute,
                     ),
-                    id="weekly_legislator_bills_sync",
-                    name="Weekly Legislator Bills Sync",
+                    id="weekly_legislator_sync",
+                    name="Weekly Legislator Sync",
                     replace_existing=True,
                 )
                 logger.info(
-                    "Legislator bills sync scheduled (weekly)",
+                    "Legislator sync scheduled (weekly)",
                     sync_time=leg_sync_time,
                     sync_day=sync_day,
                 )
+
+        # Add organization sync job (monthly based on config)
+        org_config = self._sync_config.get("organization_sync", {})
+        if org_config.get("enabled", False):
+            org_sync_time = org_config.get("sync_time_utc", "08:00")
+            org_hour, org_minute = map(int, org_sync_time.split(":"))
+            org_day_of_month = org_config.get("day_of_month", 1)
+
+            self.scheduler.add_job(
+                self._run_organization_sync,
+                trigger=CronTrigger(
+                    day=org_day_of_month,
+                    hour=org_hour,
+                    minute=org_minute,
+                ),
+                id="monthly_organization_sync",
+                name="Monthly Organization Sync",
+                replace_existing=True,
+            )
+            logger.info(
+                "Organization sync scheduled (monthly)",
+                sync_time=org_sync_time,
+                day_of_month=org_day_of_month,
+            )
 
         self.scheduler.start()
         self._is_running = True
@@ -601,6 +622,70 @@ class UpdateScheduler:
                 "success": False,
                 "error": str(e),
             }
+
+    async def _run_organization_sync(self) -> dict[str, Any]:
+        """
+        Run the monthly organization sync.
+
+        Fetches all organizations from Webflow CMS and re-ingests them
+        into the vector store.
+
+        Returns:
+            Dict with sync results
+        """
+        from votebot.sync.handlers.organization import OrganizationHandler
+        from votebot.sync.types import SyncOptions
+
+        start_time = datetime.utcnow()
+        logger.info("Starting monthly organization sync")
+
+        try:
+            handler = OrganizationHandler(self.settings)
+            options = SyncOptions(include_openstates=False)
+            result = await handler.sync_batch(options)
+
+            duration = (datetime.utcnow() - start_time).total_seconds()
+
+            logger.info(
+                "Monthly organization sync completed",
+                duration_seconds=duration,
+                processed=result.items_processed,
+                successful=result.items_successful,
+                failed=result.items_failed,
+                chunks_created=result.chunks_created,
+            )
+
+            # Call callbacks
+            for callback in self._update_callbacks:
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback({"organization_sync": result})
+                    else:
+                        callback({"organization_sync": result})
+                except Exception as e:
+                    logger.error("Sync callback failed", error=str(e))
+
+            return {
+                "success": result.success,
+                "duration_seconds": duration,
+                "processed": result.items_processed,
+                "successful": result.items_successful,
+                "failed": result.items_failed,
+                "chunks_created": result.chunks_created,
+                "errors": result.errors[:10] if result.errors else [],
+            }
+
+        except Exception as e:
+            logger.exception("Organization sync failed", error=str(e))
+            return {
+                "success": False,
+                "error": str(e),
+            }
+
+    async def trigger_organization_sync(self) -> dict[str, Any]:
+        """Manually trigger an organization sync."""
+        logger.info("Manual organization sync triggered")
+        return await self._run_organization_sync()
 
     async def trigger_legislator_bills_sync(
         self,
