@@ -92,7 +92,7 @@ class BillSyncService:
         "69129425a577496525c8e52a": "ut",
         "6912916752bfa901425f1e76": "az",
         "69129146d6eec8ac6bcc8280": "al",
-        # Add more as needed
+        # Add more as needed — new states are auto-resolved via OpenStates URL fallback
     }
 
     # Mapping of jurisdiction codes to human-readable source names
@@ -182,6 +182,28 @@ class BillSyncService:
             jurisdiction_lower,
             f"{jurisdiction.upper()} Legislature" if jurisdiction else "State Legislature"
         )
+
+    def resolve_jurisdiction_code(self, jurisdiction_id: str, openstates_url: str = "") -> str:
+        """Resolve Webflow jurisdiction reference ID to state code.
+
+        Checks JURISDICTION_MAP first, falls back to parsing the OpenStates URL.
+        """
+        code = self.JURISDICTION_MAP.get(jurisdiction_id, "")
+        if code:
+            return code.upper()
+
+        # Fallback: derive from OpenStates URL
+        if openstates_url:
+            parsed = self.parse_openstates_url(openstates_url)
+            if parsed:
+                logger.info(
+                    "Resolved jurisdiction from OpenStates URL (not in JURISDICTION_MAP)",
+                    jurisdiction=parsed.jurisdiction.upper(),
+                    webflow_ref_id=jurisdiction_id,
+                )
+                return parsed.jurisdiction.upper()
+
+        return ""
 
     async def _build_legislator_mapping(self) -> None:
         """
@@ -1215,9 +1237,10 @@ class BillSyncService:
         for bill in bills:
             fields = bill.get("fieldData", {})
             jurisdiction_id = fields.get("jurisdiction", "")
-            code = self.JURISDICTION_MAP.get(jurisdiction_id, "")
+            openstates_url = fields.get("open-states-url-2", "")
+            code = self.resolve_jurisdiction_code(jurisdiction_id, openstates_url)
             if code:
-                jurisdiction_codes.add(code.upper())
+                jurisdiction_codes.add(code)
 
         jurisdiction_data = {}
         for code in jurisdiction_codes:
@@ -1230,6 +1253,14 @@ class BillSyncService:
 
         if jurisdiction_data:
             self.calendar.warm_cache(jurisdiction_data)
+
+        # Track active jurisdictions in Redis for cross-worker visibility
+        if jurisdiction_codes:
+            from votebot.services.redis_store import get_redis_store
+
+            redis_store = get_redis_store()
+            for code in jurisdiction_codes:
+                await redis_store.add_active_jurisdiction(code)
 
         total = len(bills)
         successful = 0
@@ -1248,7 +1279,7 @@ class BillSyncService:
             slug = fields.get("slug", "")
 
             # Get jurisdiction code
-            jurisdiction_code = self.JURISDICTION_MAP.get(jurisdiction_id, "")
+            jurisdiction_code = self.resolve_jurisdiction_code(jurisdiction_id, openstates_url)
 
             # Skip bills without OpenStates URL
             if not openstates_url:
@@ -1343,7 +1374,9 @@ class BillSyncService:
             slug = fields.get("slug", "")
 
             # Get jurisdiction code
-            jurisdiction_code = self.JURISDICTION_MAP.get(jurisdiction_id, jurisdiction_id[:8])
+            jurisdiction_code = self.resolve_jurisdiction_code(jurisdiction_id, openstates_url)
+            if not jurisdiction_code:
+                jurisdiction_code = jurisdiction_id[:8]  # Preserve existing truncation fallback
 
             # Skip bills without OpenStates URL
             if not openstates_url:

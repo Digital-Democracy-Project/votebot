@@ -26,9 +26,10 @@ US:
   congress_number: 119        # 119th Congress (2025-2027)
   session_years: "2025-2027"
 
-# DDP Active Jurisdictions
-# These are the states where DDP currently operates.
-# Session dates come from live OpenStates data (preferred) or hardcoded heuristics (fallback).
+# DDP Active Jurisdictions (seed list)
+# New states are auto-tracked when bills are synced via the unified sync API.
+# The canonical set is maintained in Redis (votebot:active_jurisdictions).
+# This list seeds the Redis set and serves as documentation of initial states.
 active_jurisdictions:
   - FL   # Florida
   - VA   # Virginia

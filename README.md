@@ -32,7 +32,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Vector Database**: Pinecone
 - **LLM**: OpenAI GPT-4.1 (via Responses API with web search)
 - **Embeddings**: OpenAI text-embedding-3-large
-- **Caching / Cross-Worker State**: Redis (thread-to-session mapping + pub/sub for multi-worker handoff)
+- **Caching / Cross-Worker State**: Redis (thread-to-session mapping, pub/sub for multi-worker handoff, active jurisdictions tracking)
 - **Database**: PostgreSQL (optional)
 
 ## Quick Start
@@ -611,6 +611,8 @@ VoteBot uses session-aware sync scheduling to minimize unnecessary API calls:
 
 2. **Hardcoded fallback**: If the OpenStates API is unavailable or a state has no live data, the calendar falls back to hardcoded heuristics (start patterns + duration in weeks for all 50 states + DC).
 
+**Auto-tracking jurisdictions**: When a bill from a new state is synced, the system automatically detects the jurisdiction via `resolve_jurisdiction_code()` — which checks the `JURISDICTION_MAP` first, then falls back to parsing the bill's OpenStates URL (e.g., `https://openstates.org/ca/bills/...` → `CA`). Discovered jurisdictions are registered in Redis (`votebot:active_jurisdictions` set) for cross-worker visibility. No manual config changes are needed to add new states — just add bills from the new state to Webflow CMS and sync.
+
 Configuration is in `config/sync_schedule.yaml`. The `StateLegislativeCalendar` class is at `src/votebot/utils/legislative_calendar.py`.
 
 ## Development
@@ -668,7 +670,7 @@ votebot/
 │   │   ├── web_search.py    # Tavily web search
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
 │   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification)
-│   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub)
+│   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub + active jurisdictions)
 │   │   ├── query_logger.py  # Production query logger (JSONL, date-partitioned)
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service

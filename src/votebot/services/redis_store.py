@@ -19,6 +19,7 @@ logger = structlog.get_logger()
 # Redis key constants
 THREAD_HASH_KEY = "votebot:threads"
 AGENT_EVENTS_CHANNEL = "votebot:agent_events"
+ACTIVE_JURISDICTIONS_KEY = "votebot:active_jurisdictions"
 
 
 class RedisStore:
@@ -138,6 +139,27 @@ class RedisStore:
         except Exception as e:
             logger.error("Redis: failed to get sync task", task_id=task_id, error=str(e))
         return None
+
+    # -- Active jurisdictions tracking --
+
+    async def add_active_jurisdiction(self, code: str):
+        """Register a jurisdiction as actively tracked."""
+        if not self._client:
+            return
+        try:
+            await self._client.sadd(ACTIVE_JURISDICTIONS_KEY, code.upper())
+        except Exception as e:
+            logger.warning("Redis: failed to add active jurisdiction", code=code, error=str(e))
+
+    async def get_active_jurisdictions(self) -> set[str]:
+        """Get all actively tracked jurisdictions."""
+        if not self._client:
+            return set()
+        try:
+            return await self._client.smembers(ACTIVE_JURISDICTIONS_KEY)
+        except Exception as e:
+            logger.warning("Redis: failed to get active jurisdictions", error=str(e))
+            return set()
 
     # -- Pub/sub for agent events --
 

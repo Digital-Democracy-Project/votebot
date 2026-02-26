@@ -142,11 +142,13 @@ class BillHandler:
                     duration_seconds=time.perf_counter() - start_time,
                 )
 
+            # Resolve jurisdiction for tracking and OpenStates sync
+            jurisdiction_code = self.bill_sync.resolve_jurisdiction_code(
+                jurisdiction_id, openstates_url
+            )
+
             # Sync OpenStates history if available and enabled
             if openstates_url and options.include_openstates:
-                jurisdiction_code = self.bill_sync.JURISDICTION_MAP.get(
-                    jurisdiction_id, ""
-                )
                 result = await self.bill_sync.sync_bill(
                     openstates_url=openstates_url,
                     webflow_bill_id=item_id,
@@ -183,6 +185,12 @@ class BillHandler:
 
             success = len(errors) == 0 or chunks_created > 0
             duration = time.perf_counter() - start_time
+
+            # Track active jurisdiction in Redis
+            if jurisdiction_code:
+                from votebot.services.redis_store import get_redis_store
+
+                await get_redis_store().add_active_jurisdiction(jurisdiction_code)
 
             logger.info(
                 "Bill sync complete",
@@ -287,18 +295,15 @@ class BillHandler:
             # Filter by jurisdiction if specified
             if options.jurisdiction:
                 jurisdiction_upper = options.jurisdiction.upper()
-                # Build reverse map from jurisdiction_id to code
-                jurisdiction_id_to_code = {v: k for k, v in self.bill_sync.JURISDICTION_MAP.items()}
-                # Find matching jurisdiction IDs
-                matching_ids = [
-                    jid for jid, code in self.bill_sync.JURISDICTION_MAP.items()
-                    if code.upper() == jurisdiction_upper
-                ]
-
                 filtered_items = []
                 for item in raw_items:
-                    item_jurisdiction = item.get("fieldData", {}).get("jurisdiction", "")
-                    if item_jurisdiction in matching_ids:
+                    fields = item.get("fieldData", {})
+                    item_jurisdiction_id = fields.get("jurisdiction", "")
+                    item_url = fields.get("open-states-url-2", "")
+                    code = self.bill_sync.resolve_jurisdiction_code(
+                        item_jurisdiction_id, item_url
+                    )
+                    if code.upper() == jurisdiction_upper:
                         filtered_items.append(item)
 
                 logger.info(
