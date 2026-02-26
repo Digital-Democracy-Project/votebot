@@ -836,7 +836,12 @@ class WebflowLookupService:
         )
 
 
-    async def update_bill_gov_url(self, webflow_id: str, new_url: str) -> bool:
+    async def update_bill_gov_url(
+        self,
+        webflow_id: str,
+        new_url: str,
+        api_key: str | None = None,
+    ) -> bool:
         """Update the gov-url field for a bill in Webflow CMS.
 
         Uses PATCH /v2/collections/{collection_id}/items/{item_id}/live
@@ -845,6 +850,8 @@ class WebflowLookupService:
         Args:
             webflow_id: Webflow item ID for the bill
             new_url: New government URL to set
+            api_key: Optional API key override (e.g., scheduler key with write scope).
+                     Falls back to self.api_key if not provided.
 
         Returns:
             True on success, False on failure
@@ -853,9 +860,10 @@ class WebflowLookupService:
             logger.warning("Missing webflow_id or new_url for gov-url update")
             return False
 
+        key = api_key or self.api_key
         url = f"{self.BASE_URL}/collections/{self.bills_collection_id}/items/{webflow_id}/live"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {key}",
             "accept": "application/json",
             "content-type": "application/json",
         }

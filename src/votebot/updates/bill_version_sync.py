@@ -313,7 +313,14 @@ class BillVersionSyncService:
                 from votebot.services.webflow_lookup import WebflowLookupService
 
                 lookup = WebflowLookupService(self.settings)
-                webflow_updated = await lookup.update_bill_gov_url(webflow_id, text_url)
+                # Use scheduler-specific key (CMS:write scope) if configured,
+                # keeping the default read-only key for query-time lookups
+                scheduler_key = self.settings.webflow_scheduler_api_key.get_secret_value()
+                webflow_updated = await lookup.update_bill_gov_url(
+                    webflow_id,
+                    text_url,
+                    api_key=scheduler_key or None,
+                )
             except Exception as e:
                 logger.warning(
                     "Failed to update Webflow gov-url (bill text still ingested)",

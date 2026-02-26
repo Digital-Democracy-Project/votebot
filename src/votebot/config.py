@@ -82,7 +82,8 @@ class Settings(BaseSettings):
     openstates_api_key: SecretStr = Field(default=SecretStr(""))
 
     # Webflow CMS
-    webflow_api_key: SecretStr = Field(default=SecretStr(""))
+    webflow_api_key: SecretStr = Field(default=SecretStr(""))  # Read-only (query-time lookups)
+    webflow_scheduler_api_key: SecretStr = Field(default=SecretStr(""))  # Read+write (scheduler CMS updates)
     webflow_site_id: str = ""
     webflow_bills_collection_id: str = ""
     webflow_jurisdiction_collection_id: str = ""
