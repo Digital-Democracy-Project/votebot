@@ -173,28 +173,36 @@ class BillVersionSyncService:
         return False
 
     @staticmethod
-    def _extract_latest_action(bill_data: dict) -> str | None:
-        """Extract the latest action description from OpenStates bill data.
+    def _extract_latest_action(bill_data: dict) -> tuple[str | None, str | None]:
+        """Extract the latest action description and date from OpenStates bill data.
 
-        OpenStates v3 API returns `latest_action_description` as a top-level
-        string field (e.g., "Referred to Committee on Judiciary",
-        "Signed by Governor"). Returns None if the field is missing or empty.
+        OpenStates v3 API returns `latest_action_description` and
+        `latest_action_date` as top-level fields. The date is YYYY-MM-DD;
+        we convert it to ISO 8601 for Webflow's timestamp field type.
+
+        Returns:
+            (description, iso_date) tuple — either may be None
         """
-        description = bill_data.get("latest_action_description")
-        return description if description else None
+        description = bill_data.get("latest_action_description") or None
+        action_date = bill_data.get("latest_action_date")
+        # Convert "2026-02-24" → "2026-02-24T00:00:00.000Z" for Webflow timestamp
+        iso_date = f"{action_date}T00:00:00.000Z" if action_date else None
+        return description, iso_date
 
     async def _update_webflow_status(
         self,
         webflow_id: str,
         bill_title: str,
         new_status: str,
+        status_date: str | None = None,
     ) -> bool:
-        """Update the status field for a bill in Webflow CMS.
+        """Update the status and status-date fields for a bill in Webflow CMS.
 
         Args:
             webflow_id: Webflow item ID
             bill_title: For logging
             new_status: Latest action description from OpenStates
+            status_date: ISO 8601 timestamp for the action date
 
         Returns:
             True on success, False on failure
@@ -204,9 +212,12 @@ class BillVersionSyncService:
 
             lookup = WebflowLookupService(self.settings)
             scheduler_key = self.settings.webflow_scheduler_api_key.get_secret_value()
+            field_data: dict[str, str] = {"status": new_status}
+            if status_date:
+                field_data["status-date"] = status_date
             return await lookup.update_bill_fields(
                 webflow_id,
-                {"status": new_status},
+                field_data,
                 api_key=scheduler_key or None,
             )
         except Exception as e:
@@ -300,20 +311,21 @@ class BillVersionSyncService:
 
         if not self._is_newer_version(latest_version, cached):
             # Text version unchanged — but status may have changed
-            latest_action = self._extract_latest_action(bill_data)
+            latest_action, action_date = self._extract_latest_action(bill_data)
             status_updated = False
 
             if latest_action and latest_action != (cached or {}).get("last_status"):
                 skip_webflow = self._config.get("skip_webflow_update", False)
                 if not skip_webflow:
                     status_updated = await self._update_webflow_status(
-                        webflow_id, bill_title, latest_action,
+                        webflow_id, bill_title, latest_action, action_date,
                     )
                     if status_updated:
                         logger.info(
                             "Bill status updated (version unchanged)",
                             bill_title=bill_title,
                             new_status=latest_action,
+                            status_date=action_date,
                         )
 
             # Update last_checked (and last_status if changed) in cache
@@ -373,10 +385,10 @@ class BillVersionSyncService:
                 error=f"Ingestion failed: {e}",
             )
 
-        # 7. Update Webflow fields (gov-url + status) in a single PATCH if enabled
+        # 7. Update Webflow fields (gov-url + status + status-date) in a single PATCH
         webflow_updated = False
         status_updated = False
-        latest_action = self._extract_latest_action(bill_data)
+        latest_action, action_date = self._extract_latest_action(bill_data)
         skip_webflow = self._config.get("skip_webflow_update", False)
         if not skip_webflow:
             try:
@@ -385,10 +397,12 @@ class BillVersionSyncService:
                 lookup = WebflowLookupService(self.settings)
                 scheduler_key = self.settings.webflow_scheduler_api_key.get_secret_value()
 
-                # Batch gov-url and status into a single PATCH call
+                # Batch gov-url, status, and status-date into a single PATCH call
                 field_data: dict[str, str] = {"gov-url": text_url}
                 if latest_action:
                     field_data["status"] = latest_action
+                if action_date:
+                    field_data["status-date"] = action_date
 
                 success = await lookup.update_bill_fields(
                     webflow_id,
