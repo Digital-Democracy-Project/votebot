@@ -28,6 +28,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Sync Task Status Returns 404 in Multi-Worker Deployment](#sync-task-status-returns-404-in-multi-worker-deployment)
 - [Chat Widget Truncated on Mobile (Send Button Cut Off)](#chat-widget-truncated-on-mobile-send-button-cut-off)
 - [Production Query Monitoring](#production-query-monitoring)
+- [Batch Sync Worker Killed Mid-Flight](#batch-sync-worker-killed-mid-flight)
 
 ---
 
@@ -3041,6 +3042,67 @@ JSONL files grow continuously. Each entry is ~1-3 KB. At 1,000 queries/day, expe
 # Archive files older than 30 days
 find logs/queries/ -name "*.jsonl" -mtime +30 -exec gzip {} \;
 ```
+
+---
+
+## Batch Sync Worker Killed Mid-Flight
+
+### Symptom
+
+A batch bill sync (`POST /votebot/sync/unified` with `mode: batch`) returns `"status": "accepted"` and starts processing, but the task status never progresses past `"running"` with all-zero counts. Logs show the worker processing bills then abruptly stopping, followed by:
+
+```
+INFO:     Waiting for child process [PID]
+INFO:     Child process [PID] died
+```
+
+### Root Cause
+
+The uvicorn parent process killed the worker that was running the batch sync. Full (unlimited) batch syncs download PDFs for every bill, run OpenStates history sync, then run the bill version sync — this can take 20+ minutes and consume significant memory. Uvicorn's process manager may kill the worker if it becomes unresponsive to internal health checks or exceeds memory limits.
+
+The task state gets stuck as `"running"` in Redis because the completion callback (which writes final results to Redis) never fires.
+
+### Evidence
+
+Observed on 2026-02-26: Worker 57373 was processing a full batch sync (all jurisdictions, no limit). Last bill processed was FL SB 995 at 05:22:06. At 05:22:22 the parent process killed it. No OOM messages in `dmesg`. A subsequent limited batch (`jurisdiction: MA`, no limit) completed successfully in ~10 minutes on the replacement worker.
+
+### Investigation Steps
+
+```bash
+# Check if the worker is still alive
+ps -p <PID> 2>/dev/null && echo "alive" || echo "dead"
+
+# Find when the worker died
+sudo journalctl -u votebot --since "TIME" --no-pager | grep -E "Waiting for child|Child process.*died"
+
+# Check for OOM killer
+sudo dmesg | grep -iE "oom|kill|<PID>"
+
+# Check the orphaned task in Redis
+redis-cli GET "votebot:sync:task:<task_id>"
+```
+
+### Workarounds
+
+1. **Use jurisdiction-scoped batches** instead of full unlimited syncs:
+   ```json
+   {"content_type": "bill", "mode": "batch", "jurisdiction": "MA"}
+   ```
+   Each jurisdiction completes in a few minutes and is unlikely to trigger worker death.
+
+2. **Use the `limit` parameter** to cap the number of bills per batch:
+   ```json
+   {"content_type": "bill", "mode": "batch", "limit": 50}
+   ```
+
+3. **The daily scheduler is unaffected** — it runs `BillVersionSyncService` directly (not through the batch sync pipeline) and processes bills one at a time with rate limiting.
+
+### Potential Fixes (Not Yet Implemented)
+
+- **Increase uvicorn worker timeout**: Add `--timeout-keep-alive 300` or switch to gunicorn with `--timeout 600` for long-running sync operations
+- **Run sync in a separate process**: Decouple sync from the API workers entirely (e.g., Celery task queue, or a dedicated sync worker process)
+- **Add progress updates to Redis**: Write intermediate progress during the sync so the status endpoint shows real-time counts even from the other worker
+- **Clean up orphaned tasks**: Add a periodic check that marks tasks as `"failed"` if the owning worker PID is dead
 
 ---
 
