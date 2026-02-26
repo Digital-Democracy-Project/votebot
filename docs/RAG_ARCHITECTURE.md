@@ -127,11 +127,12 @@ The entry point for actual sync operations. The `UnifiedSyncService` dispatches 
 
 Each handler uses `IngestionPipeline` for the chunk -> embed -> upsert flow.
 
-**Sync scheduling** (`src/votebot/updates/scheduler.py` + `src/votebot/updates/bill_sync.py`):
-- `UpdateScheduler` (APScheduler) runs three scheduled jobs: daily bill sync, weekly legislator sync, monthly org sync. Started in `main.py` lifespan when `SCHEDULER_ENABLED=true`.
+**Sync scheduling** (`src/votebot/updates/scheduler.py` + `src/votebot/updates/bill_version_sync.py`):
+- `UpdateScheduler` (APScheduler) runs three scheduled jobs: daily bill version check, weekly legislator sync, monthly org sync. Started in `main.py` lifespan when `SCHEDULER_ENABLED=true`.
+- **Daily bill version check** (`BillVersionSyncService`): For each current-session bill, checks OpenStates `versions` array for newer amended versions. If a newer version is detected: re-ingests bill text (PDF or HTML) into Pinecone as `bill-text` (idempotent upsert), updates Webflow CMS `gov-url` via PATCH API. Version state cached in Redis (`votebot:bill_version:{webflow_id}`, 90-day TTL). Configurable: `max_updates_per_run` (default 50), `skip_webflow_update` (default false).
 - **Multi-worker safety**: Redis-based leader election (`votebot:scheduler:leader` key) ensures only one uvicorn worker runs the scheduler. Falls back to always-run if Redis unavailable.
 - `StateLegislativeCalendar` (`src/votebot/utils/legislative_calendar.py`) determines whether a state is in-session, which controls bill sync frequency: **daily** during session, **weekly** (Mondays) off-session.
-- Before each bill sync run, `BillSyncService.sync_current_session_bills()` warms the calendar with **live session dates** from the OpenStates API (via `OpenStatesSource.fetch_jurisdiction()`), with hardcoded heuristics as fallback.
+- Before each bill version check run, the calendar is warmed with **live session dates** from the OpenStates API (via `OpenStatesSource.fetch_jurisdiction()`), with hardcoded heuristics as fallback.
 - **Auto jurisdiction resolution**: `resolve_jurisdiction_code(jurisdiction_id, openstates_url)` checks `JURISDICTION_MAP` first, then falls back to parsing the OpenStates URL. New states are auto-tracked in Redis (`votebot:active_jurisdictions` set).
 - Configuration: `config/sync_schedule.yaml`
 

@@ -22,6 +22,8 @@ AGENT_EVENTS_CHANNEL = "votebot:agent_events"
 ACTIVE_JURISDICTIONS_KEY = "votebot:active_jurisdictions"
 SCHEDULER_LOCK_KEY = "votebot:scheduler:leader"
 SCHEDULER_LOCK_TTL = 300  # 5 minutes
+BILL_VERSION_PREFIX = "votebot:bill_version:"
+BILL_VERSION_TTL = 86400 * 90  # 90 days
 
 
 class RedisStore:
@@ -203,6 +205,45 @@ class RedisStore:
                 await self._client.delete(SCHEDULER_LOCK_KEY)
         except Exception as e:
             logger.warning("Redis: failed to release scheduler lock", error=str(e))
+
+    # -- Bill version tracking --
+
+    async def set_bill_version(self, webflow_id: str, version_data: dict):
+        """Store last-ingested version info for a bill.
+
+        Args:
+            webflow_id: Webflow item ID for the bill
+            version_data: Dict with version_date, version_note, text_url, media_type, last_checked
+        """
+        if not self._client:
+            return
+        try:
+            await self._client.set(
+                f"{BILL_VERSION_PREFIX}{webflow_id}",
+                json.dumps(version_data),
+                ex=BILL_VERSION_TTL,
+            )
+        except Exception as e:
+            logger.error("Redis: failed to set bill version", webflow_id=webflow_id, error=str(e))
+
+    async def get_bill_version(self, webflow_id: str) -> dict | None:
+        """Retrieve last-ingested version info for a bill.
+
+        Args:
+            webflow_id: Webflow item ID for the bill
+
+        Returns:
+            Dict with version info or None if not cached/unavailable
+        """
+        if not self._client:
+            return None
+        try:
+            data = await self._client.get(f"{BILL_VERSION_PREFIX}{webflow_id}")
+            if data:
+                return json.loads(data)
+        except Exception as e:
+            logger.error("Redis: failed to get bill version", webflow_id=webflow_id, error=str(e))
+        return None
 
     # -- Pub/sub for agent events --
 

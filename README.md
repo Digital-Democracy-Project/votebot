@@ -23,7 +23,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Production Query Monitoring**: All production queries and responses are logged to date-partitioned JSONL files for offline evaluation against ground truth
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
-- **Automated Sync Scheduling**: Bills daily (session-aware), legislators weekly, organizations monthly — with Redis leader election for multi-worker safety
+- **Automated Sync Scheduling**: Daily bill version checks (detects newer amended PDFs/HTML, re-ingests text and updates Webflow CMS gov-url), weekly legislator sync, monthly org sync — with Redis leader election for multi-worker safety
 - **High Performance**: Designed for 1000+ concurrent conversations
 
 ## Tech Stack
@@ -32,7 +32,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Vector Database**: Pinecone
 - **LLM**: OpenAI GPT-4.1 (via Responses API with web search)
 - **Embeddings**: OpenAI text-embedding-3-large
-- **Caching / Cross-Worker State**: Redis (thread-to-session mapping, pub/sub for multi-worker handoff, active jurisdictions tracking)
+- **Caching / Cross-Worker State**: Redis (thread-to-session mapping, pub/sub for multi-worker handoff, active jurisdictions tracking, bill version cache)
 - **Database**: PostgreSQL (optional)
 
 ## Quick Start
@@ -606,14 +606,31 @@ VoteBot uses an automated sync scheduler to keep content fresh. Enable it by set
 
 | Content | Frequency | Time (UTC) | Details |
 |---------|-----------|------------|---------|
-| **Bills** | Daily | 04:00 | Session-aware: daily during session, weekly (Mondays) off-session, skip biennial off-years |
+| **Bill versions** | Daily | 04:00 | Checks OpenStates for newer amended versions (Engrossed, Enrolled, etc.), re-ingests bill text (PDF or HTML) into Pinecone, updates Webflow CMS `gov-url` |
 | **Legislators** | Weekly | 06:00 Sunday | Sponsored bills + voting records, date-based rotation (200/run) |
 | **Organizations** | Monthly | 08:00 1st | Full re-ingest of org profiles from Webflow CMS |
 | **Content poll** | Hourly | — | Congress/OpenStates change detection |
 
+**Bill version checking** (`BillVersionSyncService` in `src/votebot/updates/bill_version_sync.py`):
+
+For each current-session bill, the daily job:
+1. Fetches the bill from OpenStates API (includes `versions` array with dated entries and PDF/HTML links)
+2. Compares the latest version against a Redis cache per bill (`votebot:bill_version:{webflow_id}`, 90-day TTL)
+3. If a newer version is detected (new date, different note like "Engrossed", or changed URL):
+   - Downloads bill text (PDF via `WebflowSource._process_bill_pdf()` or HTML via `_process_bill_html()`, based on OpenStates `media_type`)
+   - Re-ingests into Pinecone as `bill-text` documents (idempotent upsert overwrites old chunks)
+   - Updates Webflow CMS `gov-url` field via `WebflowLookupService.update_bill_gov_url()` (PATCH API)
+4. If unchanged: updates `last_checked` timestamp only
+
+Configuration in `config/sync_schedule.yaml`:
+- `bill_version_check.max_updates_per_run`: Limits re-ingestions per run (default: 50). First run populates the Redis cache for all bills, cycling through remaining bills on subsequent runs.
+- `bill_version_check.skip_webflow_update`: Disables CMS writes for testing (default: false)
+
+> **Prerequisite**: The Webflow API token must have `CMS:write` scope to update `gov-url`. Verify in the Webflow dashboard before deploying.
+
 **Session detection** uses a two-tier approach:
 
-1. **Live data (preferred)**: Before each bill sync run, `BillSyncService.sync_current_session_bills()` fetches jurisdiction info from the OpenStates API (via `OpenStatesSource.fetch_jurisdiction()`) and warms `StateLegislativeCalendar` with real session start/end dates. This reuses the existing cached `get_jurisdiction_info()` method — each state is fetched at most once per sync run.
+1. **Live data (preferred)**: Before each bill version check run, jurisdiction info is fetched from the OpenStates API (via `OpenStatesSource.fetch_jurisdiction()`) and warms `StateLegislativeCalendar` with real session start/end dates. Each state is fetched at most once per sync run.
 
 2. **Hardcoded fallback**: If the OpenStates API is unavailable or a state has no live data, the calendar falls back to hardcoded heuristics (start patterns + duration in weeks for all 50 states + DC).
 
@@ -677,8 +694,8 @@ votebot/
 │   │   ├── vector_store.py  # Pinecone operations
 │   │   ├── web_search.py    # Tavily web search
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
-│   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification)
-│   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub + active jurisdictions)
+│   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification + gov-url write)
+│   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub + active jurisdictions + bill version cache)
 │   │   ├── query_logger.py  # Production query logger (JSONL, date-partitioned)
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service
@@ -705,6 +722,7 @@ votebot/
 │   └── updates/             # Real-time updates
 │       ├── scheduler.py     # Scheduled polling
 │       ├── bill_sync.py     # OpenStates bill sync (status, votes, actions)
+│       ├── bill_version_sync.py  # Daily bill version check (PDF/HTML re-ingestion + Webflow gov-url update)
 │       └── change_detection.py
 ├── scripts/
 │   ├── sync.py              # Unified sync CLI

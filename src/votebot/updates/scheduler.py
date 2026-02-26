@@ -87,12 +87,12 @@ class UpdateScheduler:
         sync_time_str = self._sync_config.get("sync_time_utc", "04:00")
         hour, minute = map(int, sync_time_str.split(":"))
 
-        # Add daily OpenStates sync job
+        # Add daily bill version check job
         self.scheduler.add_job(
             self._run_openstates_sync,
             trigger=CronTrigger(hour=hour, minute=minute),
-            id="daily_openstates_sync",
-            name="Daily OpenStates Bill Sync",
+            id="daily_bill_version_check",
+            name="Daily Bill Version Check",
             replace_existing=True,
         )
 
@@ -331,88 +331,89 @@ class UpdateScheduler:
         config = source_configs.get(source, {})
         return await self.pipeline.ingest_from_source(source, config)
 
+    async def _fetch_webflow_bills(self) -> list[dict]:
+        """Fetch all bill items from Webflow CMS via paginated API calls."""
+        import httpx
+
+        bills = []
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            headers = {
+                "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
+                "accept": "application/json",
+            }
+
+            offset = 0
+            while True:
+                response = await client.get(
+                    f"https://api.webflow.com/v2/collections/{self.settings.webflow_bills_collection_id}/items",
+                    headers=headers,
+                    params={"limit": 100, "offset": offset},
+                )
+
+                if response.status_code != 200:
+                    break
+
+                data = response.json()
+                items = data.get("items", [])
+
+                if not items:
+                    break
+
+                bills.extend(items)
+                offset += 100
+
+                if len(items) < 100:
+                    break
+
+        logger.info(f"Fetched {len(bills)} bills from Webflow CMS")
+        return bills
+
     async def _run_openstates_sync(self) -> dict[str, Any]:
         """
-        Run the daily OpenStates bill sync.
+        Run the daily bill version check.
 
-        Only syncs bills from current sessions in jurisdictions
-        that are currently in session or scheduled for sync.
+        For each current-session bill, checks OpenStates for newer amended
+        versions (e.g., Engrossed, Enrolled). If a newer version is found,
+        re-ingests the bill text (PDF or HTML) into Pinecone and updates
+        the gov-url in Webflow CMS.
 
         Returns:
             Dict with sync results
         """
-        from votebot.ingestion.sources.webflow import WebflowSource
-        from votebot.updates.bill_sync import BillSyncService
+        from votebot.updates.bill_version_sync import BillVersionSyncService
 
         start_time = datetime.utcnow()
-        logger.info("Starting daily OpenStates sync")
+        logger.info("Starting daily bill version check")
 
         try:
-            # Initialize services
-            sync_service = BillSyncService(self.settings)
-            webflow = WebflowSource(self.settings)
+            version_sync = BillVersionSyncService(self.settings)
+            bills = await self._fetch_webflow_bills()
 
-            # Fetch all bills from Webflow
-            bills = []
-            async for doc in webflow.fetch(include_pdfs=False):
-                # We need the raw bill data, not processed docs
-                pass
-
-            # Actually fetch raw items from Webflow
-            import httpx
-
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                headers = {
-                    "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
-                    "accept": "application/json",
-                }
-
-                offset = 0
-                while True:
-                    response = await client.get(
-                        f"https://api.webflow.com/v2/collections/{self.settings.webflow_bills_collection_id}/items",
-                        headers=headers,
-                        params={"limit": 100, "offset": offset},
-                    )
-
-                    if response.status_code != 200:
-                        break
-
-                    data = response.json()
-                    items = data.get("items", [])
-
-                    if not items:
-                        break
-
-                    bills.extend(items)
-                    offset += 100
-
-                    if len(items) < 100:
-                        break
-
-            logger.info(f"Fetched {len(bills)} bills from Webflow CMS")
-
-            # Sync current session bills only
-            result = await sync_service.sync_current_session_bills(bills)
+            result = await version_sync.sync_bill_versions(bills)
 
             duration = (datetime.utcnow() - start_time).total_seconds()
 
             logger.info(
-                "Daily OpenStates sync completed",
+                "Daily bill version check completed",
                 duration_seconds=duration,
                 total_bills=result.total_bills,
-                successful=result.successful,
+                checked=result.checked,
+                updated=result.updated,
+                unchanged=result.unchanged,
+                no_versions=result.no_versions,
+                skipped=result.skipped,
                 failed=result.failed,
                 chunks_created=result.chunks_created,
+                webflow_updates=result.webflow_updates,
             )
 
             # Call callbacks
             for callback in self._update_callbacks:
                 try:
                     if asyncio.iscoroutinefunction(callback):
-                        await callback({"openstates_sync": result})
+                        await callback({"bill_version_sync": result})
                     else:
-                        callback({"openstates_sync": result})
+                        callback({"bill_version_sync": result})
                 except Exception as e:
                     logger.error("Sync callback failed", error=str(e))
 
@@ -420,14 +421,19 @@ class UpdateScheduler:
                 "success": True,
                 "duration_seconds": duration,
                 "total_bills": result.total_bills,
-                "successful": result.successful,
+                "checked": result.checked,
+                "updated": result.updated,
+                "unchanged": result.unchanged,
+                "no_versions": result.no_versions,
+                "skipped": result.skipped,
                 "failed": result.failed,
                 "chunks_created": result.chunks_created,
+                "webflow_updates": result.webflow_updates,
                 "errors": result.errors[:10] if result.errors else [],
             }
 
         except Exception as e:
-            logger.exception("OpenStates sync failed", error=str(e))
+            logger.exception("Bill version check failed", error=str(e))
             return {
                 "success": False,
                 "error": str(e),
@@ -435,56 +441,23 @@ class UpdateScheduler:
 
     async def trigger_openstates_sync(self, force_all: bool = False) -> dict[str, Any]:
         """
-        Manually trigger an OpenStates sync.
+        Manually trigger a bill version check (or full backload).
 
         Args:
-            force_all: If True, sync all bills regardless of session
+            force_all: If True, backload all bills via BillSyncService (ignores session filtering).
+                       If False, run the normal version check (session-aware).
 
         Returns:
             Dict with sync results
         """
-        logger.info("Manual OpenStates sync triggered", force_all=force_all)
+        logger.info("Manual bill sync triggered", force_all=force_all)
 
         if force_all:
-            # Use backload logic for all bills
-            from votebot.ingestion.sources.webflow import WebflowSource
+            # Use backload logic for all bills (full re-sync of history/votes)
             from votebot.updates.bill_sync import BillSyncService
 
             sync_service = BillSyncService(self.settings)
-
-            # Fetch all bills
-            import httpx
-
-            bills = []
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                headers = {
-                    "Authorization": f"Bearer {self.settings.webflow_api_key.get_secret_value()}",
-                    "accept": "application/json",
-                }
-
-                offset = 0
-                while True:
-                    response = await client.get(
-                        f"https://api.webflow.com/v2/collections/{self.settings.webflow_bills_collection_id}/items",
-                        headers=headers,
-                        params={"limit": 100, "offset": offset},
-                    )
-
-                    if response.status_code != 200:
-                        break
-
-                    data = response.json()
-                    items = data.get("items", [])
-
-                    if not items:
-                        break
-
-                    bills.extend(items)
-                    offset += 100
-
-                    if len(items) < 100:
-                        break
-
+            bills = await self._fetch_webflow_bills()
             result = await sync_service.backload_all_bills(bills)
 
             return {

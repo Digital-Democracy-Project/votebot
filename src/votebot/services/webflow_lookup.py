@@ -836,6 +836,58 @@ class WebflowLookupService:
         )
 
 
+    async def update_bill_gov_url(self, webflow_id: str, new_url: str) -> bool:
+        """Update the gov-url field for a bill in Webflow CMS.
+
+        Uses PATCH /v2/collections/{collection_id}/items/{item_id}/live
+        to publish changes immediately. Requires CMS:write scope on the API token.
+
+        Args:
+            webflow_id: Webflow item ID for the bill
+            new_url: New government URL to set
+
+        Returns:
+            True on success, False on failure
+        """
+        if not webflow_id or not new_url:
+            logger.warning("Missing webflow_id or new_url for gov-url update")
+            return False
+
+        url = f"{self.BASE_URL}/collections/{self.bills_collection_id}/items/{webflow_id}/live"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "accept": "application/json",
+            "content-type": "application/json",
+        }
+        payload = {"fieldData": {"gov-url": new_url}}
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                response = await client.patch(url, headers=headers, json=payload)
+                if response.status_code == 200:
+                    logger.info(
+                        "Updated bill gov-url in Webflow CMS",
+                        webflow_id=webflow_id,
+                        new_url=new_url,
+                    )
+                    return True
+                else:
+                    logger.error(
+                        "Failed to update bill gov-url in Webflow CMS",
+                        webflow_id=webflow_id,
+                        status_code=response.status_code,
+                        response_text=response.text[:200],
+                    )
+                    return False
+            except Exception as e:
+                logger.error(
+                    "Error updating bill gov-url in Webflow CMS",
+                    webflow_id=webflow_id,
+                    error=str(e),
+                )
+                return False
+
+
 def format_org_positions_context(result: BillOrgPositionsResult) -> str:
     """
     Format org positions as markdown for LLM context injection.

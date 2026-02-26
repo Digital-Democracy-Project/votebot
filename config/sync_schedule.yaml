@@ -7,10 +7,10 @@
 # (Redis-based leader election).
 #
 # Schedule Summary:
-# - Bills:         Daily at 04:00 UTC (session-aware — daily in session, weekly off)
-# - Legislators:   Weekly on Sundays at 06:00 UTC
-# - Organizations: Monthly on the 1st at 08:00 UTC
-# - Content poll:  Hourly (Congress/OpenStates change detection)
+# - Bill versions:  Daily at 04:00 UTC (checks for newer amended versions, re-ingests if changed)
+# - Legislators:    Weekly on Sundays at 06:00 UTC
+# - Organizations:  Monthly on the 1st at 08:00 UTC
+# - Content poll:   Hourly (Congress/OpenStates change detection)
 #
 # Session Detection:
 # - Primary: Live session dates from OpenStates API (fetched via warm_cache()
@@ -19,7 +19,7 @@
 #   + duration in weeks for all 50 states)
 
 # Global settings
-sync_time_utc: "04:00"  # When to run daily bill sync (4 AM UTC = 11 PM EST)
+sync_time_utc: "04:00"  # When to run daily bill version check (4 AM UTC = 11 PM EST)
 
 # Federal Congress settings (not covered by StateLegislativeCalendar)
 US:
@@ -107,6 +107,14 @@ organization_sync:
   enabled: true
   sync_time_utc: "08:00"  # 8 AM UTC = 3 AM EST (4 hours after bill sync)
   day_of_month: 1          # 1st of each month
+
+# Bill Version Check Configuration
+# Checks OpenStates for newer amended versions (Engrossed, Enrolled, etc.)
+# and re-ingests bill text (PDF or HTML) into Pinecone when a new version
+# is found. Also updates the gov-url field in Webflow CMS.
+bill_version_check:
+  max_updates_per_run: 50     # Limit re-ingestions per run (first run populates cache)
+  skip_webflow_update: false  # Set true to disable CMS writes (testing)
 
 # Notification Settings (future use)
 notifications:
