@@ -441,6 +441,14 @@ class BillVersionSyncService:
 
         sync_service = BillSyncService(self.settings)
         max_updates = self._config.get("max_updates_per_run", 50)
+        skip_webflow = self._config.get("skip_webflow_update", False)
+
+        logger.info(
+            "Starting bill version sync batch",
+            total_bills=len(bills),
+            max_updates_per_run=max_updates,
+            skip_webflow_update=skip_webflow,
+        )
 
         result = VersionSyncBatchResult(total_bills=len(bills))
 
@@ -491,21 +499,25 @@ class BillVersionSyncService:
             # Skip bills without OpenStates URL
             if not openstates_url:
                 result.skipped += 1
+                logger.debug("Skipping bill (no OpenStates URL)", bill=title, webflow_id=webflow_id)
                 continue
 
             # Check if current session
             if not sync_service.is_current_session(session_year, session_code, jurisdiction_code):
                 result.skipped += 1
+                logger.debug("Skipping bill (not current session)", bill=title, jurisdiction=jurisdiction_code)
                 continue
 
             # Check if we should sync this jurisdiction today
             if not sync_service.should_sync_jurisdiction(jurisdiction_code):
                 result.skipped += 1
+                logger.debug("Skipping bill (jurisdiction not scheduled today)", bill=title, jurisdiction=jurisdiction_code)
                 continue
 
             # Respect max_updates_per_run
             if max_updates > 0 and updates_this_run >= max_updates:
                 result.skipped += 1
+                logger.debug("Skipping bill (max updates reached)", bill=title, max_updates=max_updates)
                 continue
 
             # Apply rate limiting
@@ -539,12 +551,20 @@ class BillVersionSyncService:
                     )
                 elif check_result.status == "unchanged":
                     result.unchanged += 1
+                    logger.debug("Bill version unchanged", bill=title, version=check_result.version_note)
                 elif check_result.status == "no_versions":
                     result.no_versions += 1
+                    logger.debug("Bill has no versions in OpenStates", bill=title)
                 elif check_result.status == "error":
                     result.failed += 1
                     if check_result.error:
                         result.errors.append(f"{title}: {check_result.error}")
+                    logger.warning(
+                        "Bill version check failed",
+                        bill=title,
+                        webflow_id=webflow_id,
+                        error=check_result.error,
+                    )
 
             except Exception as e:
                 result.failed += 1

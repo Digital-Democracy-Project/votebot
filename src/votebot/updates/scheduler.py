@@ -393,9 +393,10 @@ class UpdateScheduler:
 
             duration = (datetime.utcnow() - start_time).total_seconds()
 
-            logger.info(
+            log_fn = logger.warning if result.failed > 0 else logger.info
+            log_fn(
                 "Daily bill version check completed",
-                duration_seconds=duration,
+                duration_seconds=round(duration, 1),
                 total_bills=result.total_bills,
                 checked=result.checked,
                 updated=result.updated,
@@ -405,6 +406,7 @@ class UpdateScheduler:
                 failed=result.failed,
                 chunks_created=result.chunks_created,
                 webflow_updates=result.webflow_updates,
+                errors=result.errors[:5] if result.errors else [],
             )
 
             # Call callbacks
