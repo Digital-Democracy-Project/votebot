@@ -140,11 +140,21 @@ class PDFSource:
 
             with pdfplumber.open(file_path) as pdf:
                 metadata = pdf.metadata
+                total_pages = len(pdf.pages)
+
+                if total_pages > 200:
+                    logger.info(
+                        "Processing large PDF",
+                        file=file_path,
+                        pages=total_pages,
+                    )
 
                 for page in pdf.pages:
                     page_text = page.extract_text()
                     if page_text:
                         text_parts.append(page_text)
+                    # Release pdfplumber's cached layout objects for this page
+                    page.flush_cache()
 
             if text_parts:
                 return "\n\n".join(text_parts), metadata
@@ -173,12 +183,12 @@ class PDFSource:
             logger.error(f"PyPDF2 extraction failed: {e}")
             return "", None
 
-    # Skip PDFs larger than this to avoid OOM during batch sync
-    MAX_PDF_BYTES = 15 * 1024 * 1024  # 15 MB
-
     async def process_url(self, url: str, save_path: str | None = None) -> DocumentSource | None:
         """
         Download and process a PDF from a URL.
+
+        Streams the download to a temp file on disk so arbitrarily large
+        PDFs never buffer in memory.
 
         Args:
             url: URL of the PDF
@@ -191,22 +201,11 @@ class PDFSource:
 
         import httpx
 
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
             # Stream the download to disk to avoid holding the full PDF in memory
             try:
                 async with client.stream("GET", url) as response:
                     response.raise_for_status()
-
-                    # Check Content-Length before downloading
-                    content_length = response.headers.get("content-length")
-                    if content_length and int(content_length) > self.MAX_PDF_BYTES:
-                        logger.warning(
-                            "Skipping oversized PDF",
-                            url=url,
-                            size_mb=round(int(content_length) / 1024 / 1024, 1),
-                            limit_mb=self.MAX_PDF_BYTES // 1024 // 1024,
-                        )
-                        return None
 
                     # Save to file
                     if save_path:
@@ -219,15 +218,14 @@ class PDFSource:
                     with open(file_path, "wb") as f:
                         async for chunk in response.aiter_bytes(chunk_size=65536):
                             bytes_written += len(chunk)
-                            if bytes_written > self.MAX_PDF_BYTES:
-                                logger.warning(
-                                    "PDF exceeded size limit during download, truncating",
-                                    url=url,
-                                    bytes_written=bytes_written,
-                                    limit_mb=self.MAX_PDF_BYTES // 1024 // 1024,
-                                )
-                                break
                             f.write(chunk)
+
+                    if bytes_written > 0:
+                        logger.info(
+                            "PDF downloaded to disk",
+                            url=url,
+                            size_mb=round(bytes_written / 1024 / 1024, 1),
+                        )
             except Exception as e:
                 logger.error(
                     "Failed to download PDF",
