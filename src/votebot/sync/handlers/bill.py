@@ -1,5 +1,6 @@
 """Bill content handler for unified sync service."""
 
+import gc
 import time
 
 import httpx
@@ -315,33 +316,53 @@ class BillHandler:
             if options.limit > 0:
                 raw_items = raw_items[:options.limit]
 
-            # Process bills through webflow source
-            bills = []
-            for item in raw_items:
-                async for doc in self.webflow._process_bill_item(
-                    item, include_pdfs=options.include_pdfs
-                ):
-                    bills.append(doc)
-
-            logger.info(f"Processed {len(bills)} bill documents")
+            # Process and ingest bills incrementally to limit memory usage.
+            # Each bill's docs are ingested immediately, then references are
+            # dropped so GC can reclaim PDF text and embedding vectors.
+            total_docs_collected = 0
 
             if options.dry_run:
+                for item in raw_items:
+                    async for _doc in self.webflow._process_bill_item(
+                        item, include_pdfs=options.include_pdfs
+                    ):
+                        total_docs_collected += 1
                 return SyncResult(
                     success=True,
                     content_type=ContentType.BILL,
                     mode=SyncMode.BATCH,
-                    items_processed=len(bills),
-                    items_successful=len(bills),
+                    items_processed=total_docs_collected,
+                    items_successful=total_docs_collected,
                     duration_seconds=time.perf_counter() - start_time,
                 )
 
-            # Ingest to vector store
-            result = await self.pipeline.ingest_batch(bills)
+            for item_idx, item in enumerate(raw_items):
+                bill_docs = []
+                async for doc in self.webflow._process_bill_item(
+                    item, include_pdfs=options.include_pdfs
+                ):
+                    bill_docs.append(doc)
 
-            total_processed = len(bills)
-            total_successful = result.documents_processed
-            total_chunks = result.chunks_created
-            errors.extend(result.errors)
+                if bill_docs:
+                    result = await self.pipeline.ingest_batch(bill_docs)
+                    total_processed += len(bill_docs)
+                    total_successful += result.documents_processed
+                    total_chunks += result.chunks_created
+                    errors.extend(result.errors)
+                    total_docs_collected += len(bill_docs)
+
+                # Reclaim PDF text, pdfplumber objects, embedding vectors
+                del bill_docs
+                if (item_idx + 1) % 10 == 0:
+                    gc.collect()
+                    logger.debug(
+                        "Batch sync progress",
+                        bills_processed=item_idx + 1,
+                        total_bills=len(raw_items),
+                        docs_collected=total_docs_collected,
+                    )
+
+            logger.info(f"Processed {total_docs_collected} bill documents")
 
             # Also sync OpenStates history for bills if enabled
             # Use the already-filtered raw_items from above
