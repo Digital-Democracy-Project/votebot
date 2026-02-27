@@ -3059,13 +3059,31 @@ INFO:     Child process [PID] died
 
 ### Root Cause
 
-The uvicorn parent process killed the worker that was running the batch sync. Full (unlimited) batch syncs download PDFs for every bill, run OpenStates history sync, then run the bill version sync — this can take 20+ minutes and consume significant memory. Uvicorn's process manager may kill the worker if it becomes unresponsive to internal health checks or exceeds memory limits.
+The uvicorn parent process killed the worker that was running the batch sync due to memory exhaustion. Two compounding issues:
+
+1. **All-at-once accumulation**: `BillHandler.sync_batch()` accumulated ALL bill documents (CMS + PDF text) in a `bills` list before ingesting any of them. For 100+ bills with PDF text, this held hundreds of MB of extracted text in memory simultaneously.
+
+2. **No PDF memory management**: PDF downloads buffered the entire response body in memory (`response.content`), pdfplumber layout caches were never flushed between pages, and Pinecone vectors were built as one giant list before batching.
 
 The task state gets stuck as `"running"` in Redis because the completion callback (which writes final results to Redis) never fires.
 
 ### Evidence
 
-Observed on 2026-02-26: Worker 57373 was processing a full batch sync (all jurisdictions, no limit). Last bill processed was FL SB 995 at 05:22:06. At 05:22:22 the parent process killed it. No OOM messages in `dmesg`. A subsequent limited batch (`jurisdiction: MA`, no limit) completed successfully in ~10 minutes on the replacement worker.
+- **2026-02-26**: Worker 57373 processing full batch sync (all jurisdictions, no limit). Last bill: FL SB 995 at 05:22:06. Worker killed at 05:22:22.
+- **2026-02-27**: Worker 61235 processing batch sync. Last bill: Consolidated Appropriations Act 2026 (HR 7148) — a massive federal omnibus bill. Worker killed at 05:55:22 after 2 minutes of parsing.
+
+### How It's Fixed
+
+Four layers of memory protection were added (Feb 2026):
+
+| Layer | File | Change |
+|-------|------|--------|
+| **Per-bill ingestion** | `sync/handlers/bill.py` | Process and ingest each bill immediately instead of accumulating all docs in a list. `gc.collect()` every 10 bills |
+| **Streaming PDF download** | `ingestion/sources/pdf.py` | Stream HTTP response to temp file via `aiter_bytes()` — no size limit, no in-memory buffering |
+| **Page cache flush** | `ingestion/sources/pdf.py` | `page.flush_cache()` after each pdfplumber page releases layout objects |
+| **Incremental vectors** | `services/vector_store.py` | Build and upsert Pinecone vectors one batch at a time instead of assembling the full list |
+
+The daily scheduler path (`BillVersionSyncService`) also has `gc.collect()` between bills.
 
 ### Investigation Steps
 
@@ -3081,26 +3099,25 @@ sudo dmesg | grep -iE "oom|kill|<PID>"
 
 # Check the orphaned task in Redis
 redis-cli GET "votebot:sync:task:<task_id>"
+
+# Monitor memory during a batch sync
+watch -n 5 'ps -p $(pgrep -f "uvicorn.*votebot" | head -1) -o rss= | awk "{print \$1/1024 \" MB\"}"'
 ```
 
-### Workarounds
+### Remaining Workarounds (if OOM still occurs)
 
 1. **Use jurisdiction-scoped batches** instead of full unlimited syncs:
    ```json
    {"content_type": "bill", "mode": "batch", "jurisdiction": "MA"}
    ```
-   Each jurisdiction completes in a few minutes and is unlikely to trigger worker death.
 
 2. **Use the `limit` parameter** to cap the number of bills per batch:
    ```json
    {"content_type": "bill", "mode": "batch", "limit": 50}
    ```
 
-3. **The daily scheduler is unaffected** — it runs `BillVersionSyncService` directly (not through the batch sync pipeline) and processes bills one at a time with rate limiting.
+### Potential Further Improvements
 
-### Potential Fixes (Not Yet Implemented)
-
-- **Increase uvicorn worker timeout**: Add `--timeout-keep-alive 300` or switch to gunicorn with `--timeout 600` for long-running sync operations
 - **Run sync in a separate process**: Decouple sync from the API workers entirely (e.g., Celery task queue, or a dedicated sync worker process)
 - **Add progress updates to Redis**: Write intermediate progress during the sync so the status endpoint shows real-time counts even from the other worker
 - **Clean up orphaned tasks**: Add a periodic check that marks tasks as `"failed"` if the owning worker PID is dead

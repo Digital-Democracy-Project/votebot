@@ -127,6 +127,13 @@ The entry point for actual sync operations. The `UnifiedSyncService` dispatches 
 
 Each handler uses `IngestionPipeline` for the chunk -> embed -> upsert flow.
 
+**Batch sync memory management** (`BillHandler.sync_batch()` in `src/votebot/sync/handlers/bill.py`):
+- Bills are processed and ingested **one at a time** — each bill's documents are ingested immediately, then references are dropped. This prevents accumulating all bill texts in memory.
+- `gc.collect()` runs every 10 bills to reclaim pdfplumber objects and embedding vectors.
+- PDF downloads are **streamed to a temp file** on disk (`aiter_bytes(chunk_size=65536)`) — no size limit, never buffered in memory. Large PDFs (e.g., federal omnibus bills) are fully supported.
+- `pdfplumber` page layout caches are flushed after each page via `page.flush_cache()` during text extraction.
+- Pinecone vectors are built and upserted **one batch at a time** (100 vectors) instead of assembling the full list in memory.
+
 **Sync scheduling** (`src/votebot/updates/scheduler.py` + `src/votebot/updates/bill_version_sync.py`):
 - `UpdateScheduler` (APScheduler) runs three scheduled jobs: daily bill version check, weekly legislator sync, monthly org sync. Started in `main.py` lifespan when `SCHEDULER_ENABLED=true`.
 - **Daily bill version check** (`BillVersionSyncService`): For each current-session bill, checks OpenStates `versions` array for newer amended versions. If a newer version is detected: re-ingests bill text (PDF or HTML) into Pinecone as `bill-text` (idempotent upsert), updates Webflow CMS `gov-url` via PATCH API. Version state cached in Redis (`votebot:bill_version:{webflow_id}`, 90-day TTL). Configurable: `max_updates_per_run` (default 50), `skip_webflow_update` (default false).
