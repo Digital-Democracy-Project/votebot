@@ -9,6 +9,7 @@ Replaces the daily bill-history/bill-votes sync with a targeted check:
 """
 
 import asyncio
+import gc
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -679,6 +680,9 @@ class BillVersionSyncService:
                     webflow_id=webflow_id,
                     error=str(e),
                 )
+
+            # Reclaim memory between bills (PDF objects, embedding vectors, etc.)
+            gc.collect()
 
         logger.info(
             "Bill version sync batch complete",

@@ -105,10 +105,12 @@ class VectorStoreService:
             for doc, embedding in zip(docs_needing_embeddings, embeddings):
                 doc.embedding = embedding
 
-        # Prepare vectors for upsert
-        vectors = []
+        # Build vectors and upsert incrementally to cap memory at one batch
+        total_upserted = 0
+        batch = []
+        batch_index = 0
         for doc in documents:
-            vectors.append(
+            batch.append(
                 {
                     "id": doc.id,
                     "values": doc.embedding,
@@ -118,15 +120,23 @@ class VectorStoreService:
                     },
                 }
             )
+            if len(batch) >= batch_size:
+                logger.debug(
+                    "Upserting batch to Pinecone",
+                    batch_size=len(batch),
+                    batch_index=batch_index,
+                )
+                self.index.upsert(vectors=batch, namespace=self.namespace)
+                total_upserted += len(batch)
+                batch = []
+                batch_index += 1
 
-        # Upsert in batches
-        total_upserted = 0
-        for i in range(0, len(vectors), batch_size):
-            batch = vectors[i : i + batch_size]
+        # Flush remaining vectors
+        if batch:
             logger.debug(
                 "Upserting batch to Pinecone",
                 batch_size=len(batch),
-                batch_index=i // batch_size,
+                batch_index=batch_index,
             )
             self.index.upsert(vectors=batch, namespace=self.namespace)
             total_upserted += len(batch)
