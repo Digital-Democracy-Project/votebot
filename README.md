@@ -32,7 +32,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Vector Database**: Pinecone
 - **LLM**: OpenAI GPT-4.1 (via Responses API with web search)
 - **Embeddings**: OpenAI text-embedding-3-large
-- **Caching / Cross-Worker State**: Redis (thread-to-session mapping, pub/sub for multi-worker handoff, active jurisdictions tracking, bill version cache)
+- **Caching / Cross-Worker State**: Redis (thread-to-session mapping, pub/sub for multi-worker handoff, active jurisdictions tracking, bill version cache, sync task state + checkpoints)
 - **Database**: PostgreSQL (optional)
 
 ## Quick Start
@@ -226,6 +226,17 @@ Sync content to the vector store. Supports bills, legislators, organizations, we
 
 > **Note**: Batch bill sync with `include_openstates` (default: true) automatically chains `BillVersionSyncService` after the OpenStates history sync. This checks for newer bill text versions (PDF/HTML), re-ingests updated text into Pinecone, and updates Webflow CMS fields (`gov-url`, `status`, `status-date`). The same version sync also runs independently on the daily scheduler (04:00 UTC).
 
+**Request Body (resume after crash):**
+```json
+{
+  "content_type": "bill",
+  "mode": "batch",
+  "resume_task_id": "abc-123-def"
+}
+```
+
+When `resume_task_id` is provided, the new task copies the checkpoint set from the previous task and skips already-processed items. This allows a crashed batch sync to pick up where it left off instead of re-processing from scratch.
+
 **Response:**
 ```json
 {
@@ -249,6 +260,8 @@ Via the DDP-API proxy:
 ```
 GET https://api.digitaldemocracyproject.org/votebot/sync/unified/status/{task_id}
 ```
+
+**Live progress**: The status endpoint returns real-time counts (`items_processed`, `items_successful`, `items_failed`, `chunks_created`) while the sync is running. The in-memory dict updates after every item; Redis is updated every 10 items for cross-worker visibility.
 
 **Sync all content types:**
 ```
@@ -601,6 +614,37 @@ python scripts/sync.py clear --confirm
 | `--clear-namespace` | Delete all data before syncing |
 | `--log-level` | DEBUG, INFO, WARNING, ERROR |
 
+### Sync Progress & Resume
+
+**Live progress reporting**: During batch sync, the status endpoint (`GET /sync/unified/status/{task_id}`) returns real-time counts while the sync is running. Progress updates are written to the in-memory task dict after every item and flushed to Redis every 10 items.
+
+**Checkpoint/resume after crash**: Each processed bill's Webflow ID is recorded in a Redis SET (`votebot:sync:checkpoint:{task_id}`, 24h TTL). If a worker dies mid-sync, a new request with `resume_task_id` copies the checkpoint set and skips already-processed items:
+
+```bash
+# Original sync (crashes at bill 47 of 150)
+curl -X POST -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"content_type": "bill", "mode": "batch"}' \
+  https://api.digitaldemocracyproject.org/votebot/sync/unified
+# Returns task_id: "abc-123"
+
+# Resume — skips the 47 already-checkpointed bills
+curl -X POST -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"content_type": "bill", "mode": "batch", "resume_task_id": "abc-123"}' \
+  https://api.digitaldemocracyproject.org/votebot/sync/unified
+# Returns new task_id: "def-456", starts from bill 48
+```
+
+**Verification:**
+```bash
+# Check live progress
+redis-cli GET "votebot:sync:task:<task_id>" | python -m json.tool
+
+# Check checkpoint count
+redis-cli SCARD "votebot:sync:checkpoint:<task_id>"
+```
+
 ### Legacy Scripts
 
 ```bash
@@ -705,7 +749,7 @@ votebot/
 │   │   ├── web_search.py    # Tavily web search
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
 │   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification + gov-url write)
-│   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub + active jurisdictions + bill version cache)
+│   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub + active jurisdictions + bill version cache + sync checkpoints)
 │   │   ├── query_logger.py  # Production query logger (JSONL, date-partitioned)
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service
@@ -941,6 +985,7 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 - Full index rebuild procedures
 - Chat widget truncated on mobile (send button cut off due to layout viewport expansion on content-rich host pages — fixed with `screen.width` mobile detection)
 - Production query monitoring (JSONL logging, offline evaluation)
+- Batch sync progress reporting and checkpoint/resume after worker crash
 
 ## Contributing
 

@@ -29,6 +29,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Chat Widget Truncated on Mobile (Send Button Cut Off)](#chat-widget-truncated-on-mobile-send-button-cut-off)
 - [Production Query Monitoring](#production-query-monitoring)
 - [Batch Sync Worker Killed Mid-Flight](#batch-sync-worker-killed-mid-flight)
+  - [Sync Progress Reporting & Checkpoint/Resume](#sync-progress-reporting--checkpointresume-feb-2026-fix)
 - [Scheduler Stops After Leader Worker Death](#scheduler-stops-after-leader-worker-death)
 
 ---
@@ -3116,10 +3117,30 @@ watch -n 5 'ps -p $(pgrep -f "uvicorn.*votebot" | head -1) -o rss= | awk "{print
    {"content_type": "bill", "mode": "batch", "limit": 50}
    ```
 
+### Sync Progress Reporting & Checkpoint/Resume (Feb 2026 Fix)
+
+Two additional improvements address the "stuck at zero" and "full re-run after crash" problems:
+
+**Live progress reporting**: The background sync runner now initializes a live result dict immediately and creates a `progress_callback` closure. Bill handlers call this after every item; the in-memory dict updates instantly (same-worker status reads see real-time counts), and Redis is flushed every 10 items (cross-worker visibility). The status endpoint returns `items_processed`, `items_successful`, `items_failed`, `chunks_created`, and `duration_ms` while status is `"running"`.
+
+**Checkpoint/resume**: Each processed bill's Webflow ID is recorded in a Redis SET (`votebot:sync:checkpoint:{task_id}`, 24h TTL). When a worker dies mid-sync, a new request with `resume_task_id` copies the checkpoint set from the old task, and the bill handler skips items already in it:
+
+```bash
+# Resume a crashed sync
+curl -X POST -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"content_type": "bill", "mode": "batch", "resume_task_id": "abc-123"}' \
+  https://api.digitaldemocracyproject.org/votebot/sync/unified
+
+# Verify checkpoints
+redis-cli SCARD "votebot:sync:checkpoint:<task_id>"
+```
+
+**Files changed**: `sync/types.py` (3 new fields on `SyncOptions`), `services/redis_store.py` (3 checkpoint methods), `api/routes/sync_unified.py` (progress callback wiring + resume), `sync/handlers/bill.py` (per-bill checkpoint + skip), `sync/handlers/legislator.py` + `organization.py` (final progress callback).
+
 ### Potential Further Improvements
 
 - **Run sync in a separate process**: Decouple sync from the API workers entirely (e.g., Celery task queue, or a dedicated sync worker process)
-- **Add progress updates to Redis**: Write intermediate progress during the sync so the status endpoint shows real-time counts even from the other worker
 - **Clean up orphaned tasks**: Add a periodic check that marks tasks as `"failed"` if the owning worker PID is dead
 
 ---

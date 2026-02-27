@@ -87,6 +87,10 @@ class UnifiedSyncRequest(BaseModel):
         default=False,
         description="Preview without ingesting",
     )
+    resume_task_id: str | None = Field(
+        default=None,
+        description="Task ID of a previous run to resume from (skips already-processed items)",
+    )
 
     @model_validator(mode="after")
     def validate_identifier_for_single_mode(self) -> "UnifiedSyncRequest":
@@ -132,10 +136,52 @@ async def _run_batch_sync_background(
     settings: Settings,
 ) -> None:
     """Run batch sync in the background and update task status."""
-    _background_tasks[task_id]["status"] = "running"
     redis_store = get_redis_store()
-    await redis_store.set_sync_task(task_id, _background_tasks[task_id])
     start_time = time.perf_counter()
+
+    # Initialize live result dict so the status endpoint returns real-time counts
+    live_result: dict = {
+        "success": False,
+        "items_processed": 0,
+        "items_successful": 0,
+        "items_failed": 0,
+        "chunks_created": 0,
+        "duration_ms": 0,
+        "errors": [],
+        "document_ids": [],
+    }
+    _background_tasks[task_id]["status"] = "running"
+    _background_tasks[task_id]["result"] = live_result
+    await redis_store.set_sync_task(task_id, _background_tasks[task_id])
+
+    # Counter for throttling Redis writes
+    _redis_write_counter = 0
+
+    async def _progress(
+        items_processed: int,
+        items_successful: int,
+        items_failed: int,
+        chunks_created: int,
+        errors: list[str] | None = None,
+    ) -> None:
+        """Update live progress — called by handlers after each item."""
+        nonlocal _redis_write_counter
+        live_result["items_processed"] = items_processed
+        live_result["items_successful"] = items_successful
+        live_result["items_failed"] = items_failed
+        live_result["chunks_created"] = chunks_created
+        live_result["duration_ms"] = int((time.perf_counter() - start_time) * 1000)
+        if errors:
+            live_result["errors"] = errors
+
+        # Throttle Redis writes to every 10 progress calls
+        _redis_write_counter += 1
+        if _redis_write_counter % 10 == 0:
+            await redis_store.set_sync_task(task_id, _background_tasks[task_id])
+
+    # Wire progress callback and task_id into options
+    options.progress_callback = _progress
+    options.task_id = task_id
 
     try:
         service = UnifiedSyncService(settings)
@@ -179,7 +225,13 @@ async def _run_batch_sync_background(
             "status": "failed",
             "result": {
                 "success": False,
-                "errors": [str(e)],
+                "items_processed": live_result["items_processed"],
+                "items_successful": live_result["items_successful"],
+                "items_failed": live_result["items_failed"],
+                "chunks_created": live_result["chunks_created"],
+                "duration_ms": int((time.perf_counter() - start_time) * 1000),
+                "errors": live_result["errors"] + [str(e)],
+                "document_ids": [],
             },
         })
         await redis_store.set_sync_task(task_id, _background_tasks[task_id])
@@ -281,6 +333,20 @@ async def sync_unified(
                     "dry_run": options.dry_run,
                 },
             }
+
+            # Resume support: copy checkpoints from a previous task
+            if request.resume_task_id:
+                options.resume_task_id = request.resume_task_id
+                redis_store = get_redis_store()
+                copied = await redis_store.copy_sync_checkpoints(
+                    request.resume_task_id, task_id
+                )
+                logger.info(
+                    "Resuming from previous task",
+                    resume_task_id=request.resume_task_id,
+                    new_task_id=task_id,
+                    checkpoints_copied=copied,
+                )
 
             # Write-through to Redis for cross-worker visibility
             redis_store = get_redis_store()

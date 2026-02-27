@@ -1,7 +1,9 @@
 """Type definitions for the unified sync service."""
 
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 
 class ContentType(str, Enum):
@@ -104,6 +106,11 @@ class SyncOptions:
 
     # Preview mode
     dry_run: bool = False
+
+    # Progress reporting (set by background runner, not API callers)
+    progress_callback: Callable[..., Coroutine[Any, Any, None]] | None = None
+    task_id: str | None = None
+    resume_task_id: str | None = None
 
 
 @dataclass

@@ -234,6 +234,16 @@ class OrganizationHandler:
             duration = time.perf_counter() - start_time
             success = total_successful > 0
 
+            # Report final progress
+            if options.progress_callback:
+                await options.progress_callback(
+                    items_processed=total_processed,
+                    items_successful=total_successful,
+                    items_failed=total_processed - total_successful,
+                    chunks_created=total_chunks,
+                    errors=errors,
+                )
+
             logger.info(
                 "Organization batch sync complete",
                 processed=total_processed,

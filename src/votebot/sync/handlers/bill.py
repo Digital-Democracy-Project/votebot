@@ -9,6 +9,7 @@ import structlog
 from votebot.config import Settings, get_settings
 from votebot.ingestion.pipeline import IngestionPipeline
 from votebot.ingestion.sources.webflow import WebflowSource
+from votebot.services.redis_store import get_redis_store
 from votebot.sync.types import ContentType, SyncIdentifier, SyncMode, SyncOptions, SyncResult
 from votebot.updates.bill_sync import BillSyncService
 
@@ -316,10 +317,25 @@ class BillHandler:
             if options.limit > 0:
                 raw_items = raw_items[:options.limit]
 
+            # Load checkpoints for resume support
+            completed_ids: set[str] = set()
+            if options.resume_task_id:
+                redis_store = get_redis_store()
+                completed_ids = await redis_store.get_sync_checkpoints(
+                    options.task_id or options.resume_task_id
+                )
+                logger.info(
+                    "Resume: loaded checkpoints",
+                    checkpoint_count=len(completed_ids),
+                    task_id=options.task_id,
+                    resume_task_id=options.resume_task_id,
+                )
+
             # Process and ingest bills incrementally to limit memory usage.
             # Each bill's docs are ingested immediately, then references are
             # dropped so GC can reclaim PDF text and embedding vectors.
             total_docs_collected = 0
+            items_skipped = 0
 
             if options.dry_run:
                 for item in raw_items:
@@ -336,7 +352,27 @@ class BillHandler:
                     duration_seconds=time.perf_counter() - start_time,
                 )
 
+            redis_store = get_redis_store()
+
             for item_idx, item in enumerate(raw_items):
+                webflow_id = item.get("id", "")
+
+                # Skip items already processed in previous run
+                if webflow_id and webflow_id in completed_ids:
+                    items_skipped += 1
+                    total_processed += 1
+                    total_successful += 1
+                    # Report progress for skipped items too
+                    if options.progress_callback:
+                        await options.progress_callback(
+                            items_processed=total_processed,
+                            items_successful=total_successful,
+                            items_failed=total_processed - total_successful,
+                            chunks_created=total_chunks,
+                            errors=errors,
+                        )
+                    continue
+
                 bill_docs = []
                 async for doc in self.webflow._process_bill_item(
                     item, include_pdfs=options.include_pdfs
@@ -351,6 +387,20 @@ class BillHandler:
                     errors.extend(result.errors)
                     total_docs_collected += len(bill_docs)
 
+                # Write checkpoint for this bill
+                if options.task_id and webflow_id:
+                    await redis_store.add_sync_checkpoint(options.task_id, webflow_id)
+
+                # Report progress after each bill
+                if options.progress_callback:
+                    await options.progress_callback(
+                        items_processed=total_processed,
+                        items_successful=total_successful,
+                        items_failed=total_processed - total_successful,
+                        chunks_created=total_chunks,
+                        errors=errors,
+                    )
+
                 # Reclaim PDF text, pdfplumber objects, embedding vectors
                 del bill_docs
                 if (item_idx + 1) % 10 == 0:
@@ -360,8 +410,13 @@ class BillHandler:
                         bills_processed=item_idx + 1,
                         total_bills=len(raw_items),
                         docs_collected=total_docs_collected,
+                        items_skipped=items_skipped,
                     )
 
+            if items_skipped:
+                logger.info(
+                    f"Resume: skipped {items_skipped} already-processed bills"
+                )
             logger.info(f"Processed {total_docs_collected} bill documents")
 
             # Also sync OpenStates history for bills if enabled

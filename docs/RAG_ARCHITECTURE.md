@@ -134,6 +134,17 @@ Each handler uses `IngestionPipeline` for the chunk -> embed -> upsert flow.
 - `pdfplumber` page layout caches are flushed after each page via `page.flush_cache()` during text extraction.
 - Pinecone vectors are built and upserted **one batch at a time** (100 vectors) instead of assembling the full list in memory.
 
+**Live progress reporting** (`SyncOptions.progress_callback`):
+- The background sync runner creates an async `_progress()` closure that updates a live result dict after every item processed.
+- The status endpoint (`GET /sync/unified/status/{task_id}`) reads from this dict, providing real-time `items_processed`, `items_successful`, `items_failed`, and `chunks_created` while the sync is running.
+- Redis is updated every 10 progress calls (throttled) for cross-worker visibility.
+- Bill handler calls `progress_callback` after each bill; legislator and org handlers call it once with final counts.
+
+**Checkpoint/resume** (`SyncOptions.task_id` + `resume_task_id`):
+- Each processed bill's Webflow ID is recorded in a Redis SET (`votebot:sync:checkpoint:{task_id}`, 24h TTL) via `RedisStore.add_sync_checkpoint()`.
+- When a new sync request includes `resume_task_id`, checkpoints are copied from the old task to the new one (`RedisStore.copy_sync_checkpoints()`). The bill handler loads the checkpoint set and skips items already in it, counting them as processed+successful.
+- This allows a crashed batch sync to resume from where it left off instead of re-processing from scratch.
+
 **Sync scheduling** (`src/votebot/updates/scheduler.py` + `src/votebot/updates/bill_version_sync.py`):
 - `UpdateScheduler` (APScheduler) runs three scheduled jobs: daily bill version check, weekly legislator sync, monthly org sync. Started in `main.py` lifespan when `SCHEDULER_ENABLED=true`.
 - **Daily bill version check** (`BillVersionSyncService`): For each current-session bill, checks OpenStates `versions` array for newer amended versions. If a newer version is detected: re-ingests bill text (PDF or HTML) into Pinecone as `bill-text` (idempotent upsert), updates Webflow CMS `gov-url` via PATCH API. Version state cached in Redis (`votebot:bill_version:{webflow_id}`, 90-day TTL). Configurable: `max_updates_per_run` (default 50), `skip_webflow_update` (default false).
@@ -144,7 +155,7 @@ Each handler uses `IngestionPipeline` for the chunk -> embed -> upsert flow.
 - Configuration: `config/sync_schedule.yaml`
 
 **Sync is triggered via:**
-- `POST /votebot/v1/sync/unified` (API endpoint, returns `task_id` for polling)
+- `POST /votebot/v1/sync/unified` (API endpoint, returns `task_id` for polling; supports `resume_task_id` to continue after crash)
 - CLI scripts in `scripts/` (e.g., `sync_bills.py`, `sync_legislators.py`)
 
 ---
@@ -315,5 +326,5 @@ Results are filtered by `similarity_threshold` (0.1) and deduplicated by content
 | `structlog` | Structured logging throughout |
 | `pydantic-settings` | Configuration from environment variables |
 | `fastapi` | HTTP + WebSocket API framework |
-| `redis` | Cross-worker session state + pub/sub |
+| `redis` | Cross-worker session state, pub/sub, sync task state + checkpoints |
 | `bs4` (BeautifulSoup) | HTML-to-text in chunking + ground truth tests |

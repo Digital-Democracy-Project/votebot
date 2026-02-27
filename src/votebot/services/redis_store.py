@@ -22,6 +22,8 @@ AGENT_EVENTS_CHANNEL = "votebot:agent_events"
 ACTIVE_JURISDICTIONS_KEY = "votebot:active_jurisdictions"
 SCHEDULER_LOCK_KEY = "votebot:scheduler:leader"
 SCHEDULER_LOCK_TTL = 300  # 5 minutes
+SYNC_CHECKPOINT_PREFIX = "votebot:sync:checkpoint:"
+SYNC_CHECKPOINT_TTL = 86400  # 24 hours
 BILL_VERSION_PREFIX = "votebot:bill_version:"
 BILL_VERSION_TTL = 86400 * 90  # 90 days
 
@@ -143,6 +145,56 @@ class RedisStore:
         except Exception as e:
             logger.error("Redis: failed to get sync task", task_id=task_id, error=str(e))
         return None
+
+    # -- Sync checkpoint tracking --
+
+    async def add_sync_checkpoint(self, task_id: str, item_id: str):
+        """Record a completed item ID for a sync task (SADD + TTL refresh)."""
+        if not self._client:
+            return
+        try:
+            key = f"{SYNC_CHECKPOINT_PREFIX}{task_id}"
+            await self._client.sadd(key, item_id)
+            await self._client.expire(key, SYNC_CHECKPOINT_TTL)
+        except Exception as e:
+            logger.error("Redis: failed to add sync checkpoint", task_id=task_id, error=str(e))
+
+    async def get_sync_checkpoints(self, task_id: str) -> set[str]:
+        """Get all completed item IDs for a sync task."""
+        if not self._client:
+            return set()
+        try:
+            return await self._client.smembers(f"{SYNC_CHECKPOINT_PREFIX}{task_id}")
+        except Exception as e:
+            logger.error("Redis: failed to get sync checkpoints", task_id=task_id, error=str(e))
+            return set()
+
+    async def copy_sync_checkpoints(self, from_task_id: str, to_task_id: str) -> int:
+        """Copy checkpoints from a previous task to a new one for resume.
+
+        Returns the number of checkpoints copied.
+        """
+        if not self._client:
+            return 0
+        try:
+            src_key = f"{SYNC_CHECKPOINT_PREFIX}{from_task_id}"
+            dst_key = f"{SYNC_CHECKPOINT_PREFIX}{to_task_id}"
+            # COPY command (Redis 6.2+). Fall back to SUNIONSTORE if unavailable.
+            try:
+                await self._client.copy(src_key, dst_key, replace=True)
+            except Exception:
+                await self._client.sunionstore(dst_key, src_key)
+            await self._client.expire(dst_key, SYNC_CHECKPOINT_TTL)
+            count = await self._client.scard(dst_key)
+            return count
+        except Exception as e:
+            logger.error(
+                "Redis: failed to copy sync checkpoints",
+                from_task_id=from_task_id,
+                to_task_id=to_task_id,
+                error=str(e),
+            )
+            return 0
 
     # -- Active jurisdictions tracking --
 
