@@ -29,6 +29,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Chat Widget Truncated on Mobile (Send Button Cut Off)](#chat-widget-truncated-on-mobile-send-button-cut-off)
 - [Production Query Monitoring](#production-query-monitoring)
 - [Batch Sync Worker Killed Mid-Flight](#batch-sync-worker-killed-mid-flight)
+- [Scheduler Stops After Leader Worker Death](#scheduler-stops-after-leader-worker-death)
 
 ---
 
@@ -3103,6 +3104,66 @@ redis-cli GET "votebot:sync:task:<task_id>"
 - **Run sync in a separate process**: Decouple sync from the API workers entirely (e.g., Celery task queue, or a dedicated sync worker process)
 - **Add progress updates to Redis**: Write intermediate progress during the sync so the status endpoint shows real-time counts even from the other worker
 - **Clean up orphaned tasks**: Add a periodic check that marks tasks as `"failed"` if the owning worker PID is dead
+
+---
+
+## Scheduler Stops After Leader Worker Death
+
+### Symptom
+
+The scheduled daily bill version check (04:00 UTC) stops firing. No scheduler-related log entries appear. `redis-cli GET votebot:scheduler:leader` returns `(nil)` — no worker holds the leader lock.
+
+### Root Cause (Historical — Fixed)
+
+Prior to the re-election fix, only the worker that acquired the leader lock at startup would run the scheduler. If that worker was killed (e.g., by uvicorn's process manager during a heavy sync, or OOM), the lock would expire after 5 minutes but the surviving follower worker never re-checked — it had given up at startup. This left the system with **no scheduler** until a manual `systemctl restart votebot`.
+
+### How It's Fixed
+
+Follower workers now run a **re-election loop** (`_try_become_leader` in `main.py`). Every 60 seconds, the follower attempts `acquire_scheduler_lock()`. If the leader died and the lock expired (5-min TTL), the follower acquires it, starts the scheduler, and switches to leader mode with lock refresh.
+
+Timeline of recovery after leader death:
+1. **T+0**: Leader worker dies
+2. **T+5min**: Redis lock expires (`SET NX EX 300`)
+3. **T+5min to T+6min**: Follower's next `_try_become_leader` iteration acquires the lock
+4. Follower logs: `"Promoted to scheduler leader via re-election"`
+5. Scheduler starts, lock refresh begins (every 2 min)
+
+### Diagnosis
+
+```bash
+# Check if any worker holds the leader lock
+redis-cli GET votebot:scheduler:leader
+
+# Check scheduler logs
+sudo journalctl -u votebot --since "1 hour ago" | grep -i scheduler
+
+# Look for re-election events
+sudo journalctl -u votebot --since "1 hour ago" | grep "re-election"
+
+# Check if scheduled jobs are registered (APScheduler)
+sudo journalctl -u votebot --since "1 hour ago" | grep "Added job"
+```
+
+### Verification After Deploy
+
+```bash
+# 1. Restart the service
+sudo systemctl restart votebot
+
+# 2. Confirm one worker acquired the lock
+sleep 5 && redis-cli GET votebot:scheduler:leader
+
+# 3. Simulate leader death: find the leader PID and kill it
+# (The leader PID is the worker_id prefix in the lock value)
+sudo journalctl -u votebot -n 20 | grep "Scheduler started"
+# kill <leader_pid>
+
+# 4. Wait ~65 seconds, then check for re-election
+sleep 70 && sudo journalctl -u votebot --since "2 minutes ago" | grep "re-election"
+
+# 5. Confirm new lock holder
+redis-cli GET votebot:scheduler:leader
+```
 
 ---
 
