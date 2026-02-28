@@ -39,6 +39,7 @@ class VersionCheckResult:
     chunks_created: int = 0
     webflow_updated: bool = False
     status_updated: bool = False
+    webflow_patch_skipped: bool = False
     error: str | None = None
 
 
@@ -56,6 +57,7 @@ class VersionSyncBatchResult:
     chunks_created: int = 0
     webflow_updates: int = 0
     status_updates: int = 0
+    webflow_skipped: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -204,6 +206,20 @@ class BillVersionSyncService:
             iso_date = None
         return description, iso_date
 
+    @staticmethod
+    def _dates_match(cms_date: str | None, openstates_date: str | None) -> bool:
+        """Compare a Webflow CMS date with an OpenStates-derived date.
+
+        Webflow may return dates with varying precision (e.g.
+        ``2026-02-25T00:00:00.000Z`` vs ``2026-02-25T00:00:00Z``).
+        We normalise both to ``YYYY-MM-DD`` before comparing.
+        """
+        if not cms_date and not openstates_date:
+            return True
+        if not cms_date or not openstates_date:
+            return False
+        return cms_date[:10] == openstates_date[:10]
+
     async def _update_webflow_status(
         self,
         webflow_id: str,
@@ -330,10 +346,24 @@ class BillVersionSyncService:
             # hasn't changed (e.g., committee vote, floor action).
             latest_action, action_date = self._extract_latest_action(bill_data)
             status_updated = False
+            patch_skipped = False
 
             if latest_action:
                 skip_webflow = self._config.get("skip_webflow_update", False)
-                if not skip_webflow:
+                cms_status = fields.get("status", "")
+                cms_date = fields.get("status-date", "")
+                status_matches = (
+                    cms_status == latest_action
+                    and self._dates_match(cms_date, action_date)
+                )
+                if status_matches:
+                    patch_skipped = True
+                    logger.debug(
+                        "Skipping Webflow PATCH — status already matches",
+                        bill_title=bill_title,
+                        status=latest_action,
+                    )
+                elif not skip_webflow:
                     status_updated = await self._update_webflow_status(
                         webflow_id, bill_title, latest_action, action_date,
                     )
@@ -361,6 +391,7 @@ class BillVersionSyncService:
                 version_date=latest_version.get("date", ""),
                 text_url=text_url,
                 status_updated=status_updated,
+                webflow_patch_skipped=patch_skipped,
             )
 
         # 6. Newer version detected — re-ingest bill text
@@ -405,6 +436,7 @@ class BillVersionSyncService:
         # 7. Update Webflow fields (gov-url + status + status-date) in a single PATCH
         webflow_updated = False
         status_updated = False
+        patch_skipped = False
         latest_action, action_date = self._extract_latest_action(bill_data)
         skip_webflow = self._config.get("skip_webflow_update", False)
         if not skip_webflow:
@@ -415,21 +447,31 @@ class BillVersionSyncService:
                 scheduler_key = self.settings.webflow_scheduler_api_key.get_secret_value()
 
                 # Batch gov-url, status, and status-date into a single PATCH call
-                field_data: dict[str, str] = {"gov-url": text_url}
-                if latest_action:
+                # Only include fields whose values actually differ from CMS
+                field_data: dict[str, str] = {}
+                if fields.get("gov-url") != text_url:
+                    field_data["gov-url"] = text_url
+                if latest_action and fields.get("status") != latest_action:
                     field_data["status"] = latest_action
-                if action_date:
+                if action_date and not self._dates_match(fields.get("status-date"), action_date):
                     field_data["status-date"] = action_date
 
-                success = await lookup.update_bill_fields(
-                    webflow_id,
-                    field_data,
-                    api_key=scheduler_key or None,
-                )
-                if success:
-                    webflow_updated = True
-                    if latest_action:
-                        status_updated = True
+                if not field_data:
+                    patch_skipped = True
+                    logger.debug(
+                        "Skipping Webflow PATCH — all fields already match",
+                        bill_title=bill_title,
+                    )
+                else:
+                    success = await lookup.update_bill_fields(
+                        webflow_id,
+                        field_data,
+                        api_key=scheduler_key or None,
+                    )
+                    if success:
+                        webflow_updated = True
+                        if "status" in field_data:
+                            status_updated = True
             except Exception as e:
                 logger.warning(
                     "Failed to update Webflow fields (bill text still ingested)",
@@ -459,6 +501,7 @@ class BillVersionSyncService:
             chunks_created=chunks_created,
             webflow_updated=webflow_updated,
             status_updated=status_updated,
+            webflow_patch_skipped=patch_skipped,
         )
 
     async def _ingest_bill_text(
@@ -655,6 +698,8 @@ class BillVersionSyncService:
                         result.webflow_updates += 1
                     if check_result.status_updated:
                         result.status_updates += 1
+                    if check_result.webflow_patch_skipped:
+                        result.webflow_skipped += 1
                     updates_this_run += 1
                     logger.info(
                         "Bill version updated",
@@ -668,11 +713,14 @@ class BillVersionSyncService:
                     result.unchanged += 1
                     if check_result.status_updated:
                         result.status_updates += 1
+                    if check_result.webflow_patch_skipped:
+                        result.webflow_skipped += 1
                     logger.debug(
                         "Bill version unchanged",
                         bill=title,
                         version=check_result.version_note,
                         status_updated=check_result.status_updated,
+                        patch_skipped=check_result.webflow_patch_skipped,
                     )
                 elif check_result.status == "no_versions":
                     result.no_versions += 1
@@ -717,6 +765,7 @@ class BillVersionSyncService:
             chunks_created=result.chunks_created,
             webflow_updates=result.webflow_updates,
             status_updates=result.status_updates,
+            webflow_skipped=result.webflow_skipped,
         )
 
         return result
