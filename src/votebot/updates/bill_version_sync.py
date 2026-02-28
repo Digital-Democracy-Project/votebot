@@ -186,8 +186,22 @@ class BillVersionSyncService:
         """
         description = bill_data.get("latest_action_description") or None
         action_date = bill_data.get("latest_action_date")
-        # Convert "2026-02-24" → "2026-02-24T00:00:00.000Z" for Webflow timestamp
-        iso_date = f"{action_date}T00:00:00.000Z" if action_date else None
+        # Convert to Webflow-compatible ISO 8601 timestamp.
+        # OpenStates returns either "YYYY-MM-DD" or full ISO like
+        # "2026-02-25T17:37:53+00:00" — only append time suffix if
+        # the date doesn't already contain one.
+        if action_date and "T" not in action_date:
+            iso_date = f"{action_date}T00:00:00.000Z"
+        elif action_date:
+            # Already has time component; normalize to Webflow format
+            from datetime import datetime, timezone
+            try:
+                dt = datetime.fromisoformat(action_date)
+                iso_date = dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            except (ValueError, TypeError):
+                iso_date = action_date
+        else:
+            iso_date = None
         return description, iso_date
 
     async def _update_webflow_status(
@@ -519,6 +533,7 @@ class BillVersionSyncService:
     async def sync_bill_versions(
         self,
         bills: list[dict[str, Any]],
+        heartbeat_callback: Any | None = None,
     ) -> VersionSyncBatchResult:
         """Batch entry point: check all current-session bills for version updates.
 
@@ -680,6 +695,10 @@ class BillVersionSyncService:
                     webflow_id=webflow_id,
                     error=str(e),
                 )
+
+            # Keep heartbeat alive during long-running version sync phase
+            if heartbeat_callback and result.checked % 10 == 0:
+                await heartbeat_callback()
 
             # Reclaim memory between bills (PDF objects, embedding vectors, etc.)
             gc.collect()

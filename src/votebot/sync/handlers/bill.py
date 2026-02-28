@@ -423,14 +423,33 @@ class BillHandler:
             # Also sync OpenStates history for bills if enabled
             # Use the already-filtered raw_items from above
             if options.include_openstates and raw_items:
-                os_result = await self.bill_sync.sync_current_session_bills(raw_items)
+                # Build heartbeat callback to keep zombie watchdog from
+                # detecting this task as stale during long-running phases
+                async def _heartbeat():
+                    if options.progress_callback:
+                        await options.progress_callback(
+                            items_processed=total_processed,
+                            items_successful=total_successful,
+                            items_failed=total_processed - total_successful,
+                            chunks_created=total_chunks,
+                            errors=errors,
+                        )
+
+                await _heartbeat()
+                os_result = await self.bill_sync.sync_current_session_bills(
+                    raw_items, heartbeat_callback=_heartbeat
+                )
                 total_chunks += os_result.chunks_created
                 errors.extend(os_result.errors)
+
+                await _heartbeat()
 
                 # Chain bill version check — updates gov-url, status, status-date in Webflow CMS
                 from votebot.updates.bill_version_sync import BillVersionSyncService
                 version_sync = BillVersionSyncService(self.settings)
-                version_result = await version_sync.sync_bill_versions(raw_items)
+                version_result = await version_sync.sync_bill_versions(
+                    raw_items, heartbeat_callback=_heartbeat
+                )
                 total_chunks += version_result.chunks_created
                 errors.extend(version_result.errors)
 

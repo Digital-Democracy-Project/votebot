@@ -1213,6 +1213,7 @@ class BillSyncService:
     async def sync_current_session_bills(
         self,
         bills: list[dict[str, Any]],
+        heartbeat_callback: Any | None = None,
     ) -> SyncBatchResult:
         """
         Sync bills from the current session only.
@@ -1319,6 +1320,10 @@ class BillSyncService:
                 success=result.success,
                 error=result.error,
             )
+
+            # Keep heartbeat alive during long-running OpenStates phase
+            if heartbeat_callback and (successful + failed) % 10 == 0:
+                await heartbeat_callback()
 
         return SyncBatchResult(
             total_bills=total,
