@@ -3191,6 +3191,52 @@ redis-cli GET "votebot:sync:task:<task_id>" | python -m json.tool | grep -E "ret
 
 **Files changed:** `main.py` (`_zombie_sync_watchdog`, `_check_and_resume_stale_syncs`), `api/routes/sync_unified.py` (`last_heartbeat`, `retry_count`, `options` in task state).
 
+### Production Fixes After First Full Batch Sync (Feb 28, 2026)
+
+The first successful 1002-bill batch sync (all bills processed, 0 OOM) revealed three additional issues:
+
+#### 1. False Positive Zombie Watchdog
+
+**Symptom**: A duplicate sync was launched mid-batch even though the original was still running.
+
+**Root cause**: During the transition from bill text ingestion → OpenStates history sync → bill version sync, the heartbeat stopped updating for ~9 minutes. The watchdog's 5-minute stale threshold triggered a false positive.
+
+**Fix**: Added `heartbeat_callback` parameter to `BillSyncService.sync_current_session_bills()` and `BillVersionSyncService.sync_bill_versions()`. The callback is invoked every 10 bills inside their inner loops, keeping the heartbeat alive during long-running phases. A `_heartbeat()` closure in `bill.py` bridges the handler's `progress_callback` to these inner methods.
+
+**Files changed**: `updates/bill_sync.py`, `updates/bill_version_sync.py`, `sync/handlers/bill.py`
+
+#### 2. Webflow Date Double-Suffix Bug
+
+**Symptom**: 2 Webflow 400 errors during bill status PATCH — dates like `2026-02-25T17:37:53+00:00T00:00:00.000Z`.
+
+**Root cause**: `_extract_latest_action()` unconditionally appended `T00:00:00.000Z` to the date, but OpenStates sometimes returns full ISO timestamps (with `T`), not just `YYYY-MM-DD`.
+
+**Fix**: Check for `"T"` in the date string. If already present, parse with `datetime.fromisoformat()` and normalize to Webflow format (`YYYY-MM-DDTHH:MM:SS.000Z`).
+
+**Files changed**: `updates/bill_version_sync.py` (`_extract_latest_action()`)
+
+#### 3. Webflow CMS Field Comparison (Rate Limit Optimization)
+
+**Symptom**: Every checked bill made a Webflow PATCH call even when the CMS already had the correct `status` and `status-date` values.
+
+**Fix**: Before making a PATCH call, compare existing Webflow CMS field values against the new values from OpenStates. Skip the PATCH entirely when all fields already match. This applies to both paths:
+
+- **Unchanged-version path**: Compare `fields["status"]` and `fields["status-date"]` against OpenStates `latest_action` and `action_date`. Uses `_dates_match()` helper that normalizes dates to `YYYY-MM-DD` for comparison (handles Webflow format variations like `2026-02-25T00:00:00.000Z` vs `2026-02-25T00:00:00Z`).
+- **Updated-version path**: Only include fields that actually differ from CMS in the PATCH payload (`gov-url`, `status`, `status-date`). If all three match, skip the PATCH entirely.
+
+The batch result now tracks `webflow_skipped` count alongside `webflow_updates` and `status_updates`, visible in the final log line.
+
+**Verification**:
+
+```bash
+# Check how many PATCH calls were skipped in a batch run
+sudo journalctl -u votebot --since "1 hour ago" --no-pager | grep "webflow_skipped"
+
+# Should see: "Bill version sync batch complete" with webflow_skipped=N
+```
+
+**Files changed**: `updates/bill_version_sync.py` (`_dates_match()`, `check_and_update_bill()`, `VersionCheckResult.webflow_patch_skipped`, `VersionSyncBatchResult.webflow_skipped`)
+
 ### Potential Further Improvements
 
 - **Run sync in a separate process**: Decouple sync from the API workers entirely (e.g., Celery task queue, or a dedicated sync worker process)

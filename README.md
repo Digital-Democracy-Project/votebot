@@ -23,7 +23,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Production Query Monitoring**: All production queries and responses are logged to date-partitioned JSONL files for offline evaluation against ground truth
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
-- **Automated Sync Scheduling**: Daily bill version checks (detects newer amended PDFs/HTML, re-ingests text and updates Webflow CMS gov-url), weekly legislator sync, monthly org sync — with Redis leader election for multi-worker safety
+- **Automated Sync Scheduling**: Daily bill version checks (detects newer amended PDFs/HTML, re-ingests text and updates Webflow CMS `gov-url`, `status`, `status-date`), weekly legislator sync, monthly org sync — with Redis leader election for multi-worker safety
 - **High Performance**: Designed for 1000+ concurrent conversations
 
 ## Tech Stack
@@ -224,7 +224,7 @@ Sync content to the vector store. Supports bills, legislators, organizations, we
 }
 ```
 
-> **Note**: Batch bill sync with `include_openstates` (default: true) automatically chains `BillVersionSyncService` after the OpenStates history sync. This checks for newer bill text versions (PDF/HTML), re-ingests updated text into Pinecone, and updates Webflow CMS fields (`gov-url`, `status`, `status-date`). The same version sync also runs independently on the daily scheduler (04:00 UTC).
+> **Note**: Batch bill sync with `include_openstates` (default: true) automatically chains `BillVersionSyncService` after the OpenStates history sync. This checks for newer bill text versions (PDF/HTML), re-ingests updated text into Pinecone, and updates Webflow CMS fields (`gov-url`, `status`, `status-date`). CMS fields that already match OpenStates values are skipped to minimize Webflow API calls. The same version sync also runs independently on the daily scheduler (04:00 UTC).
 
 **Request Body (resume after crash):**
 ```json
@@ -666,7 +666,7 @@ VoteBot uses an automated sync scheduler to keep content fresh. Enable it by set
 
 | Content | Frequency | Time (UTC) | Details |
 |---------|-----------|------------|---------|
-| **Bill versions** | Daily | 04:00 | Checks OpenStates for newer amended versions (Engrossed, Enrolled, etc.), re-ingests bill text (PDF or HTML) into Pinecone, updates Webflow CMS `gov-url` |
+| **Bill versions** | Daily | 04:00 | Checks OpenStates for newer amended versions (Engrossed, Enrolled, etc.), re-ingests bill text (PDF or HTML) into Pinecone, updates Webflow CMS `gov-url`, `status`, and `status-date` |
 | **Legislators** | Weekly | 06:00 Sunday | Sponsored bills + voting records, date-based rotation (200/run) |
 | **Organizations** | Monthly | 08:00 1st | Full re-ingest of org profiles from Webflow CMS |
 | **Content poll** | Hourly | — | Congress/OpenStates change detection |
@@ -679,8 +679,9 @@ For each current-session bill, the daily job:
 3. If a newer version is detected (new date, different note like "Engrossed", or changed URL):
    - Downloads bill text (PDF via `WebflowSource._process_bill_pdf()` or HTML via `_process_bill_html()`, based on OpenStates `media_type`)
    - Re-ingests into Pinecone as `bill-text` documents (idempotent upsert overwrites old chunks)
-   - Updates Webflow CMS `gov-url` field via `WebflowLookupService.update_bill_gov_url()` (PATCH API)
-4. If unchanged: updates `last_checked` timestamp only
+   - Updates Webflow CMS fields (`gov-url`, `status`, `status-date`) via `WebflowLookupService.update_bill_fields()` (single PATCH call)
+4. If version unchanged: still updates `status` and `status-date` in Webflow CMS if they differ from OpenStates (bill status can change without a new text version, e.g., committee vote)
+5. If CMS fields already match OpenStates: skips the Webflow PATCH entirely (rate limit optimization)
 
 Configuration in `config/sync_schedule.yaml`:
 - `bill_version_check.max_updates_per_run`: Limits re-ingestions per run (default: 50). First run populates the Redis cache for all bills, cycling through remaining bills on subsequent runs.
@@ -784,7 +785,7 @@ votebot/
 │   └── updates/             # Real-time updates
 │       ├── scheduler.py     # Scheduled polling
 │       ├── bill_sync.py     # OpenStates bill sync (status, votes, actions)
-│       ├── bill_version_sync.py  # Daily bill version check (PDF/HTML re-ingestion + Webflow gov-url update)
+│       ├── bill_version_sync.py  # Daily bill version check (PDF/HTML re-ingestion + Webflow gov-url/status/status-date update)
 │       └── change_detection.py
 ├── scripts/
 │   ├── sync.py              # Unified sync CLI
