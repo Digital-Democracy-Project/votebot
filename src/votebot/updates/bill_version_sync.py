@@ -325,11 +325,13 @@ class BillVersionSyncService:
         cached = await redis_store.get_bill_version(webflow_id)
 
         if not self._is_newer_version(latest_version, cached):
-            # Text version unchanged — but status may have changed
+            # Text version unchanged — always update status/status-date
+            # in Webflow CMS so the CMS stays current even when bill text
+            # hasn't changed (e.g., committee vote, floor action).
             latest_action, action_date = self._extract_latest_action(bill_data)
             status_updated = False
 
-            if latest_action and latest_action != (cached or {}).get("last_status"):
+            if latest_action:
                 skip_webflow = self._config.get("skip_webflow_update", False)
                 if not skip_webflow:
                     status_updated = await self._update_webflow_status(
@@ -343,7 +345,7 @@ class BillVersionSyncService:
                             status_date=action_date,
                         )
 
-            # Update last_checked (and last_status if changed) in cache
+            # Update last_checked and last_status in cache
             if cached:
                 cached["last_checked"] = datetime.utcnow().isoformat()
                 if latest_action:
