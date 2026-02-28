@@ -162,15 +162,29 @@ class IngestionPipeline:
                 errors=[f"Upsert failed: {str(e)}"],
             )
 
+        chunk_count = len(chunks)
+
         logger.info(
             "Document ingested",
             document_id=metadata.document_id,
-            chunks=len(chunks),
+            chunks=chunk_count,
         )
+
+        # Explicit cleanup for large documents to prevent OOM
+        del documents
+        del chunks
+        if chunk_count > 100:
+            import gc
+            gc.collect()
+            logger.info(
+                "Forced gc.collect after large document",
+                document_id=metadata.document_id,
+                chunks=chunk_count,
+            )
 
         return IngestionResult(
             documents_processed=1,
-            chunks_created=len(chunks),
+            chunks_created=chunk_count,
             chunks_upserted=upserted,
             errors=errors,
             skipped=skipped,

@@ -402,6 +402,7 @@ VoteBot includes a real-time bill information lookup tool that enables fetching 
 | `BILL_VOTES_TOOL_ENABLED` | Enable the bill info tool | `true` |
 | `BILL_VOTES_RAG_CONFIDENCE_THRESHOLD` | RAG confidence below which tool is enabled | `0.4` |
 | `WEBFLOW_ORG_LOOKUP_ENABLED` | Enable runtime Webflow CMS lookup for org positions | `true` |
+| `PDF_MAX_PAGES` | Maximum PDF pages to process per bill (0 = unlimited) | `1000` |
 
 ### Function Schema
 
@@ -616,9 +617,11 @@ python scripts/sync.py clear --confirm
 
 ### Sync Progress & Resume
 
-**Live progress reporting**: During batch sync, the status endpoint (`GET /sync/unified/status/{task_id}`) returns real-time counts while the sync is running. Progress updates are written to the in-memory task dict after every item and flushed to Redis every 10 items.
+**Live progress reporting**: During batch sync, the status endpoint (`GET /sync/unified/status/{task_id}`) returns real-time counts while the sync is running. Progress updates are written to the in-memory task dict after every item and flushed to Redis every 10 items. A `last_heartbeat` timestamp is updated on every progress callback for zombie detection.
 
-**Checkpoint/resume after crash**: Each processed bill's Webflow ID is recorded in a Redis SET (`votebot:sync:checkpoint:{task_id}`, 24h TTL). If a worker dies mid-sync, a new request with `resume_task_id` copies the checkpoint set and skips already-processed items:
+**Automatic resume (zombie watchdog)**: The leader worker polls Redis every 30 minutes for sync tasks with stale heartbeats (>5 minutes). If a worker was OOM-killed mid-sync, the watchdog automatically marks the old task as failed, copies checkpoints to a new task, and launches a resume sync. This eliminates the need for manual intervention after crashes. Tasks are retried up to 3 times before being marked as `permanently_failed`.
+
+**Manual resume**: If needed, you can also manually resume a crashed sync with `resume_task_id`:
 
 ```bash
 # Original sync (crashes at bill 47 of 150)
@@ -628,7 +631,7 @@ curl -X POST -H "Authorization: Bearer $API_KEY" \
   https://api.digitaldemocracyproject.org/votebot/sync/unified
 # Returns task_id: "abc-123"
 
-# Resume — skips the 47 already-checkpointed bills
+# Manual resume — skips the 47 already-checkpointed bills
 curl -X POST -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"content_type": "bill", "mode": "batch", "resume_task_id": "abc-123"}' \
@@ -643,6 +646,9 @@ redis-cli GET "votebot:sync:task:<task_id>" | python -m json.tool
 
 # Check checkpoint count
 redis-cli SCARD "votebot:sync:checkpoint:<task_id>"
+
+# Check heartbeat and retry count
+redis-cli GET "votebot:sync:task:<task_id>" | python -m json.tool | grep -E "last_heartbeat|retry_count|status"
 ```
 
 ### Legacy Scripts
@@ -690,7 +696,9 @@ Configuration in `config/sync_schedule.yaml`:
 
 **Auto-tracking jurisdictions**: When a bill from a new state is synced, the system automatically detects the jurisdiction via `resolve_jurisdiction_code()` — which checks the `JURISDICTION_MAP` first, then falls back to parsing the bill's OpenStates URL (e.g., `https://openstates.org/ca/bills/...` → `CA`). Discovered jurisdictions are registered in Redis (`votebot:active_jurisdictions` set) for cross-worker visibility. No manual config changes are needed to add new states — just add bills from the new state to Webflow CMS and sync.
 
-**Multi-worker safety**: The scheduler uses a Redis-based leader lock (`votebot:scheduler:leader`, 5-min TTL, refreshed every 2 min). Only the leader worker runs scheduled jobs. If the leader dies, another worker can acquire the lock. If Redis is unavailable, the scheduler starts anyway (single-worker fallback).
+**Multi-worker safety**: The scheduler uses a Redis-based leader lock (`votebot:scheduler:leader`, 5-min TTL, refreshed every 2 min). Only the leader worker runs scheduled jobs and the zombie sync watchdog. If the leader dies, another worker can acquire the lock via the follower re-election loop (every 60s). If Redis is unavailable, the scheduler starts anyway (single-worker fallback).
+
+**Zombie sync watchdog**: The leader worker runs a background loop that checks Redis every 30 minutes for sync tasks with stale heartbeats (>5 min since last update). Stale tasks are automatically resumed with checkpoint skip, up to 3 retries before permanent failure. This handles OOM kills during batch sync without manual intervention.
 
 Configuration is in `config/sync_schedule.yaml`. The `StateLegislativeCalendar` class is at `src/votebot/utils/legislative_calendar.py`.
 
@@ -986,6 +994,8 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 - Chat widget truncated on mobile (send button cut off due to layout viewport expansion on content-rich host pages — fixed with `screen.width` mobile detection)
 - Production query monitoring (JSONL logging, offline evaluation)
 - Batch sync progress reporting and checkpoint/resume after worker crash
+- Large PDF memory management (incremental embed+upsert, gc per bill, page limit)
+- Zombie sync watchdog with automatic resume and retry limit
 
 ## Contributing
 

@@ -3072,19 +3072,31 @@ The task state gets stuck as `"running"` in Redis because the completion callbac
 
 - **2026-02-26**: Worker 57373 processing full batch sync (all jurisdictions, no limit). Last bill: FL SB 995 at 05:22:06. Worker killed at 05:22:22.
 - **2026-02-27**: Worker 61235 processing batch sync. Last bill: Consolidated Appropriations Act 2026 (HR 7148) — a massive federal omnibus bill. Worker killed at 05:55:22 after 2 minutes of parsing.
+- **2026-02-28**: Worker 61904 processing full batch sync (993 bills, no limit). HR 7148 generated 816 chunks from 1,540 pages (2.3MB PDF). Worker died 6 seconds after the bill following HR 7148 — OOM kill signature (no exception, no shutdown log). 130/993 bills completed (13.1%).
 
 ### How It's Fixed
 
-Four layers of memory protection were added (Feb 2026):
+**Phase 1 (Feb 2026)** — four layers of memory protection:
 
 | Layer | File | Change |
 |-------|------|--------|
-| **Per-bill ingestion** | `sync/handlers/bill.py` | Process and ingest each bill immediately instead of accumulating all docs in a list. `gc.collect()` every 10 bills |
+| **Per-bill ingestion** | `sync/handlers/bill.py` | Process and ingest each bill immediately instead of accumulating all docs in a list |
 | **Streaming PDF download** | `ingestion/sources/pdf.py` | Stream HTTP response to temp file via `aiter_bytes()` — no size limit, no in-memory buffering |
 | **Page cache flush** | `ingestion/sources/pdf.py` | `page.flush_cache()` after each pdfplumber page releases layout objects |
-| **Incremental vectors** | `services/vector_store.py` | Build and upsert Pinecone vectors one batch at a time instead of assembling the full list |
+| **Incremental vector upsert** | `services/vector_store.py` | Build and upsert Pinecone vectors one batch at a time instead of assembling the full list |
 
-The daily scheduler path (`BillVersionSyncService`) also has `gc.collect()` between bills.
+**Phase 2 (Feb 28, 2026)** — after the worker 61904 OOM kill on HR 7148 (1,540-page, 816-chunk bill), deeper memory fixes were added:
+
+| Layer | File | Change |
+|-------|------|--------|
+| **Incremental embedding+upsert** | `services/vector_store.py` | Embed AND upsert in batches of 100 (previously all embeddings generated upfront before any upsert). Caps peak embedding memory at ~1.2MB instead of ~10MB for 800+ chunk bills |
+| **gc.collect every bill** | `sync/handlers/bill.py` | Changed from `gc.collect()` every 10 bills to every bill. Ensures memory from a 816-chunk monster is reclaimed before the next bill starts |
+| **Pipeline large-doc cleanup** | `ingestion/pipeline.py` | Explicit `del documents; del chunks; gc.collect()` after upsert when chunk count > 100 |
+| **PDF page limit (safety net)** | `ingestion/sources/pdf.py` + `config.py` | Configurable `PDF_MAX_PAGES` setting (default 1000). Truncates with warning for extreme PDFs. Primary defense is better gc — this is a safety net only |
+| **Zombie sync watchdog** | `main.py` | Leader worker polls Redis every 30 min for stale sync tasks (no heartbeat update in 5+ min), auto-resumes with checkpoint skip, max 3 retries before permanent failure |
+| **Heartbeat tracking** | `api/routes/sync_unified.py` | Task state includes `last_heartbeat` (updated on every progress callback) and `retry_count` for zombie detection |
+
+The daily scheduler path (`BillVersionSyncService`) also has `gc.collect()` between bills. The `pdf_max_pages` setting flows through to `_process_bill_pdf()` in both batch sync and daily version check paths.
 
 ### Investigation Steps
 
@@ -3138,10 +3150,50 @@ redis-cli SCARD "votebot:sync:checkpoint:<task_id>"
 
 **Files changed**: `sync/types.py` (3 new fields on `SyncOptions`), `services/redis_store.py` (3 checkpoint methods), `api/routes/sync_unified.py` (progress callback wiring + resume), `sync/handlers/bill.py` (per-bill checkpoint + skip), `sync/handlers/legislator.py` + `organization.py` (final progress callback).
 
+### Auto-Resume via Zombie Watchdog (Feb 28, 2026 Fix)
+
+The zombie sync watchdog runs on the leader worker and automatically detects and resumes crashed sync tasks. This eliminates the need for manual `resume_task_id` intervention after OOM kills.
+
+**How it works:**
+
+1. Every 30 minutes, the leader worker scans Redis for sync tasks with `status == "running"`
+2. If a task's `last_heartbeat` is >5 minutes old, it's a zombie (the worker died)
+3. The watchdog marks the old task as `"failed"`, copies checkpoints to a new task, and launches a resume sync
+4. The resumed sync skips already-checkpointed bills via the existing checkpoint/resume mechanism
+5. After 3 failed attempts (crashes), the task is marked `"permanently_failed"` with a log message and is not retried
+
+**Key parameters:**
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Poll interval | 30 minutes | Balances detection speed vs Redis load |
+| Stale threshold | 5 minutes | A 1000-page PDF takes ~2.3 min to process; 5 min leaves 2.7 min buffer |
+| Max retries | 3 | Prevents infinite crash loops on consistently problematic bills |
+
+**Verification:**
+
+```bash
+# Check if watchdog is running (leader worker logs)
+sudo journalctl -u votebot --since "1 hour ago" --no-pager | grep -i "zombie\|watchdog\|auto-resum"
+
+# Check for permanently failed tasks
+redis-cli KEYS "votebot:sync:task:*" | xargs -I{} redis-cli GET {} | python -c "
+import sys, json
+for line in sys.stdin:
+    t = json.loads(line)
+    if t.get('status') == 'permanently_failed':
+        print(f\"Task {t.get('error', 'unknown')}\")
+"
+
+# Monitor retry count on a specific task
+redis-cli GET "votebot:sync:task:<task_id>" | python -m json.tool | grep -E "retry_count|status|last_heartbeat"
+```
+
+**Files changed:** `main.py` (`_zombie_sync_watchdog`, `_check_and_resume_stale_syncs`), `api/routes/sync_unified.py` (`last_heartbeat`, `retry_count`, `options` in task state).
+
 ### Potential Further Improvements
 
 - **Run sync in a separate process**: Decouple sync from the API workers entirely (e.g., Celery task queue, or a dedicated sync worker process)
-- **Clean up orphaned tasks**: Add a periodic check that marks tasks as `"failed"` if the owning worker PID is dead
 
 ---
 

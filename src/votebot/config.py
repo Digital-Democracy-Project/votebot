@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     # RAG Configuration
     chunk_size: int = 750
     chunk_overlap: int = 150
+    pdf_max_pages: int = 1000
     max_retrieval_chunks: int = 10
     similarity_threshold: float = 0.1
 

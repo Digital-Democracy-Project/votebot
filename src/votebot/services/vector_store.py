@@ -84,59 +84,52 @@ class VectorStoreService:
         """
         Add or update documents in the vector store.
 
+        Processes in batches: embeds and upserts batch_size documents at a time
+        to cap peak memory usage for large documents (800+ chunks).
+
         Args:
             documents: List of documents to upsert
-            batch_size: Number of documents per batch
+            batch_size: Number of documents per embed+upsert cycle
 
         Returns:
             Number of documents upserted
         """
-        # Generate embeddings for documents without them
-        texts_to_embed = []
-        docs_needing_embeddings = []
-
-        for doc in documents:
-            if doc.embedding is None:
-                texts_to_embed.append(doc.content)
-                docs_needing_embeddings.append(doc)
-
-        if texts_to_embed:
-            embeddings = await self.embedding_service.embed_documents(texts_to_embed)
-            for doc, embedding in zip(docs_needing_embeddings, embeddings):
-                doc.embedding = embedding
-
-        # Build vectors and upsert incrementally to cap memory at one batch
         total_upserted = 0
-        batch = []
-        batch_index = 0
-        for doc in documents:
-            batch.append(
-                {
-                    "id": doc.id,
-                    "values": doc.embedding,
-                    "metadata": {
-                        "content": doc.content[:40000],  # Pinecone metadata limit
-                        **doc.metadata,
-                    },
-                }
-            )
-            if len(batch) >= batch_size:
-                logger.debug(
-                    "Upserting batch to Pinecone",
-                    batch_size=len(batch),
-                    batch_index=batch_index,
-                )
-                self.index.upsert(vectors=batch, namespace=self.namespace)
-                total_upserted += len(batch)
-                batch = []
-                batch_index += 1
 
-        # Flush remaining vectors
-        if batch:
+        for i in range(0, len(documents), batch_size):
+            batch_docs = documents[i : i + batch_size]
+
+            # Generate embeddings for this batch only
+            texts_to_embed = []
+            docs_needing_embeddings = []
+            for doc in batch_docs:
+                if doc.embedding is None:
+                    texts_to_embed.append(doc.content)
+                    docs_needing_embeddings.append(doc)
+
+            if texts_to_embed:
+                embeddings = await self.embedding_service.embed_documents(texts_to_embed)
+                for doc, embedding in zip(docs_needing_embeddings, embeddings):
+                    doc.embedding = embedding
+
+            # Build and upsert vectors for this batch
+            batch = []
+            for doc in batch_docs:
+                batch.append(
+                    {
+                        "id": doc.id,
+                        "values": doc.embedding,
+                        "metadata": {
+                            "content": doc.content[:40000],  # Pinecone metadata limit
+                            **doc.metadata,
+                        },
+                    }
+                )
+
             logger.debug(
                 "Upserting batch to Pinecone",
                 batch_size=len(batch),
-                batch_index=batch_index,
+                batch_index=i // batch_size,
             )
             self.index.upsert(vectors=batch, namespace=self.namespace)
             total_upserted += len(batch)

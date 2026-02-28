@@ -85,12 +85,13 @@ class PDFSource:
                 )
                 continue
 
-    async def process_file(self, file_path: str) -> DocumentSource | None:
+    async def process_file(self, file_path: str, max_pages: int = 0) -> DocumentSource | None:
         """
         Process a single PDF file.
 
         Args:
             file_path: Path to the PDF file
+            max_pages: Maximum pages to process (0 = unlimited)
 
         Returns:
             DocumentSource or None if processing failed
@@ -102,7 +103,7 @@ class PDFSource:
         logger.info("Processing PDF", file=file_path)
 
         # Extract text using pdfplumber (primary) or PyPDF2 (fallback)
-        text, pdf_metadata = await self._extract_text(file_path)
+        text, pdf_metadata = await self._extract_text(file_path, max_pages=max_pages)
 
         if not text or len(text.strip()) < 100:
             logger.warning("Insufficient text extracted from PDF", file=file_path)
@@ -119,7 +120,7 @@ class PDFSource:
             metadata=metadata,
         )
 
-    async def _extract_text(self, file_path: str) -> tuple[str, dict | None]:
+    async def _extract_text(self, file_path: str, max_pages: int = 0) -> tuple[str, dict | None]:
         """
         Extract text from a PDF file.
 
@@ -127,6 +128,7 @@ class PDFSource:
 
         Args:
             file_path: Path to the PDF file
+            max_pages: Maximum pages to process (0 = unlimited)
 
         Returns:
             Tuple of (extracted_text, pdf_metadata)
@@ -149,7 +151,20 @@ class PDFSource:
                         pages=total_pages,
                     )
 
-                for page in pdf.pages:
+                # Apply page limit if set
+                if max_pages > 0 and total_pages > max_pages:
+                    logger.warning(
+                        "PDF exceeds page limit, truncating",
+                        file=file_path,
+                        total_pages=total_pages,
+                        max_pages=max_pages,
+                        truncated_pages=total_pages - max_pages,
+                    )
+                    pages_to_process = pdf.pages[:max_pages]
+                else:
+                    pages_to_process = pdf.pages
+
+                for page in pages_to_process:
                     page_text = page.extract_text()
                     if page_text:
                         text_parts.append(page_text)
@@ -183,7 +198,7 @@ class PDFSource:
             logger.error(f"PyPDF2 extraction failed: {e}")
             return "", None
 
-    async def process_url(self, url: str, save_path: str | None = None) -> DocumentSource | None:
+    async def process_url(self, url: str, save_path: str | None = None, max_pages: int = 0) -> DocumentSource | None:
         """
         Download and process a PDF from a URL.
 
@@ -235,7 +250,7 @@ class PDFSource:
                 return None
 
             # Process the downloaded file
-            doc = await self.process_file(file_path)
+            doc = await self.process_file(file_path, max_pages=max_pages)
 
             # Add URL to metadata
             if doc:

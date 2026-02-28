@@ -1337,7 +1337,9 @@ class WebflowSource:
         logger.info(f"Downloading PDF: {pdf_url}")
 
         try:
-            doc = await self.pdf_source.process_url(pdf_url)
+            doc = await self.pdf_source.process_url(
+                pdf_url, max_pages=self.settings.pdf_max_pages
+            )
             if not doc:
                 return None
 

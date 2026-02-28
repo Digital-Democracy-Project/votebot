@@ -403,8 +403,9 @@ class BillHandler:
 
                 # Reclaim PDF text, pdfplumber objects, embedding vectors
                 del bill_docs
+                gc.collect()
+
                 if (item_idx + 1) % 10 == 0:
-                    gc.collect()
                     logger.debug(
                         "Batch sync progress",
                         bills_processed=item_idx + 1,

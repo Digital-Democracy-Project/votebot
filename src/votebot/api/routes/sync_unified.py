@@ -3,6 +3,7 @@
 import asyncio
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 import structlog
@@ -174,6 +175,9 @@ async def _run_batch_sync_background(
         if errors:
             live_result["errors"] = errors
 
+        # Update heartbeat for zombie detection
+        _background_tasks[task_id]["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+
         # Throttle Redis writes to every 10 progress calls
         _redis_write_counter += 1
         if _redis_write_counter % 10 == 0:
@@ -325,9 +329,12 @@ async def sync_unified(
                 "content_type": content_type.value,
                 "mode": "batch",
                 "started_at": time.time(),
+                "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+                "retry_count": 0,
                 "options": {
                     "include_pdfs": options.include_pdfs,
                     "include_openstates": options.include_openstates,
+                    "include_sponsored_bills": options.include_sponsored_bills,
                     "jurisdiction": options.jurisdiction,
                     "limit": options.limit,
                     "dry_run": options.dry_run,
