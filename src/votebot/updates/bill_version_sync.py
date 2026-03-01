@@ -583,7 +583,8 @@ class BillVersionSyncService:
         """Batch entry point: check all current-session bills for version updates.
 
         Filters to current-session bills, applies rate limiting between
-        OpenStates API calls, and respects max_updates_per_run config.
+        OpenStates API calls. Optionally caps re-ingestions via max_updates_per_run
+        config (0 = unlimited).
 
         Args:
             bills: List of bill dicts from Webflow CMS (raw items with fieldData)
@@ -595,7 +596,7 @@ class BillVersionSyncService:
         from votebot.updates.bill_sync import BillSyncService
 
         sync_service = BillSyncService(self.settings)
-        max_updates = self._config.get("max_updates_per_run", 50)
+        max_updates = self._config.get("max_updates_per_run", 0)
         skip_webflow = self._config.get("skip_webflow_update", False)
 
         logger.info(

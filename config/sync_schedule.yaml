@@ -113,7 +113,7 @@ organization_sync:
 # and re-ingests bill text (PDF or HTML) into Pinecone when a new version
 # is found. Also updates the gov-url field in Webflow CMS.
 bill_version_check:
-  max_updates_per_run: 50     # Limit re-ingestions per run (first run populates cache)
+  max_updates_per_run: 0      # 0 = unlimited (memory-safe with per-bill gc + incremental embedding)
   skip_webflow_update: false  # Set true to disable CMS writes (testing)
 
 # Notification Settings (future use)

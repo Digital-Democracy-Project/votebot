@@ -684,7 +684,7 @@ For each current-session bill, the daily job:
 5. If CMS fields already match OpenStates: skips the Webflow PATCH entirely (rate limit optimization)
 
 Configuration in `config/sync_schedule.yaml`:
-- `bill_version_check.max_updates_per_run`: Limits re-ingestions per run (default: 50). First run populates the Redis cache for all bills, cycling through remaining bills on subsequent runs.
+- `bill_version_check.max_updates_per_run`: Limits re-ingestions per run (0 = unlimited). Safe to leave uncapped thanks to per-bill `gc.collect()` and incremental embedding.
 - `bill_version_check.skip_webflow_update`: Disables CMS writes for testing (default: false)
 
 > **Prerequisite**: Set `WEBFLOW_SCHEDULER_API_KEY` to a Webflow API token with `CMS:write` scope. This key is used only by the scheduler for `gov-url` updates. The main `WEBFLOW_VOTEBOT_API_KEY` remains read-only for query-time CMS lookups. If `WEBFLOW_SCHEDULER_API_KEY` is not set, the scheduler falls back to `WEBFLOW_VOTEBOT_API_KEY` (which will fail on writes unless it also has write scope).
