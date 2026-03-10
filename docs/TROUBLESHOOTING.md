@@ -31,6 +31,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Batch Sync Worker Killed Mid-Flight](#batch-sync-worker-killed-mid-flight)
   - [Sync Progress Reporting & Checkpoint/Resume](#sync-progress-reporting--checkpointresume-feb-2026-fix)
 - [Scheduler Stops After Leader Worker Death](#scheduler-stops-after-leader-worker-death)
+- [Bills With Empty Status Field in Webflow CMS](#bills-with-empty-status-field-in-webflow-cms)
 
 ---
 
@@ -3300,6 +3301,75 @@ sleep 70 && sudo journalctl -u votebot --since "2 minutes ago" | grep "re-electi
 # 5. Confirm new lock holder
 redis-cli GET votebot:scheduler:leader
 ```
+
+---
+
+## Bills With Empty Status Field in Webflow CMS
+
+### Symptom
+
+Some bills in Webflow CMS have an empty `status` and/or `status-date` field, even though the daily bill version check scheduler is running and updating other bills.
+
+### Root Causes
+
+There are five reasons a bill can be silently skipped during the daily version check, and prior to the March 2026 logging fix most of these were logged at `debug` level (invisible in production):
+
+1. **No OpenStates URL** — The bill's `open-states-url-2` field in Webflow CMS is empty. The version check silently skips it.
+
+2. **Not current session** — `is_current_session()` returns False because `session-year` doesn't include the current year. Bills with incorrect session metadata are permanently skipped.
+
+3. **Jurisdiction not scheduled today** — `should_sync_jurisdiction()` returns False for states not in session on non-Mondays. These bills are only checked once a week.
+
+4. **No `latest_action_description` from OpenStates** — If OpenStates returns null/empty for the latest action, `_extract_latest_action()` returns `(None, ...)` and the status update is skipped entirely. The bill is counted as "unchanged" with no error.
+
+5. **Webflow PATCH fails silently** — `update_bill_fields()` returns `False` on non-200 responses (e.g., date validation errors). The caller counts the bill as "unchanged" or "updated" regardless — it is never counted as "failed" in the batch summary. Historical cause: the date double-suffix bug (fixed Feb 28 in `a0e06e8`) produced invalid dates like `2026-01-20T22:38:26+00:00T00:00:00.000Z`.
+
+Additionally, bills synced before the status feature was added (pre Feb 25, 2026) never received an initial status and depend entirely on the daily version check to backfill.
+
+### Fix (March 2026) — Enhanced Logging
+
+All silent skip/failure paths now log at `info` or `warning` level with bill identifiers (`webflow_id`, `slug`, etc.):
+
+| Log message | Level | Meaning |
+|---|---|---|
+| `Skipping bill (no OpenStates URL)` | info | Missing `open-states-url-2` in CMS |
+| `Skipping bill (not current session)` | info | Session year doesn't match current year |
+| `Skipping bill (jurisdiction not scheduled today)` | info | Off-session state, not Monday |
+| `Bill has no versions in OpenStates` | warning | OpenStates returned empty versions array |
+| `No latest_action from OpenStates — status not updated` | warning | OpenStates has no action data |
+| `Webflow status PATCH failed (version unchanged path)` | warning | PATCH returned non-200 |
+| `Webflow PATCH failed (new version path)` | warning | PATCH returned non-200 (includes field_data) |
+
+New counters on `VersionSyncBatchResult` (visible in both "Bill version sync batch complete" and "Daily bill version check completed"):
+
+- `skipped_no_url` — bills missing OpenStates URL
+- `skipped_not_current` — bills from old sessions
+- `skipped_jurisdiction` — bills in off-session jurisdictions
+- `webflow_patch_failures` — bills where PATCH failed or no action data (not updated AND not skipped)
+- `no_latest_action` — bills with no action from OpenStates
+
+The scheduler completion log now warns (`logger.warning`) when `webflow_patch_failures > 0`, not just on hard failures.
+
+### Diagnostic Steps
+
+```bash
+# 1. Check batch completion summary (look at new counters)
+sudo journalctl -u votebot --since "1 day ago" --no-pager | grep "bill version sync batch complete\|Daily bill version check completed"
+
+# 2. Find specific bills with missing status
+sudo journalctl -u votebot --since "1 day ago" --no-pager | grep "no OpenStates URL\|No latest_action\|PATCH failed"
+
+# 3. Find skipped bills by reason
+sudo journalctl -u votebot --since "1 day ago" --no-pager | grep "Skipping bill"
+
+# 4. Find bills with no versions in OpenStates
+sudo journalctl -u votebot --since "1 day ago" --no-pager | grep "no versions in OpenStates"
+```
+
+### Files Changed
+
+- `updates/bill_version_sync.py` — All skip/failure logging promoted from debug to info/warning; new batch counters
+- `updates/scheduler.py` — Completion log includes new counters; warns on PATCH failures
 
 ---
 

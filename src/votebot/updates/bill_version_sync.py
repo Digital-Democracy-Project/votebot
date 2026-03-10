@@ -58,6 +58,11 @@ class VersionSyncBatchResult:
     webflow_updates: int = 0
     status_updates: int = 0
     webflow_skipped: int = 0
+    webflow_patch_failures: int = 0
+    no_latest_action: int = 0
+    skipped_no_url: int = 0
+    skipped_not_current: int = 0
+    skipped_jurisdiction: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -374,6 +379,26 @@ class BillVersionSyncService:
                             new_status=latest_action,
                             status_date=action_date,
                         )
+                    else:
+                        logger.warning(
+                            "Webflow status PATCH failed (version unchanged path)",
+                            bill_title=bill_title,
+                            webflow_id=webflow_id,
+                            attempted_status=latest_action,
+                            attempted_date=action_date,
+                            cms_status=cms_status,
+                            cms_date=cms_date,
+                        )
+
+            else:
+                logger.warning(
+                    "No latest_action from OpenStates — status not updated",
+                    bill_title=bill_title,
+                    webflow_id=webflow_id,
+                    jurisdiction=jurisdiction_code,
+                    openstates_url=openstates_url,
+                    cms_status=fields.get("status", ""),
+                )
 
             # Update last_checked and last_status in cache
             if cached:
@@ -438,6 +463,13 @@ class BillVersionSyncService:
         status_updated = False
         patch_skipped = False
         latest_action, action_date = self._extract_latest_action(bill_data)
+        if not latest_action:
+            logger.warning(
+                "No latest_action from OpenStates for new version — status will be empty",
+                bill_title=bill_title,
+                webflow_id=webflow_id,
+                jurisdiction=jurisdiction_code,
+            )
         skip_webflow = self._config.get("skip_webflow_update", False)
         if not skip_webflow:
             try:
@@ -472,6 +504,14 @@ class BillVersionSyncService:
                         webflow_updated = True
                         if "status" in field_data:
                             status_updated = True
+                    else:
+                        logger.warning(
+                            "Webflow PATCH failed (new version path)",
+                            bill_title=bill_title,
+                            webflow_id=webflow_id,
+                            attempted_fields=list(field_data.keys()),
+                            field_data=field_data,
+                        )
             except Exception as e:
                 logger.warning(
                     "Failed to update Webflow fields (bill text still ingested)",
@@ -655,25 +695,45 @@ class BillVersionSyncService:
             # Skip bills without OpenStates URL
             if not openstates_url:
                 result.skipped += 1
-                logger.debug("Skipping bill (no OpenStates URL)", bill=title, webflow_id=webflow_id)
+                result.skipped_no_url += 1
+                logger.info(
+                    "Skipping bill (no OpenStates URL)",
+                    bill=title,
+                    webflow_id=webflow_id,
+                    slug=slug,
+                    cms_status=fields.get("status", ""),
+                )
                 continue
 
             # Check if current session
             if not sync_service.is_current_session(session_year, session_code, jurisdiction_code):
                 result.skipped += 1
-                logger.debug("Skipping bill (not current session)", bill=title, jurisdiction=jurisdiction_code)
+                result.skipped_not_current += 1
+                logger.info(
+                    "Skipping bill (not current session)",
+                    bill=title,
+                    webflow_id=webflow_id,
+                    jurisdiction=jurisdiction_code,
+                    session_year=session_year,
+                    session_code=session_code,
+                )
                 continue
 
             # Check if we should sync this jurisdiction today
             if not sync_service.should_sync_jurisdiction(jurisdiction_code):
                 result.skipped += 1
-                logger.debug("Skipping bill (jurisdiction not scheduled today)", bill=title, jurisdiction=jurisdiction_code)
+                result.skipped_jurisdiction += 1
+                logger.info(
+                    "Skipping bill (jurisdiction not scheduled today)",
+                    bill=title,
+                    jurisdiction=jurisdiction_code,
+                )
                 continue
 
             # Respect max_updates_per_run
             if max_updates > 0 and updates_this_run >= max_updates:
                 result.skipped += 1
-                logger.debug("Skipping bill (max updates reached)", bill=title, max_updates=max_updates)
+                logger.info("Skipping bill (max updates reached)", bill=title, max_updates=max_updates)
                 continue
 
             # Apply rate limiting
@@ -701,13 +761,17 @@ class BillVersionSyncService:
                         result.status_updates += 1
                     if check_result.webflow_patch_skipped:
                         result.webflow_skipped += 1
+                    if not check_result.webflow_updated and not check_result.webflow_patch_skipped:
+                        result.webflow_patch_failures += 1
                     updates_this_run += 1
                     logger.info(
                         "Bill version updated",
                         bill=title,
+                        webflow_id=webflow_id,
                         version=check_result.version_note,
                         date=check_result.version_date,
                         chunks=check_result.chunks_created,
+                        webflow_updated=check_result.webflow_updated,
                         status_updated=check_result.status_updated,
                     )
                 elif check_result.status == "unchanged":
@@ -716,16 +780,24 @@ class BillVersionSyncService:
                         result.status_updates += 1
                     if check_result.webflow_patch_skipped:
                         result.webflow_skipped += 1
-                    logger.debug(
+                    # Detect silent failures: not updated AND not skipped = PATCH failed or no action
+                    if not check_result.status_updated and not check_result.webflow_patch_skipped:
+                        result.webflow_patch_failures += 1
+                    logger.info(
                         "Bill version unchanged",
                         bill=title,
+                        webflow_id=webflow_id,
                         version=check_result.version_note,
                         status_updated=check_result.status_updated,
                         patch_skipped=check_result.webflow_patch_skipped,
                     )
                 elif check_result.status == "no_versions":
                     result.no_versions += 1
-                    logger.debug("Bill has no versions in OpenStates", bill=title)
+                    logger.warning(
+                        "Bill has no versions in OpenStates",
+                        bill=title,
+                        webflow_id=webflow_id,
+                    )
                 elif check_result.status == "error":
                     result.failed += 1
                     if check_result.error:
@@ -762,11 +834,17 @@ class BillVersionSyncService:
             unchanged=result.unchanged,
             no_versions=result.no_versions,
             skipped=result.skipped,
+            skipped_no_url=result.skipped_no_url,
+            skipped_not_current=result.skipped_not_current,
+            skipped_jurisdiction=result.skipped_jurisdiction,
             failed=result.failed,
             chunks_created=result.chunks_created,
             webflow_updates=result.webflow_updates,
             status_updates=result.status_updates,
             webflow_skipped=result.webflow_skipped,
+            webflow_patch_failures=result.webflow_patch_failures,
+            no_latest_action=result.no_latest_action,
+            errors=result.errors[:10] if result.errors else [],
         )
 
         return result
