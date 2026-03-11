@@ -5,6 +5,7 @@ Provides start and end dates for state legislative sessions based on state code 
 Calculates actual Monday start dates and Friday end dates.
 """
 
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -888,9 +889,20 @@ class StateLegislativeCalendar:
         for session in sessions:
             start = self._parse_date_str(session.get("start_date"))
             end = self._parse_date_str(session.get("end_date"))
+            identifier = session.get("identifier", "")
+
             if start and start <= check_date:
+                # If end_date is missing or in the future, session is active
                 if end is None or check_date <= end:
                     return True
+                # If end_date has passed but the session identifier spans
+                # the current year (e.g. "2025-2026"), OpenStates likely
+                # has a stale end_date — treat as still active
+                years = re.findall(r"\d{4}", identifier)
+                if years:
+                    int_years = [int(y) for y in years]
+                    if len(int_years) > 1 and int_years[0] <= check_date.year <= int_years[-1]:
+                        return True
         return False  # Had live data, no active session
 
     def _parse_date_str(self, date_str: str | None) -> date | None:
