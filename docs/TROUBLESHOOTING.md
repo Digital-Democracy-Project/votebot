@@ -28,6 +28,8 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Sync Task Status Returns 404 in Multi-Worker Deployment](#sync-task-status-returns-404-in-multi-worker-deployment)
 - [Chat Widget Truncated on Mobile (Send Button Cut Off)](#chat-widget-truncated-on-mobile-send-button-cut-off)
 - [Production Query Monitoring](#production-query-monitoring)
+- [DDP-Sync Issues](#ddp-sync-issues)
+  - [Redis Health Check Error](#redis-health-check-error-redisstore-object-has-no-attribute-_redis)
 - [Batch Sync Worker Killed Mid-Flight](#batch-sync-worker-killed-mid-flight)
   - [Sync Progress Reporting & Checkpoint/Resume](#sync-progress-reporting--checkpointresume-feb-2026-fix)
 - [Scheduler Stops After Leader Worker Death](#scheduler-stops-after-leader-worker-death)
@@ -3370,6 +3372,29 @@ sudo journalctl -u votebot --since "1 day ago" --no-pager | grep "no versions in
 
 - `updates/bill_version_sync.py` — All skip/failure logging promoted from debug to info/warning; new batch counters
 - `updates/scheduler.py` — Completion log includes new counters; warns on PATCH failures
+
+---
+
+## DDP-Sync Issues
+
+> **Note:** Sync and data pipelines have moved from VoteBot to ddp-sync (a separate service on port 8001). Check ddp-sync logs for sync-related issues: `sudo journalctl -u ddp-sync -n 100 --no-pager`
+
+### Redis Health Check Error: `'RedisStore' object has no attribute '_redis'`
+
+**Discovered:** 2026-03-11 during Phase 7 deployment
+
+**Symptom:** The `/ddp-sync/v1/health` endpoint returns `"redis": "error: 'RedisStore' object has no attribute '_redis'"`. All other health fields (scheduler, pinecone) report correctly.
+
+**Impact:** Low — cosmetic only. Redis connections work correctly for actual sync operations (bill version cache, active jurisdictions, sync task state). The error is only in the health check response.
+
+**Root cause:** The `RedisStore` health check method accesses `self._redis` before it has been initialized. The lazy initialization pattern creates the Redis client on first actual use, but the health check runs before any sync operation triggers that initialization.
+
+**Status:** Open — fix pending. The health check should either trigger initialization or handle the missing attribute gracefully.
+
+**Workaround:** Verify Redis is working independently:
+```bash
+redis-cli ping  # Should return PONG
+```
 
 ---
 
