@@ -888,8 +888,9 @@ class StateLegislativeCalendar:
         for session in sessions:
             start = self._parse_date_str(session.get("start_date"))
             end = self._parse_date_str(session.get("end_date"))
-            if start and end and start <= check_date <= end:
-                return True
+            if start and start <= check_date:
+                if end is None or check_date <= end:
+                    return True
         return False  # Had live data, no active session
 
     def _parse_date_str(self, date_str: str | None) -> date | None:
