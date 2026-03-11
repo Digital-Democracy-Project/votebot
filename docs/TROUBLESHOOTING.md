@@ -3379,22 +3379,12 @@ sudo journalctl -u votebot --since "1 day ago" --no-pager | grep "no versions in
 
 > **Note:** Sync and data pipelines have moved from VoteBot to ddp-sync (a separate service on port 8001). Check ddp-sync logs for sync-related issues: `sudo journalctl -u ddp-sync -n 100 --no-pager`
 
-### Redis Health Check Error: `'RedisStore' object has no attribute '_redis'`
+### Redis Health Check Error: `'RedisStore' object has no attribute '_redis'` — FIXED
 
 **Discovered:** 2026-03-11 during Phase 7 deployment
+**Fixed:** 2026-03-11 (commit `8a15de9`)
 
-**Symptom:** The `/ddp-sync/v1/health` endpoint returns `"redis": "error: 'RedisStore' object has no attribute '_redis'"`. All other health fields (scheduler, pinecone) report correctly.
-
-**Impact:** Low — cosmetic only. Redis connections work correctly for actual sync operations (bill version cache, active jurisdictions, sync task state). The error is only in the health check response.
-
-**Root cause:** The `RedisStore` health check method accesses `self._redis` before it has been initialized. The lazy initialization pattern creates the Redis client on first actual use, but the health check runs before any sync operation triggers that initialization.
-
-**Status:** Open — fix pending. The health check should either trigger initialization or handle the missing attribute gracefully.
-
-**Workaround:** Verify Redis is working independently:
-```bash
-redis-cli ping  # Should return PONG
-```
+**Root cause:** The health check and zombie watchdog in ddp-sync accessed `store._redis` but the `RedisStore` attribute is `_client`. Also fixed: `VectorStoreService` eagerly created a Pinecone client in `__init__`, crashing on startup without `PINECONE_API_KEY`. Changed to lazy initialization.
 
 ---
 
