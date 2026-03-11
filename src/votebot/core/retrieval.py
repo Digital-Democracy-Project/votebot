@@ -20,7 +20,7 @@ def _get_federal_cache():
     """Get the federal legislator cache (lazy loaded)."""
     global _federal_cache
     if _federal_cache is None:
-        from votebot.sync.federal_legislator_cache import get_federal_cache
+        from votebot.utils.federal_legislator_cache import get_federal_cache
         _federal_cache = get_federal_cache()
     return _federal_cache
 

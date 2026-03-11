@@ -101,9 +101,6 @@ class Settings(BaseSettings):
     query_log_enabled: bool = True
     query_log_dir: str = "logs/queries"
 
-    # Scheduler
-    scheduler_enabled: bool = False  # Set to true in production .env to activate
-
     # Slack Integration (for human handoff)
     slack_bot_token: SecretStr = Field(default=SecretStr(""))
     slack_app_token: SecretStr = Field(default=SecretStr(""))
