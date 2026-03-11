@@ -145,17 +145,11 @@ Each handler uses `IngestionPipeline` for the chunk -> embed -> upsert flow.
 - When a new sync request includes `resume_task_id`, checkpoints are copied from the old task to the new one (`RedisStore.copy_sync_checkpoints()`). The bill handler loads the checkpoint set and skips items already in it, counting them as processed+successful.
 - This allows a crashed batch sync to resume from where it left off instead of re-processing from scratch.
 
-**Sync scheduling** (`src/votebot/updates/scheduler.py` + `src/votebot/updates/bill_version_sync.py`):
-- `UpdateScheduler` (APScheduler) runs three scheduled jobs: daily bill version check, weekly legislator sync, monthly org sync. Started in `main.py` lifespan when `SCHEDULER_ENABLED=true`.
-- **Daily bill version check** (`BillVersionSyncService`): For each current-session bill, checks OpenStates `versions` array for newer amended versions. If a newer version is detected: re-ingests bill text (PDF or HTML) into Pinecone as `bill-text` (idempotent upsert), updates Webflow CMS `gov-url` via PATCH API. Version state cached in Redis (`votebot:bill_version:{webflow_id}`, 90-day TTL). Configurable: `max_updates_per_run` (0 = unlimited, safe with per-bill gc + incremental embedding), `skip_webflow_update` (default false).
-- **Multi-worker safety**: Redis-based leader election (`votebot:scheduler:leader` key, 5-min TTL) ensures only one uvicorn worker runs the scheduler. The leader refreshes the lock every 2 minutes. If the leader dies, followers attempt re-election every 60 seconds — when the lock expires, a follower acquires it and promotes itself to leader, starting the scheduler. Falls back to always-run if Redis unavailable.
-- `StateLegislativeCalendar` (`src/votebot/utils/legislative_calendar.py`) determines whether a state is in-session, which controls bill sync frequency: **daily** during session, **weekly** (Mondays) off-session.
-- Before each bill version check run, the calendar is warmed with **live session dates** from the OpenStates API (via `OpenStatesSource.fetch_jurisdiction()`), with hardcoded heuristics as fallback.
-- **Auto jurisdiction resolution**: `resolve_jurisdiction_code(jurisdiction_id, openstates_url)` checks `JURISDICTION_MAP` first, then falls back to parsing the OpenStates URL. New states are auto-tracked in Redis (`votebot:active_jurisdictions` set).
-- Configuration: `config/sync_schedule.yaml`
+**Sync scheduling**: Scheduled sync jobs (daily bill version checks, weekly legislator sync, monthly org sync, Voatz→Brevo sync, Webflow CMS batch jobs) are handled by [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync), a standalone service on port 8001. VoteBot no longer runs a scheduler — it is a chat-only service. DDP-Sync uses the same ingestion pipeline and sync handler code.
 
 **Sync is triggered via:**
-- `POST /votebot/v1/sync/unified` (API endpoint, returns `task_id` for polling; supports `resume_task_id` to continue after crash)
+- DDP-Sync scheduled jobs (automatic, production)
+- `POST /votebot/v1/sync/unified` (API endpoint for on-demand sync)
 - CLI scripts in `scripts/` (e.g., `sync_bills.py`, `sync_legislators.py`)
 
 ---

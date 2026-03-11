@@ -23,7 +23,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Production Query Monitoring**: All production queries and responses are logged to date-partitioned JSONL files for offline evaluation against ground truth
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
-- **Automated Sync Scheduling**: Daily bill version checks (detects newer amended PDFs/HTML, re-ingests text and updates Webflow CMS `gov-url`, `status`, `status-date`), weekly legislator sync, monthly org sync — with Redis leader election for multi-worker safety
+- **Data Sync**: Content ingestion pipeline (bills, legislators, orgs) with sync handlers and CLI scripts. Scheduled sync jobs run via [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync)
 - **High Performance**: Designed for 1000+ concurrent conversations
 
 ## Tech Stack
@@ -88,7 +88,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `PINECONE_NAMESPACE` | Pinecone namespace (default: default) | No |
 | `API_KEY` | API key for authentication | Yes |
 | `WEBFLOW_VOTEBOT_API_KEY` | Webflow CMS API key (read-only, used at query time) | For sync |
-| `WEBFLOW_SCHEDULER_API_KEY` | Webflow CMS API key with CMS:write scope (used by scheduler for gov-url updates) | For scheduler |
+| `WEBFLOW_SCHEDULER_API_KEY` | Webflow CMS API key with CMS:write scope (used by DDP-Sync for gov-url updates) | For sync |
 | `WEBFLOW_BILLS_COLLECTION_ID` | Webflow bills collection | For sync |
 | `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection | For sync |
 | `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection | For sync |
@@ -101,7 +101,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `SLACK_SUPPORT_CHANNEL` | Slack channel for support | For handoff |
 | `QUERY_LOG_ENABLED` | Enable production query logging (default: true) | No |
 | `QUERY_LOG_DIR` | Directory for JSONL query logs (default: logs/queries) | No |
-| `SCHEDULER_ENABLED` | Enable automated sync scheduler (default: false) | For production |
+| `SCHEDULER_ENABLED` | *Deprecated* — sync scheduling has moved to [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) | No |
 | `SIMILARITY_THRESHOLD` | RAG similarity threshold (default: 0.1) | No |
 
 ## API Endpoints
@@ -194,13 +194,13 @@ curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=htt
 
 ### Unified Sync API
 
+> **Note**: In production, sync operations are handled by [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) on port 8001. DDP-API proxies `/votebot/sync/*` and `/votebot/trigger/*` to DDP-Sync automatically. The endpoints below are VoteBot's local sync API, used by DDP-Sync internally and for local development.
+
 ```
 POST /votebot/v1/sync/unified
 ```
 
 Sync content to the vector store. Supports bills, legislators, organizations, webpages, and training documents.
-
-> **Proxy note**: In production, requests go through the DDP-API proxy on port 5000, which strips `/v1` from the path. External callers (e.g., Postman) use `POST https://api.digitaldemocracyproject.org/votebot/sync/unified`. The DDP-API re-authenticates to VoteBot internally. See [DDP-API](https://github.com/VotingRightsBrigade/DDP-API) for the full endpoint map.
 
 **Request Body (single item):**
 ```json
@@ -617,38 +617,17 @@ python scripts/sync.py clear --confirm
 
 ### Sync Progress & Resume
 
-**Live progress reporting**: During batch sync, the status endpoint (`GET /sync/unified/status/{task_id}`) returns real-time counts while the sync is running. Progress updates are written to the in-memory task dict after every item and flushed to Redis every 10 items. A `last_heartbeat` timestamp is updated on every progress callback for zombie detection.
+> **In production, sync operations are managed by [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync).** The progress/resume features below apply to the local sync API.
 
-**Automatic resume (zombie watchdog)**: The leader worker polls Redis every 30 minutes for sync tasks with stale heartbeats (>5 minutes). If a worker was OOM-killed mid-sync, the watchdog automatically marks the old task as failed, copies checkpoints to a new task, and launches a resume sync. This eliminates the need for manual intervention after crashes. Tasks are retried up to 3 times before being marked as `permanently_failed`.
+**Live progress reporting**: During batch sync, the status endpoint (`GET /sync/unified/status/{task_id}`) returns real-time counts while the sync is running.
 
-**Manual resume**: If needed, you can also manually resume a crashed sync with `resume_task_id`:
+**Manual resume**: Resume a crashed sync with `resume_task_id`:
 
 ```bash
-# Original sync (crashes at bill 47 of 150)
-curl -X POST -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"content_type": "bill", "mode": "batch"}' \
-  https://api.digitaldemocracyproject.org/votebot/sync/unified
-# Returns task_id: "abc-123"
-
-# Manual resume — skips the 47 already-checkpointed bills
 curl -X POST -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"content_type": "bill", "mode": "batch", "resume_task_id": "abc-123"}' \
   https://api.digitaldemocracyproject.org/votebot/sync/unified
-# Returns new task_id: "def-456", starts from bill 48
-```
-
-**Verification:**
-```bash
-# Check live progress
-redis-cli GET "votebot:sync:task:<task_id>" | python -m json.tool
-
-# Check checkpoint count
-redis-cli SCARD "votebot:sync:checkpoint:<task_id>"
-
-# Check heartbeat and retry count
-redis-cli GET "votebot:sync:task:<task_id>" | python -m json.tool | grep -E "last_heartbeat|retry_count|status"
 ```
 
 ### Legacy Scripts
@@ -660,48 +639,19 @@ python scripts/seed_data.py
 
 ### Sync Scheduling
 
-VoteBot uses an automated sync scheduler to keep content fresh. Enable it by setting `SCHEDULER_ENABLED=true` in the environment. In multi-worker deployments, only one worker runs the scheduler (Redis-based leader election).
+> **Sync scheduling has moved to [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync).** DDP-Sync runs as a standalone service on port 8001, handling all scheduled and on-demand sync operations. VoteBot no longer runs a scheduler — it is a chat-only service.
 
-**Schedule:**
+**Schedule (managed by DDP-Sync):**
 
-| Content | Frequency | Time (UTC) | Details |
-|---------|-----------|------------|---------|
-| **Bill versions** | Daily | 04:00 | Checks OpenStates for newer amended versions (Engrossed, Enrolled, etc.), re-ingests bill text (PDF or HTML) into Pinecone, updates Webflow CMS `gov-url`, `status`, and `status-date` |
-| **Legislators** | Weekly | 06:00 Sunday | Sponsored bills + voting records, date-based rotation (200/run) |
-| **Organizations** | Monthly | 08:00 1st | Full re-ingest of org profiles from Webflow CMS |
-| **Content poll** | Hourly | — | Congress/OpenStates change detection |
+| Content | Frequency | Time (UTC) |
+|---------|-----------|------------|
+| Bill versions | Daily | 04:00 |
+| Legislators | Weekly | 06:00 Sunday |
+| Organizations | Monthly | 08:00 1st |
+| Voatz → Brevo user sync | Every 30 min | — |
+| Webflow CMS batch jobs | Weekly | 03:00 Monday |
 
-**Bill version checking** (`BillVersionSyncService` in `src/votebot/updates/bill_version_sync.py`):
-
-For each current-session bill, the daily job:
-1. Fetches the bill from OpenStates API (includes `versions` array with dated entries and PDF/HTML links)
-2. Compares the latest version against a Redis cache per bill (`votebot:bill_version:{webflow_id}`, 90-day TTL)
-3. If a newer version is detected (new date, different note like "Engrossed", or changed URL):
-   - Downloads bill text (PDF via `WebflowSource._process_bill_pdf()` or HTML via `_process_bill_html()`, based on OpenStates `media_type`)
-   - Re-ingests into Pinecone as `bill-text` documents (idempotent upsert overwrites old chunks)
-   - Updates Webflow CMS fields (`gov-url`, `status`, `status-date`) via `WebflowLookupService.update_bill_fields()` (single PATCH call)
-4. If version unchanged: still updates `status` and `status-date` in Webflow CMS if they differ from OpenStates (bill status can change without a new text version, e.g., committee vote)
-5. If CMS fields already match OpenStates: skips the Webflow PATCH entirely (rate limit optimization)
-
-Configuration in `config/sync_schedule.yaml`:
-- `bill_version_check.max_updates_per_run`: Limits re-ingestions per run (0 = unlimited). Safe to leave uncapped thanks to per-bill `gc.collect()` and incremental embedding.
-- `bill_version_check.skip_webflow_update`: Disables CMS writes for testing (default: false)
-
-> **Prerequisite**: Set `WEBFLOW_SCHEDULER_API_KEY` to a Webflow API token with `CMS:write` scope. This key is used only by the scheduler for `gov-url` updates. The main `WEBFLOW_VOTEBOT_API_KEY` remains read-only for query-time CMS lookups. If `WEBFLOW_SCHEDULER_API_KEY` is not set, the scheduler falls back to `WEBFLOW_VOTEBOT_API_KEY` (which will fail on writes unless it also has write scope).
-
-**Session detection** uses a two-tier approach:
-
-1. **Live data (preferred)**: Before each bill version check run, jurisdiction info is fetched from the OpenStates API (via `OpenStatesSource.fetch_jurisdiction()`) and warms `StateLegislativeCalendar` with real session start/end dates. Each state is fetched at most once per sync run.
-
-2. **Hardcoded fallback**: If the OpenStates API is unavailable or a state has no live data, the calendar falls back to hardcoded heuristics (start patterns + duration in weeks for all 50 states + DC).
-
-**Auto-tracking jurisdictions**: When a bill from a new state is synced, the system automatically detects the jurisdiction via `resolve_jurisdiction_code()` — which checks the `JURISDICTION_MAP` first, then falls back to parsing the bill's OpenStates URL (e.g., `https://openstates.org/ca/bills/...` → `CA`). Discovered jurisdictions are registered in Redis (`votebot:active_jurisdictions` set) for cross-worker visibility. No manual config changes are needed to add new states — just add bills from the new state to Webflow CMS and sync.
-
-**Multi-worker safety**: The scheduler uses a Redis-based leader lock (`votebot:scheduler:leader`, 5-min TTL, refreshed every 2 min). Only the leader worker runs scheduled jobs and the zombie sync watchdog. If the leader dies, another worker can acquire the lock via the follower re-election loop (every 60s). If Redis is unavailable, the scheduler starts anyway (single-worker fallback).
-
-**Zombie sync watchdog**: The leader worker runs a background loop that checks Redis every 30 minutes for sync tasks with stale heartbeats (>5 min since last update). Stale tasks are automatically resumed with checkpoint skip, up to 3 retries before permanent failure. This handles OOM kills during batch sync without manual intervention.
-
-Configuration is in `config/sync_schedule.yaml`. The `StateLegislativeCalendar` class is at `src/votebot/utils/legislative_calendar.py`.
+See [DDP-Sync README](https://github.com/Digital-Democracy-Project/ddp-sync) for full schedule, trigger endpoints, and configuration.
 
 ## Development
 
@@ -780,13 +730,8 @@ votebot/
 │   │   │   ├── webflow.py   # Webflow CMS
 │   │   │   └── pdf.py       # PDF extraction
 │   │   └── chunking.py      # Text chunking
-│   ├── utils/               # Utility modules
-│   │   └── legislative_calendar.py  # Session date lookup (live OpenStates + hardcoded fallback)
-│   └── updates/             # Real-time updates
-│       ├── scheduler.py     # Scheduled polling
-│       ├── bill_sync.py     # OpenStates bill sync (status, votes, actions)
-│       ├── bill_version_sync.py  # Daily bill version check (PDF/HTML re-ingestion + Webflow gov-url/status/status-date update)
-│       └── change_detection.py
+│   └── utils/               # Utility modules
+│       └── legislative_calendar.py  # Session date lookup (live OpenStates + hardcoded fallback)
 ├── scripts/
 │   ├── sync.py              # Unified sync CLI
 │   ├── seed_data.py         # Development data seeding
@@ -996,7 +941,7 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 - Production query monitoring (JSONL logging, offline evaluation)
 - Batch sync progress reporting and checkpoint/resume after worker crash
 - Large PDF memory management (incremental embed+upsert, gc per bill, page limit)
-- Zombie sync watchdog with automatic resume and retry limit
+- DDP-Sync issues (Redis health check, trigger endpoints)
 
 ## Contributing
 
