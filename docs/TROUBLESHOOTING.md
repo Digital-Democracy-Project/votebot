@@ -34,6 +34,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
   - [Sync Progress Reporting & Checkpoint/Resume](#sync-progress-reporting--checkpointresume-feb-2026-fix)
 - [Scheduler Stops After Leader Worker Death](#scheduler-stops-after-leader-worker-death)
 - [Bills With Empty Status Field in Webflow CMS](#bills-with-empty-status-field-in-webflow-cms)
+- [Nightly Bill Sync Skips Bills for Certain States](#nightly-bill-sync-skips-bills-for-certain-states)
 
 ---
 
@@ -652,7 +653,7 @@ The session for OpenStates queries is resolved through this chain:
 | Webflow Field | Resolve Response | WebSocket Accepts | Description |
 |---------------|------------------|-------------------|-------------|
 | `session-code` | `session` | `session` or `session-code` | OpenStates-friendly session (e.g., "119", "2025") |
-| `session-year` | (not used) | (not used) | Calendar year only - don't use for OpenStates |
+| `bill-session` | (not used) | (not used) | Calendar year (integer, e.g. `2026`) — not used for OpenStates session matching |
 | `jurisdiction` | `jurisdiction` | `jurisdiction` | State code or "US" for federal |
 | `slug` | `slug` | `slug` | URL slug for the bill |
 
@@ -3318,7 +3319,7 @@ There are five reasons a bill can be silently skipped during the daily version c
 
 1. **No OpenStates URL** — The bill's `open-states-url-2` field in Webflow CMS is empty. The version check silently skips it.
 
-2. **Not current session** — `is_current_session()` returns False because `session-year` doesn't include the current year. Bills with incorrect session metadata are permanently skipped.
+2. **Not current session** — `is_current_session()` returns False. This had multiple sub-bugs fixed in March 2026 (see [Nightly Bill Sync Skips Bills](#nightly-bill-sync-skips-bills-for-certain-states) below).
 
 3. **Jurisdiction not scheduled today** — `should_sync_jurisdiction()` returns False for states not in session on non-Mondays. These bills are only checked once a week.
 
@@ -3372,6 +3373,62 @@ sudo journalctl -u votebot --since "1 day ago" --no-pager | grep "no versions in
 
 - `updates/bill_version_sync.py` — All skip/failure logging promoted from debug to info/warning; new batch counters
 - `updates/scheduler.py` — Completion log includes new counters; warns on PATCH failures
+
+---
+
+## Nightly Bill Sync Skips Bills for Certain States
+
+### Symptom
+
+The daily bill version check skips all bills for certain states (WA, MI, UT, AZ, MA) with log message "Skipping bill (not current session)". Bills in those states never receive status or status-date updates.
+
+### Root Causes (Three Bugs) — All FIXED March 2026
+
+**Bug 1: OpenStates returns `end_date=None` for in-progress sessions (WA, UT)**
+
+`_check_live_sessions()` in `legislative_calendar.py` required both `start_date` and `end_date` to be non-None. Sessions that are still in progress have `end_date=None` in OpenStates, causing them to be treated as inactive.
+
+**Fix:** Treat sessions with `start_date <= today` and no `end_date` as active.
+
+**Bug 2: OpenStates returns stale `end_date` for multi-year sessions (MI)**
+
+Michigan's `2025-2026` session has `end_date=2025-12-31` in OpenStates (the end of the first year). In 2026, the date check fails even though the session identifier spans both years.
+
+**Fix:** When `end_date` has passed, parse years from the session identifier (e.g., `"2025-2026"` → `[2025, 2026]`). If the current year falls within that range, treat the session as active.
+
+**Bug 3: Non-standard session identifiers + wrong Webflow field name (AZ, MA)**
+
+Arizona uses `57th-2nd-regular` as its session identifier (no 4-digit year). The sync regex `is_current_session()` couldn't parse it. Additionally, the code read `fields.get("session-year", "")` but this Webflow field doesn't exist — the actual field is `bill-session` (returns integer, e.g., `2026`). This meant `session_year` was always empty string for **all states**, not just AZ.
+
+**Fix (two parts):**
+1. Switched from `is_current_session()` (sync, regex-only) to `is_current_session_async()` which queries the OpenStates API for the current session identifier and matches directly.
+2. Fixed the Webflow field name from `session-year` to `bill-session` with `str()` cast (Webflow returns integer).
+
+### Affected Files
+
+| File | Fix |
+|------|-----|
+| `votebot/utils/legislative_calendar.py` | `_check_live_sessions()` — null end_date + stale end_date |
+| `ddp-sync/services/legislative_calendar.py` | Same fix (ddp-sync has its own copy) |
+| `ddp-sync/pipelines/bill_version.py` | `is_current_session_async()` + `bill-session` field |
+| `ddp-sync/pipelines/bill_sync.py` | Same field fix + async session check |
+
+### Commits
+
+- `cf41609` / `eccf386` — Null end_date fix (votebot / ddp-sync)
+- `cbf49a8` / `d5e9eda` — Stale end_date for multi-year sessions (votebot / ddp-sync)
+- `13389cf` — Async session check for AZ (ddp-sync)
+- `f90795c` — Webflow field `session-year` → `bill-session` (ddp-sync)
+
+### Webflow CMS Bill Fields Reference
+
+| Webflow Field | Type | Example | Used For |
+|---------------|------|---------|----------|
+| `session-code` | string | `"2026"`, `"119"`, `"57th-2nd-regular"` | OpenStates session matching |
+| `bill-session` | integer | `2026` | Calendar year (heuristic fallback) |
+| `open-states-url-2` | string | `https://openstates.org/az/bills/57th-2nd-regular/SB1068/` | Jurisdiction + session extraction |
+
+> **Note:** There is no `session-year` field in Webflow CMS. Any code referencing `session-year` is reading a nonexistent field and getting empty string.
 
 ---
 
