@@ -3386,6 +3386,26 @@ sudo journalctl -u votebot --since "1 day ago" --no-pager | grep "no versions in
 
 **Root cause:** The health check and zombie watchdog in ddp-sync accessed `store._redis` but the `RedisStore` attribute is `_client`. Also fixed: `VectorStoreService` eagerly created a Pinecone client in `__init__`, crashing on startup without `PINECONE_API_KEY`. Changed to lazy initialization.
 
+### Pinecone Crashes on Startup Without API Key — FIXED
+
+**Discovered:** 2026-03-11 during local development testing
+**Fixed:** 2026-03-11 (same commit as above)
+
+**Root cause:** `VectorStoreService.__init__` called `Pinecone(api_key="")` which raises `PineconeConfigurationError`. Fixed by making the Pinecone client a lazy `@property` — only created on first use, not at import time.
+
+### Scheduler Shows 0 Jobs (Config Not Found) — FIXED
+
+**Discovered:** 2026-03-11 during local development testing
+**Fixed:** 2026-03-11 (commit `8a15de9`)
+
+**Root cause:** Non-editable pip install (`pip install .`) resolves `Path(__file__).parent.parent.parent` to `site-packages/`, not the repo root. Fixed by adding a CWD fallback: checks both the package-relative path and `Path.cwd() / "config" / "sync_schedule.yaml"`.
+
+### Python 3.13 Editable Install Fails on macOS
+
+**Symptom:** `pip install -e .` succeeds but `import ddp_sync` fails. Venv created with Homebrew Python 3.13 doesn't process `.pth` files correctly for editable installs.
+
+**Workaround:** Use non-editable install: `pip install .` (requires reinstall after each code change).
+
 ---
 
 ## Getting Help
@@ -3395,4 +3415,4 @@ If these troubleshooting steps don't resolve your issue:
 1. Check the application logs for errors
 2. Review recent changes to sync code or data sources
 3. Test with a minimal reproducible example
-4. File an issue at https://github.com/VotingRightsBrigade/votebot/issues
+4. File an issue at https://github.com/Digital-Democracy-Project/votebot/issues
