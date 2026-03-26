@@ -276,6 +276,8 @@ def load_log_entries(
     start_date: datetime,
     end_date: datetime,
     jurisdiction: str | None = None,
+    visitor: str | None = None,
+    event_type: str | None = None,
 ) -> list[dict]:
     """Load log entries from date-partitioned JSONL files."""
     log_path = Path(log_dir)
@@ -299,10 +301,21 @@ def load_log_entries(
                     if entry.get("human_active"):
                         continue
 
+                    # Filter by event_type if specified
+                    if event_type:
+                        entry_event = entry.get("event_type", "query_processed")
+                        if entry_event != event_type:
+                            continue
+
                     # Filter by jurisdiction if specified
                     if jurisdiction:
                         entry_jurisdiction = entry.get("page_context", {}).get("jurisdiction", "")
                         if entry_jurisdiction and entry_jurisdiction.upper() != jurisdiction.upper():
+                            continue
+
+                    # Filter by visitor if specified
+                    if visitor:
+                        if entry.get("visitor_id") != visitor:
                             continue
 
                     entries.append(entry)
@@ -315,6 +328,141 @@ def load_log_entries(
 # Main evaluation
 # ---------------------------------------------------------------------------
 
+def _print_analytics_report(entries: list[dict], verbose: bool = False) -> None:
+    """Print analytics metrics from structured event log entries.
+
+    This is a reporting layer over logs, not the source of truth —
+    all core metric definitions live in the logger and agent code.
+    """
+    # Separate event types
+    query_events = [e for e in entries if e.get("event_type", "query_processed") == "query_processed"]
+    conversation_events = [e for e in entries if e.get("event_type") == "conversation_ended"]
+    total = len(query_events)
+
+    if total == 0:
+        return
+
+    print(f"\n{'='*70}")
+    print("ANALYTICS REPORT")
+    print(f"{'='*70}")
+
+    # --- Unique Visitors ---
+    visitor_ids = {e.get("visitor_id") for e in query_events if e.get("visitor_id")}
+    print(f"\n--- Visitor Metrics ---")
+    print(f"  Unique visitors: {len(visitor_ids)}")
+    if visitor_ids:
+        queries_per_visitor = total / len(visitor_ids)
+        print(f"  Avg queries per visitor: {queries_per_visitor:.1f}")
+
+    # --- Success Tiers ---
+    system_ok = [e for e in query_events if not e.get("error") and not e.get("handoff_triggered")]
+    citation_grounded = [e for e in query_events
+                         if e.get("retrieval_count", 0) > 0 and e.get("has_citations")]
+    heuristic_ok = [e for e in query_events
+                    if e.get("confidence", 0) >= 0.5
+                    and not e.get("fallback_used")
+                    and not e.get("handoff_triggered")
+                    and e.get("has_citations")]
+
+    print(f"\n--- Success Tiers ({total} queries) ---")
+    print(f"  System success: {len(system_ok)} ({len(system_ok)/total*100:.1f}%)")
+    print(f"  Citation-grounded success: {len(citation_grounded)} ({len(citation_grounded)/total*100:.1f}%)")
+    print(f"  Heuristic answer success: {len(heuristic_ok)} ({len(heuristic_ok)/total*100:.1f}%)")
+
+    # --- Intent Distribution ---
+    intent_counts: dict[str, int] = {}
+    sub_intent_counts: dict[str, int] = {}
+    for e in query_events:
+        pi = e.get("primary_intent")
+        si = e.get("sub_intent")
+        if pi:
+            intent_counts[pi] = intent_counts.get(pi, 0) + 1
+        if si and si != "unknown":
+            sub_intent_counts[f"{pi}.{si}"] = sub_intent_counts.get(f"{pi}.{si}", 0) + 1
+
+    if intent_counts:
+        print(f"\n--- Intent Distribution ---")
+        for intent, count in sorted(intent_counts.items(), key=lambda x: -x[1]):
+            print(f"  {intent}: {count} ({count/total*100:.1f}%)")
+        if verbose and sub_intent_counts:
+            print(f"  Sub-intents:")
+            for si, count in sorted(sub_intent_counts.items(), key=lambda x: -x[1])[:15]:
+                print(f"    {si}: {count}")
+
+    # --- Fallback & Web Search ---
+    fallback_entries = [e for e in query_events if e.get("fallback_used")]
+    web_search_entries = [e for e in query_events if e.get("web_search_used")]
+    print(f"\n--- Fallback & Web Search ---")
+    print(f"  Fallback rate: {len(fallback_entries)} ({len(fallback_entries)/total*100:.1f}%)")
+    print(f"  Web search rate: {len(web_search_entries)} ({len(web_search_entries)/total*100:.1f}%)")
+    if fallback_entries:
+        reasons: dict[str, int] = {}
+        for e in fallback_entries:
+            r = e.get("fallback_reason", "unknown")
+            reasons[r] = reasons.get(r, 0) + 1
+        for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
+            print(f"    {reason}: {count}")
+
+    # --- Retrieval Miss ---
+    retrieval_miss = [e for e in query_events if e.get("retrieval_count", 0) == 0]
+    print(f"  Retrieval miss rate: {len(retrieval_miss)} ({len(retrieval_miss)/total*100:.1f}%)")
+
+    # --- Grounding Distribution ---
+    grounding_counts: dict[str, int] = {}
+    for e in query_events:
+        gs = e.get("grounding_status")
+        if gs:
+            grounding_counts[gs] = grounding_counts.get(gs, 0) + 1
+    if grounding_counts:
+        print(f"\n--- Grounding Distribution ---")
+        for status, count in sorted(grounding_counts.items(), key=lambda x: -x[1]):
+            print(f"  {status}: {count} ({count/total*100:.1f}%)")
+
+    # --- Handoff Rates (multi-level) ---
+    query_handoffs = [e for e in query_events if e.get("handoff_triggered")]
+    print(f"\n--- Handoff Rates ---")
+    print(f"  Query handoff rate: {len(query_handoffs)} ({len(query_handoffs)/total*100:.1f}%)")
+
+    session_ids = {e.get("session_id") for e in query_events if e.get("session_id")}
+    sessions_with_handoff = {e.get("session_id") for e in query_handoffs if e.get("session_id")}
+    if session_ids:
+        print(f"  Session handoff rate: {len(sessions_with_handoff)}/{len(session_ids)} "
+              f"({len(sessions_with_handoff)/len(session_ids)*100:.1f}%)")
+
+    # --- Conversation Metrics (from conversation_ended events) ---
+    if conversation_events:
+        turn_counts = [e.get("turn_count", 0) for e in conversation_events]
+        durations = [e.get("duration_seconds", 0) for e in conversation_events]
+        single_turn = [e for e in conversation_events if e.get("turn_count", 0) == 1]
+
+        print(f"\n--- Conversation Metrics ({len(conversation_events)} conversations) ---")
+        if turn_counts:
+            print(f"  Avg turns per conversation: {sum(turn_counts)/len(turn_counts):.1f}")
+        print(f"  Drop-off rate (1 turn): {len(single_turn)} ({len(single_turn)/len(conversation_events)*100:.1f}%)")
+        if durations:
+            print(f"  Avg duration: {sum(durations)/len(durations):.0f}s")
+
+        # Terminal state distribution
+        terminal_counts: dict[str, int] = {}
+        for e in conversation_events:
+            ts = e.get("terminal_state", "unknown")
+            terminal_counts[ts] = terminal_counts.get(ts, 0) + 1
+        print(f"  Terminal states:")
+        for state, count in sorted(terminal_counts.items(), key=lambda x: -x[1]):
+            print(f"    {state}: {count}")
+
+    # --- Device Distribution ---
+    device_counts: dict[str, int] = {}
+    for e in query_events:
+        dt = e.get("device_type")
+        if dt:
+            device_counts[dt] = device_counts.get(dt, 0) + 1
+    if device_counts:
+        print(f"\n--- Device Distribution ---")
+        for device, count in sorted(device_counts.items(), key=lambda x: -x[1]):
+            print(f"  {device}: {count} ({count/total*100:.1f}%)")
+
+
 async def evaluate(
     log_dir: str,
     start_date: datetime,
@@ -322,12 +470,17 @@ async def evaluate(
     jurisdiction: str | None = None,
     verbose: bool = False,
     output: str | None = None,
+    visitor: str | None = None,
+    event_type: str | None = None,
 ) -> TestReport:
     """Run offline evaluation against ground truth."""
     # Load log entries
     print(f"Loading query logs from {log_dir}...")
     print(f"  Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-    entries = load_log_entries(log_dir, start_date, end_date, jurisdiction)
+    entries = load_log_entries(
+        log_dir, start_date, end_date, jurisdiction,
+        visitor=visitor, event_type=event_type,
+    )
     print(f"  Loaded {len(entries)} entries")
 
     if not entries:
@@ -424,6 +577,9 @@ async def evaluate(
     # Print the standard report
     print_report(report, verbose=verbose)
 
+    # Print analytics report (for entries with structured event fields)
+    _print_analytics_report(entries, verbose=verbose)
+
     # Save to JSON if output path specified
     output_path = output or f"eval_report_{start_date.strftime('%Y-%m-%d')}.json"
     save_report(report, output_path)
@@ -471,6 +627,18 @@ def parse_args():
         action="store_true",
         help="Show detailed failure information.",
     )
+    parser.add_argument(
+        "--visitor",
+        type=str,
+        default=None,
+        help="Filter to a specific visitor_id.",
+    )
+    parser.add_argument(
+        "--event-type",
+        type=str,
+        default=None,
+        help="Filter by event type (e.g., query_processed, conversation_ended).",
+    )
     return parser.parse_args()
 
 
@@ -492,6 +660,8 @@ def main():
             jurisdiction=args.jurisdiction,
             verbose=args.verbose,
             output=args.output,
+            visitor=args.visitor,
+            event_type=args.event_type,
         )
     )
 

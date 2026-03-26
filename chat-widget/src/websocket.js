@@ -16,6 +16,28 @@ const DDPWebSocket = (function() {
 
     // SessionStorage persistence — scoped to browser tab, cleared on tab close
     const STORAGE_PREFIX = 'ddp_votebot_';
+
+    // localStorage for cross-session visitor identity (distinct from sessionStorage session_id)
+    const VISITOR_KEY = 'ddp_votebot_visitor_id';
+
+    function _getOrCreateVisitorId() {
+        try {
+            var vid = localStorage.getItem(VISITOR_KEY);
+            if (!vid) {
+                // crypto.randomUUID may not be available in all browsers
+                if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                    vid = 'v_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+                } else {
+                    // Fallback: generate a random hex string
+                    vid = 'v_' + Math.random().toString(16).slice(2, 14);
+                }
+                localStorage.setItem(VISITOR_KEY, vid);
+            }
+            return vid;
+        } catch (e) {
+            return null; // Private browsing or storage disabled
+        }
+    }
     const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
     function _storageGet(key) {
@@ -202,6 +224,7 @@ const DDPWebSocket = (function() {
         send: send,
         isConnected: isConnected,
         getSessionId: getSessionId,
+        getVisitorId: _getOrCreateVisitorId,
         disconnect: disconnect,
         storageGet: _storageGet,
         storageSet: _storageSet,

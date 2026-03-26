@@ -67,7 +67,7 @@ class ClientMetadata(BaseModel):
 
     client_id: str | None = Field(
         None,
-        description="Client application identifier",
+        description="Client/visitor identifier (maps to visitor_id in analytics)",
     )
     client_version: str | None = Field(
         None,
@@ -80,6 +80,14 @@ class ClientMetadata(BaseModel):
     platform: str | None = Field(
         None,
         description="Platform identifier (e.g., 'brevo', 'web', 'mobile')",
+    )
+    entry_referrer: str | None = Field(
+        None,
+        description="Referring domain (session-entry context, first message only)",
+    )
+    page_url: str | None = Field(
+        None,
+        description="Full URL of the current page",
     )
 
 

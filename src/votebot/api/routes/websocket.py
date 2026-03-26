@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 import uuid
+from collections import Counter
 from typing import Dict, Optional
 
 import structlog
@@ -17,6 +18,9 @@ from votebot.services.slack import get_slack_service, SlackService
 
 logger = structlog.get_logger()
 router = APIRouter()
+
+# Conversation boundary: inactivity timeout in seconds
+_CONVERSATION_INACTIVITY_TIMEOUT = 600  # 10 minutes
 
 # Session store - uses Redis in production via RedisSessionStore
 # Falls back to in-memory dict for development
@@ -66,6 +70,21 @@ class ConnectionManager:
                 "handoff_active": False,
                 "slack_thread_ts": None,
                 "page_context": {"type": "general"},
+                # Analytics: conversation tracking
+                "visitor_id": None,
+                "conversation_counter": 0,
+                "conversation_message_counter": 0,
+                "session_message_counter": 0,
+                "last_message_time": None,
+                "last_page_context_type": None,
+                "last_page_context_id": None,
+                "conversation_has_response": False,
+                "conversation_start_time": None,
+                "conversation_intents": [],
+                "conversation_had_handoff": False,
+                "conversation_had_fallback": False,
+                "conversation_had_retrieval_miss": False,
+                "entry_referrer": None,
             }
 
         # Start Slack service on first connection
@@ -314,6 +333,139 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _get_conversation_id(session_id: str, counter: int) -> str:
+    """Build conversation_id from session_id and counter."""
+    return f"{session_id}:{counter}"
+
+
+def _check_conversation_boundary(session: dict, page_context_data: dict) -> bool:
+    """Check if a new conversation should start.
+
+    Boundary evaluation happens BEFORE message_received is emitted,
+    so each message is logged against its final assigned conversation_id.
+
+    Returns True if a new conversation should be started.
+    """
+    # Rule 1: Explicit reset handled elsewhere (new session)
+
+    # Rule 2: Inactivity timeout
+    last_time = session.get("last_message_time")
+    if last_time and (time.time() - last_time) > _CONVERSATION_INACTIVITY_TIMEOUT:
+        return True
+
+    # Rule 3: Page type changed
+    new_type = page_context_data.get("type", "general")
+    old_type = session.get("last_page_context_type")
+    if old_type and old_type != new_type:
+        return True
+
+    # Rule 4: Page ID changed within same type (only if previous conversation had a response)
+    if old_type and old_type == new_type and new_type != "general":
+        new_id = page_context_data.get("slug") or page_context_data.get("webflow_id") or page_context_data.get("id")
+        old_id = session.get("last_page_context_id")
+        if old_id and new_id and old_id != new_id and session.get("conversation_has_response"):
+            return True
+
+    return False
+
+
+async def _emit_conversation_ended(session_id: str, session: dict) -> None:
+    """Emit a conversation_ended event for the current conversation."""
+    try:
+        from votebot.services.query_logger import get_query_logger
+
+        query_logger = get_query_logger()
+        if query_logger is None:
+            return
+
+        # Determine terminal state
+        terminal_state = "navigated"  # Default for boundary detection
+
+        # Determine dominant intent
+        intents = session.get("conversation_intents", [])
+        dominant = None
+        if intents:
+            counts = Counter(intents)
+            dominant = counts.most_common(1)[0][0]
+
+        start_time = session.get("conversation_start_time")
+        duration = int(time.time() - start_time) if start_time else 0
+
+        conv_id = _get_conversation_id(session_id, session.get("conversation_counter", 0))
+
+        asyncio.create_task(
+            query_logger.log_event(
+                event_type="conversation_ended",
+                visitor_id=session.get("visitor_id"),
+                session_id=session_id,
+                conversation_id=conv_id,
+                turn_count=session.get("conversation_message_counter", 0),
+                duration_seconds=duration,
+                handoff_occurred=session.get("conversation_had_handoff", False),
+                fallback_occurred=session.get("conversation_had_fallback", False),
+                retrieval_miss_occurred=session.get("conversation_had_retrieval_miss", False),
+                terminal_state=terminal_state,
+                primary_intents_seen=list(set(intents)),
+                dominant_primary_intent=dominant,
+            )
+        )
+    except Exception:
+        logger.warning("Failed to emit conversation_ended", exc_info=True)
+
+
+def _start_new_conversation(session: dict) -> None:
+    """Reset conversation-level tracking fields."""
+    session["conversation_counter"] = session.get("conversation_counter", 0) + 1
+    session["conversation_message_counter"] = 0
+    session["conversation_has_response"] = False
+    session["conversation_start_time"] = time.time()
+    session["conversation_intents"] = []
+    session["conversation_had_handoff"] = False
+    session["conversation_had_fallback"] = False
+    session["conversation_had_retrieval_miss"] = False
+
+
+async def _emit_conversation_ended_with_state(
+    session_id: str, session: dict, terminal_state: str
+) -> None:
+    """Emit conversation_ended with a specific terminal_state."""
+    try:
+        from votebot.services.query_logger import get_query_logger
+
+        query_logger = get_query_logger()
+        if query_logger is None:
+            return
+
+        intents = session.get("conversation_intents", [])
+        dominant = None
+        if intents:
+            counts = Counter(intents)
+            dominant = counts.most_common(1)[0][0]
+
+        start_time = session.get("conversation_start_time")
+        duration = int(time.time() - start_time) if start_time else 0
+        conv_id = _get_conversation_id(session_id, session.get("conversation_counter", 0))
+
+        asyncio.create_task(
+            query_logger.log_event(
+                event_type="conversation_ended",
+                visitor_id=session.get("visitor_id"),
+                session_id=session_id,
+                conversation_id=conv_id,
+                turn_count=session.get("conversation_message_counter", 0),
+                duration_seconds=duration,
+                handoff_occurred=session.get("conversation_had_handoff", False),
+                fallback_occurred=session.get("conversation_had_fallback", False),
+                retrieval_miss_occurred=session.get("conversation_had_retrieval_miss", False),
+                terminal_state=terminal_state,
+                primary_intents_seen=list(set(intents)),
+                dominant_primary_intent=dominant,
+            )
+        )
+    except Exception:
+        logger.warning("Failed to emit conversation_ended", exc_info=True)
+
+
 @router.websocket("/ws/chat")
 async def websocket_chat_endpoint(
     websocket: WebSocket,
@@ -370,9 +522,22 @@ async def websocket_chat_endpoint(
             data = await websocket.receive_json()
             await handle_client_message(session_id, data, client_ip=client_ip, user_agent=user_agent)
     except WebSocketDisconnect:
+        # Emit conversation_ended on disconnect
+        session = manager.get_session(session_id)
+        if session and session.get("conversation_message_counter", 0) > 0:
+            session_copy = dict(session)
+            # Determine if this was mid-turn (abandoned) or natural end
+            if session_copy.get("conversation_has_response"):
+                terminal = "inactive_end"
+            else:
+                terminal = "abandoned"
+            await _emit_conversation_ended_with_state(session_id, session_copy, terminal)
         manager.disconnect(session_id)
     except Exception as e:
         logger.exception("WebSocket error", session_id=session_id, error=str(e))
+        session = manager.get_session(session_id)
+        if session and session.get("conversation_message_counter", 0) > 0:
+            await _emit_conversation_ended_with_state(session_id, dict(session), "abandoned")
         manager.disconnect(session_id)
 
 
@@ -466,11 +631,88 @@ async def handle_user_message(
         })
         return
 
+    # Extract analytics fields from payload
+    visitor_id = payload.get("visitor_id")
+    entry_referrer = payload.get("entry_referrer")
+    page_url = payload.get("page_url")
+    scroll_depth = payload.get("scroll_depth")
+    time_on_page = payload.get("time_on_page")
+
     # Store user message
     manager.add_message(session_id, "user", message)
 
     # Update page context in session
     manager.update_session(session_id, page_context=page_context_data)
+
+    # --- Analytics: conversation boundary detection ---
+    session = manager.get_session(session_id)
+    if session:
+        # Store visitor_id (first message sets it, subsequent messages preserve it)
+        if visitor_id:
+            session["visitor_id"] = visitor_id
+        # Store entry_referrer on first message only
+        if entry_referrer and session.get("entry_referrer") is None:
+            session["entry_referrer"] = entry_referrer
+
+        # Boundary evaluation happens BEFORE message_received
+        if session.get("conversation_start_time") is None:
+            # First message in session — start first conversation
+            _start_new_conversation(session)
+        elif _check_conversation_boundary(session, page_context_data):
+            # Emit conversation_ended for previous conversation
+            await _emit_conversation_ended(session_id, session)
+            _start_new_conversation(session)
+
+        # Update counters
+        session["session_message_counter"] = session.get("session_message_counter", 0) + 1
+        session["conversation_message_counter"] = session.get("conversation_message_counter", 0) + 1
+        session["last_message_time"] = time.time()
+        session["last_page_context_type"] = page_context_data.get("type", "general")
+        session["last_page_context_id"] = (
+            page_context_data.get("slug")
+            or page_context_data.get("webflow_id")
+            or page_context_data.get("id")
+        )
+
+        conversation_id = _get_conversation_id(session_id, session.get("conversation_counter", 0))
+        session_message_index = session["session_message_counter"]
+        conversation_message_index = session["conversation_message_counter"]
+
+        # Emit message_received event
+        try:
+            from votebot.services.query_logger import get_query_logger
+
+            query_logger = get_query_logger()
+            if query_logger:
+                asyncio.create_task(
+                    query_logger.log_event(
+                        event_type="message_received",
+                        visitor_id=session.get("visitor_id"),
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                        session_message_index=session_message_index,
+                        conversation_message_index=conversation_message_index,
+                        message=message,
+                        page_context={
+                            "type": page_context_data.get("type", "general"),
+                            "id": page_context_data.get("id"),
+                            "title": page_context_data.get("title"),
+                            "jurisdiction": page_context_data.get("jurisdiction"),
+                            "webflow_id": page_context_data.get("webflow_id"),
+                            "slug": page_context_data.get("slug"),
+                        },
+                        entry_referrer=session.get("entry_referrer") if session_message_index == 1 else None,
+                        page_url=page_url,
+                        client_ip=client_ip,
+                        user_agent=user_agent,
+                    )
+                )
+        except Exception:
+            logger.warning("Failed to emit message_received", exc_info=True)
+    else:
+        conversation_id = None
+        session_message_index = None
+        conversation_message_index = None
 
     # Check if handoff is active - relay to Slack instead of bot
     session = manager.get_session(session_id)
@@ -543,6 +785,14 @@ async def handle_user_message(
             conversation_history=conversation_history,
             client_ip=client_ip,
             user_agent=user_agent,
+            visitor_id=session.get("visitor_id") if session else None,
+            conversation_id=conversation_id,
+            session_message_index=session_message_index,
+            conversation_message_index=conversation_message_index,
+            entry_referrer=session.get("entry_referrer") if session and session_message_index == 1 else None,
+            page_url=page_url,
+            scroll_depth=scroll_depth,
+            time_on_page=time_on_page,
         ):
             if chunk.done:
                 # Final chunk with metadata
@@ -596,6 +846,10 @@ async def handle_user_message(
 
         # Store assistant message
         manager.add_message(session_id, "assistant", full_response)
+
+        # Update conversation tracking after response
+        if session:
+            session["conversation_has_response"] = True
 
         logger.info(
             "WebSocket message processed",

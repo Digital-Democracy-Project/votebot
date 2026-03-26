@@ -28,6 +28,11 @@ from votebot.services.webflow_lookup import (
     format_legislator_verification_context,
     format_org_verification_context,
 )
+from votebot.utils.intent import (
+    classify_primary_intent,
+    classify_sub_intent,
+    normalize_retrieval_sources,
+)
 
 logger = structlog.get_logger()
 
@@ -98,6 +103,18 @@ class VoteBotAgent:
         human_active: bool = False,
         client_ip: str | None = None,
         user_agent: str | None = None,
+        # Analytics fields
+        visitor_id: str | None = None,
+        conversation_id: str | None = None,
+        session_message_index: int | None = None,
+        conversation_message_index: int | None = None,
+        entry_referrer: str | None = None,
+        page_url: str | None = None,
+        scroll_depth: float | None = None,
+        time_on_page: int | None = None,
+        retrieval_result: "RetrievalResult | None" = None,
+        error: bool = False,
+        error_type: str | None = None,
     ) -> None:
         """Fire-and-forget log of a completed query to JSONL.
 
@@ -132,16 +149,79 @@ class VoteBotAgent:
                 "slug": getattr(page_context, "slug", None),
             }
 
+            # Intent classification
+            primary_intent = classify_primary_intent(page_context.type, message)
+            sub_intent = classify_sub_intent(primary_intent, message)
+
+            # Retrieval sources
+            retrieval_sources = None
+            if retrieval_result and retrieval_result.chunks:
+                raw_sources = {
+                    c.metadata.get("document_type")
+                    for c in retrieval_result.chunks
+                    if c.metadata and c.metadata.get("document_type")
+                }
+                retrieval_sources = normalize_retrieval_sources(raw_sources)
+
+            # Grounding & augmentation
+            has_citations = len(result.citations) > 0
+            citations_count = len(result.citations)
+            retrieval_count = result.retrieval_count
+
+            if retrieval_count > 0 and has_citations:
+                grounding_status = "grounded"
+            elif retrieval_count > 0:
+                grounding_status = "partial"
+            else:
+                grounding_status = "ungrounded"
+
+            external_augmentation = "web" if result.web_search_used else "none"
+
+            # Fallback detection
+            fallback_used = False
+            fallback_reason = None
+            if result.web_search_used:
+                if retrieval_count == 0:
+                    fallback_used = True
+                    fallback_reason = "no_internal_retrieval"
+                elif result.confidence < 0.5:
+                    fallback_used = True
+                    fallback_reason = "low_confidence"
+
             asyncio.create_task(
-                query_logger.log_query(
+                query_logger.log_event(
+                    event_type="query_processed",
                     session_id=session_id,
+                    visitor_id=visitor_id,
+                    conversation_id=conversation_id,
+                    session_message_index=session_message_index,
+                    conversation_message_index=conversation_message_index,
                     message=message,
                     response=result.response,
+                    primary_intent=primary_intent,
+                    sub_intent=sub_intent,
                     confidence=result.confidence,
-                    citations=citations_dicts,
+                    retrieval_count=retrieval_count,
+                    retrieval_sources=retrieval_sources,
+                    has_citations=has_citations,
+                    citations_count=citations_count,
+                    grounding_status=grounding_status,
+                    external_augmentation=external_augmentation,
+                    web_search_used=result.web_search_used,
+                    fallback_used=fallback_used,
+                    fallback_reason=fallback_reason,
+                    bill_votes_tool_used=result.bill_votes_tool_used,
+                    handoff_triggered=result.requires_human,
+                    error=error,
+                    error_type=error_type,
                     page_context=page_context_dict,
+                    entry_referrer=entry_referrer,
+                    page_url=page_url,
+                    scroll_depth=scroll_depth,
+                    time_on_page=time_on_page,
                     channel=channel,
                     duration_ms=duration_ms,
+                    citations=citations_dicts,
                     human_active=human_active,
                     client_ip=client_ip,
                     user_agent=user_agent,
@@ -161,6 +241,15 @@ class VoteBotAgent:
         human_active: bool = False,
         client_ip: str | None = None,
         user_agent: str | None = None,
+        # Analytics fields
+        visitor_id: str | None = None,
+        conversation_id: str | None = None,
+        session_message_index: int | None = None,
+        conversation_message_index: int | None = None,
+        entry_referrer: str | None = None,
+        page_url: str | None = None,
+        scroll_depth: float | None = None,
+        time_on_page: int | None = None,
     ) -> AgentResult:
         """
         Process a user message and generate a response.
@@ -393,6 +482,15 @@ class VoteBotAgent:
             human_active=human_active,
             client_ip=client_ip,
             user_agent=user_agent,
+            visitor_id=visitor_id,
+            conversation_id=conversation_id,
+            session_message_index=session_message_index,
+            conversation_message_index=conversation_message_index,
+            entry_referrer=entry_referrer,
+            page_url=page_url,
+            scroll_depth=scroll_depth,
+            time_on_page=time_on_page,
+            retrieval_result=retrieval_result,
         )
 
         return result
@@ -408,6 +506,15 @@ class VoteBotAgent:
         client_ip: str | None = None,
         user_agent: str | None = None,
         human_active: bool = False,
+        # Analytics fields
+        visitor_id: str | None = None,
+        conversation_id: str | None = None,
+        session_message_index: int | None = None,
+        conversation_message_index: int | None = None,
+        entry_referrer: str | None = None,
+        page_url: str | None = None,
+        scroll_depth: float | None = None,
+        time_on_page: int | None = None,
     ) -> AsyncIterator[StreamChunkData]:
         """
         Process a message and stream the response.
@@ -606,6 +713,15 @@ class VoteBotAgent:
                     human_active=human_active,
                     client_ip=client_ip,
                     user_agent=user_agent,
+                    visitor_id=visitor_id,
+                    conversation_id=conversation_id,
+                    session_message_index=session_message_index,
+                    conversation_message_index=conversation_message_index,
+                    entry_referrer=entry_referrer,
+                    page_url=page_url,
+                    scroll_depth=scroll_depth,
+                    time_on_page=time_on_page,
+                    retrieval_result=retrieval_result,
                 )
             else:
                 yield StreamChunkData(text=chunk.text, done=False)

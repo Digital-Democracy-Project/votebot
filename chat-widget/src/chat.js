@@ -7,6 +7,36 @@ const DDPChat = (function() {
     let pageContext = { type: 'general' };
     let handoffActive = false;
     let onUIUpdateCallback = null;
+    let isFirstMessage = true;
+    let pageLoadTime = Date.now();
+
+    function _extractDomain(url) {
+        if (!url) return null;
+        try {
+            return new URL(url).hostname;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function _getScrollDepth() {
+        try {
+            var scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+            var docHeight = Math.max(
+                document.body.scrollHeight, document.documentElement.scrollHeight,
+                document.body.offsetHeight, document.documentElement.offsetHeight
+            );
+            var winHeight = window.innerHeight;
+            if (docHeight <= winHeight) return 1.0;
+            return Math.min(1.0, Math.round((scrollTop / (docHeight - winHeight)) * 100) / 100);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function _getTimeOnPage() {
+        return Math.round((Date.now() - pageLoadTime) / 1000);
+    }
 
     /**
      * Initialize chat module.
@@ -39,13 +69,28 @@ const DDPChat = (function() {
             });
         }
 
+        // Build payload with analytics fields
+        var msgPayload = {
+            message: message,
+            page_context: pageContext,
+            visitor_id: DDPWebSocket.getVisitorId(),
+            page_url: window.location.href,
+            scroll_depth: _getScrollDepth(),
+            time_on_page: _getTimeOnPage()
+        };
+        // entry_referrer only on first message per session
+        if (isFirstMessage) {
+            var ref = _extractDomain(document.referrer);
+            if (ref) {
+                msgPayload.entry_referrer = ref;
+            }
+            isFirstMessage = false;
+        }
+
         // Send to server
         const sent = DDPWebSocket.send({
             type: 'user_message',
-            payload: {
-                message: message,
-                page_context: pageContext
-            }
+            payload: msgPayload
         });
 
         if (sent) {
@@ -191,6 +236,7 @@ const DDPChat = (function() {
      */
     function setPageContext(context) {
         pageContext = context;
+        pageLoadTime = Date.now(); // Reset time-on-page when context changes
     }
 
     /**

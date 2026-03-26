@@ -75,6 +75,21 @@ async def chat(
     )
     user_agent = raw_request.headers.get("user-agent")
 
+    # Extract analytics fields from client_metadata and navigation_context
+    visitor_id = None
+    entry_referrer = None
+    page_url = None
+    if request.client_metadata:
+        visitor_id = request.client_metadata.client_id
+        entry_referrer = request.client_metadata.entry_referrer
+        page_url = request.client_metadata.page_url
+
+    scroll_depth = None
+    time_on_page = None
+    if request.navigation_context:
+        scroll_depth = request.navigation_context.scroll_depth
+        time_on_page = request.navigation_context.time_on_page
+
     try:
         # Initialize the agent
         agent = VoteBotAgent(settings=settings)
@@ -90,6 +105,11 @@ async def chat(
             human_active=request.human_active,
             client_ip=client_ip,
             user_agent=user_agent,
+            visitor_id=visitor_id,
+            entry_referrer=entry_referrer,
+            page_url=page_url,
+            scroll_depth=scroll_depth,
+            time_on_page=time_on_page,
         )
 
         # Calculate latency
@@ -187,6 +207,21 @@ async def chat_stream(
     )
     user_agent = raw_request.headers.get("user-agent")
 
+    # Extract analytics fields
+    visitor_id_stream = None
+    entry_referrer_stream = None
+    page_url_stream = None
+    if request.client_metadata:
+        visitor_id_stream = request.client_metadata.client_id
+        entry_referrer_stream = request.client_metadata.entry_referrer
+        page_url_stream = request.client_metadata.page_url
+
+    scroll_depth_stream = None
+    time_on_page_stream = None
+    if request.navigation_context:
+        scroll_depth_stream = request.navigation_context.scroll_depth
+        time_on_page_stream = request.navigation_context.time_on_page
+
     async def generate_stream():
         """Generate streaming response chunks."""
         try:
@@ -200,6 +235,11 @@ async def chat_stream(
                 conversation_history=request.conversation_history,
                 client_ip=client_ip,
                 user_agent=user_agent,
+                visitor_id=visitor_id_stream,
+                entry_referrer=entry_referrer_stream,
+                page_url=page_url_stream,
+                scroll_depth=scroll_depth_stream,
+                time_on_page=time_on_page_stream,
             ):
                 chunk = StreamChunk(
                     chunk=chunk_data.text,
