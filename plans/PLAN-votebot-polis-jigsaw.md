@@ -755,184 +755,116 @@ your views will be saved and you can update them anytime."
 
 At this point, opinions are stored against `visitor_id` in Redis (90-day TTL). The user can close the widget and opinions persist on the same browser. But they're not yet durable, cross-device, or verified.
 
-### Stage 2: Memberstack Account Creation + Auth Token Flow
+### Stages 2 & 3: Conversational Onboarding (Account + Voter Verification)
 
-When the user agrees to save opinions, the widget triggers Memberstack's signup modal. After signup/login, the widget obtains a **Memberstack JWT token** and sends it to VoteBot for server-side verification. This is the critical security step — VoteBot must verify the token, not trust a bare `member_id`.
+Instead of redirecting to a Memberstack modal or external page, VoteBot handles the entire onboarding conversationally — the user never leaves the chat. The flow has two sequential steps, each independently valuable:
 
-**Why JWT verification is required (not optional):** The personalization plan (`PLAN-user-personalization.md`) treats server-side validation as optional for read-only personalization. But for the opinion system, a spoofed `member_id` on the WebSocket would let someone submit opinions under another person's identity, pollute clustering data, and inject votes into Polis. Token verification is mandatory for any write operation.
+**Step A: Name + Email → Memberstack account created → opinions saved**
+**Step B: DOB + Zip → Catalist verification → voter status confirmed**
 
-#### End-to-End Auth Flow
+The user can stop after Step A and still have a working account with saved opinions. Step B is an optional upgrade that adds voter verification. This separation puts the low-friction ask first (name + email — most people give freely) and the higher-friction ask second (DOB + zip — requires more trust).
+
+#### Conversational Flow
 
 ```
-Browser (Widget)                        VoteBot Server                    Memberstack API
-─────────────────                       ──────────────                    ──────────────
-1. User confirms opinions in chat
-   "Would you like to save?"
-   User: "Sure"
-         |
-         v
-2. Widget opens Memberstack modal
-   $memberstackDom.openModal('SIGNUP')
-         |
-         v
-3. User completes signup/login
-   (email + password, handled by
-    Memberstack — VoteBot never
-    sees credentials)
-         |
-         v
-4. Memberstack SDK returns member
-   data + auth token to widget
-   result.data.id = "mem_abc123"
-   result.data.tokens.accessToken = "eyJ..."
-         |
-         v
-5. Widget sends token + visitor_id     ──►  6. Server receives member_auth
-   over existing WebSocket                      message on the open WebSocket
-   {                                            connection
-     type: "member_auth",
-     payload: {
-       memberstack_token: "eyJ...",           7. Server validates token
-       visitor_id: "v_fcfdd902b491"     ──────►  POST https://admin.memberstack.com
-     }                                              /members/current
-   }                                              Authorization: Bearer eyJ...
-                                                        |
-                                         ◄──────────  8. Memberstack returns member
-                                                        data (id, email, metadata)
-                                                        or 401 if invalid
-                                                        |
-                                                   9. Server extracts verified
-                                                      member_id from response
-                                                      (NOT from the WebSocket
-                                                       payload — that's untrusted)
-                                                        |
-                                                   10. Server links:
-                                                       visitor_id → member_id
-                                                       (Redis, bidirectional,
-                                                        permanent)
-                                                        |
-                                                   11. Server promotes opinions:
-                                                       visitor_id Redis (90d TTL)
-                                                       → member_id durable storage
-                                                        |
-                                                   12. Server sets Polis XID:
-                                                       "votebot_{member_id}"
-                                                        |
-                                                   13. Server submits confirmed
-                                                       opinions to Polis as votes
-         |
-         v
-14. Widget receives confirmation   ◄──  15. Server sends auth_confirmed
-    Shows: "Your views are saved!          { type: "auth_confirmed",
-     312 others have weighed in."            payload: { member_id: "mem_abc123" }}
+VoteBot: "Would you like to save your views and see how you
+compare to others? I'll just need your name and email."
+
+User: "Sure — I'm John Smith, john@example.com"
+
+    ── Step A: server-side ──
+    1. Parse name + email from message (LLM extraction)
+    2. Memberstack Admin API: POST /members
+       { email: "john@example.com", customFields: { name: "John Smith" } }
+       → member_id = "mem_abc123"
+    3. Link visitor_id → member_id in Redis (bidirectional, permanent)
+    4. Promote opinions from visitor_id → member_id durable storage
+    5. Submit confirmed opinions to Polis with XID = "votebot_mem_abc123"
+    6. Memberstack sends password setup email automatically
+    ────────────────────────
+
+VoteBot: "Thanks, John! Your views on HB 123 are saved. 312
+others have weighed in.
+
+To verify that you're a registered voter in your district,
+I just need your date of birth and zip code. This lets us
+show legislators what their actual constituents think.
+(This info is only used for verification and won't be stored.)"
+
+User: "March 15, 1990, zip 20008"
+
+    ── Step B: server-side ──
+    1. Parse DOB + zip from message (LLM extraction)
+    2. Catalist Fusion Light API: verify_voter(
+         first_name="John", last_name="Smith",
+         dob="1990-03-15", zip="20008")
+       → DWID found, FL, CD-7, State Senate 12, State House 38
+    3. Memberstack Admin API: PUT /members/{member_id}
+       { customFields: {
+           catalist_dwid: "51894720",
+           verified_voter: true,
+           jurisdiction: "FL",
+           congressional_district: "7",
+           state_senate_district: "12",
+           state_house_district: "38"
+       }}
+    4. Update Redis member record with DWID + districts
+    5. Opinions now carry verified voter weight (1.0x)
+    ────────────────────────
+
+VoteBot: "You're verified! ✓ Registered voter in Florida,
+Congressional District 7.
+
+Your views now carry full weight in our opinion maps.
+63% of verified voters in your district share your stance
+on the funding provisions.
+
+(Check your email to set a password for future logins.)"
 ```
 
-#### Widget Implementation
+#### Why Two Steps, Not One
 
-```javascript
-// In widget, after user confirms consent in chat:
-async function triggerMemberstackAuth() {
-    if (!window.$memberstackDom) {
-        console.error('[DDPChat] Memberstack SDK not loaded');
-        return;
-    }
+| Approach | Pros | Cons |
+|---|---|---|
+| All at once (name + email + DOB + zip) | Single exchange | Too much PII upfront; users may bail |
+| **Step A then Step B (recommended)** | Low-friction first; natural off-ramp; account exists even if they skip verification | Two exchanges; slightly longer |
+| Step B only (no account) | Minimal | No persistent identity; can't save opinions |
 
-    // Check if already logged in
-    var currentMember = await window.$memberstackDom.getCurrentMember()
-        .catch(function() { return null; });
+The key insight: **the Memberstack account is valuable without voter verification, but voter verification is useless without an account.** So create the account first.
 
-    if (currentMember && currentMember.data) {
-        // Already authenticated — send token directly
-        sendMemberAuth(currentMember.data);
-        return;
-    }
+#### If the User Declines Verification
 
-    // Open signup/login modal
-    var result = await window.$memberstackDom.openModal('SIGNUP');
-    if (result && result.data) {
-        sendMemberAuth(result.data);
-    }
-}
+```
+VoteBot: "To verify that you're a registered voter in your
+district, I just need your date of birth and zip code."
 
-function sendMemberAuth(memberData) {
-    // Send the Memberstack JWT token — NOT the member_id
-    // The server extracts and verifies the member_id from the token
-    DDPWebSocket.send({
-        type: 'member_auth',
-        payload: {
-            memberstack_token: memberData.tokens.accessToken,
-            visitor_id: DDPWebSocket.getVisitorId()
-        }
-    });
-}
+User: "I'd rather not"
+
+VoteBot: "No problem! Your views are still saved and count
+in the overall opinion map. You can verify anytime by saying
+'verify my voter registration.'
+
+Want to see how your views compare to others?"
 ```
 
-**Key security principle:** The widget sends the `memberstack_token` (a JWT), not the `member_id`. The server extracts the `member_id` from Memberstack's API response after validating the token. This prevents spoofing — a client can't claim to be a different member.
+The user is an **Active (member)** at 0.9x weight. Their opinions are in the system, just without district attribution or anti-gaming protection.
+
+#### If Catalist Doesn't Find a Match
+
+```
+VoteBot: "I wasn't able to find a matching voter registration.
+This can happen if you've recently moved, changed your name,
+or aren't yet registered.
+
+Your views are still saved! You can:
+- Try again with different info (say 'verify again')
+- Register to vote at vote.org
+- Continue without verification
+
+Would you like to try again?"
+```
 
 #### Server Implementation
-
-```python
-# In api/routes/websocket.py — new message handler:
-
-async def handle_member_auth(session_id: str, payload: dict):
-    """Handle Memberstack authentication from the widget.
-
-    Validates the token server-side, links visitor to member,
-    promotes opinions, and submits to Polis.
-    """
-    memberstack_token = payload.get("memberstack_token")
-    visitor_id = payload.get("visitor_id")
-
-    if not memberstack_token or not visitor_id:
-        await manager.send_json(session_id, {
-            "type": "auth_error",
-            "payload": {"message": "Missing authentication data"}
-        })
-        return
-
-    # Validate token against Memberstack API
-    member_data = await validate_memberstack_token(memberstack_token)
-    if not member_data:
-        await manager.send_json(session_id, {
-            "type": "auth_error",
-            "payload": {"message": "Authentication failed — please try again"}
-        })
-        return
-
-    # Extract verified member_id from Memberstack response
-    member_id = member_data["id"]
-
-    # Link visitor_id → member_id (bidirectional, permanent)
-    await redis_store.link_visitor_to_member(visitor_id, member_id)
-
-    # Promote opinion vectors from visitor_id → member_id storage
-    await opinion_service.promote_opinions(visitor_id, member_id)
-
-    # Update session with authenticated identity
-    session = manager.get_session(session_id)
-    if session:
-        session["member_id"] = member_id
-        session["authenticated"] = True
-
-    # Submit confirmed opinions to Polis
-    await polis_service.submit_opinions(
-        member_id=member_id,
-        xid=f"votebot_{member_id}",
-    )
-
-    # Confirm to widget
-    await manager.send_json(session_id, {
-        "type": "auth_confirmed",
-        "payload": {"member_id": member_id}
-    })
-
-    logger.info(
-        "Member authenticated and linked",
-        session_id=session_id,
-        member_id=member_id,
-        visitor_id=visitor_id,
-    )
-```
 
 ```python
 # services/memberstack.py
@@ -940,13 +872,243 @@ async def handle_member_auth(session_id: str, payload: dict):
 import httpx
 import structlog
 
+from votebot.config import get_settings
+
 logger = structlog.get_logger()
+
+
+async def create_member(email: str, name: str) -> dict | None:
+    """Create a Memberstack member via the Admin API.
+
+    Returns the created member data including member_id.
+    The server creates the account directly — no client-side
+    modal or redirect needed.
+    """
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://admin.memberstack.com/members",
+                headers={
+                    "X-API-KEY": settings.memberstack_admin_api_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "email": email,
+                    "customFields": {"name": name},
+                    "sendWelcomeEmail": True,  # Includes password setup link
+                },
+            )
+            if resp.status_code in (200, 201):
+                return resp.json()
+            if resp.status_code == 409:
+                # Member already exists with this email
+                logger.info("Member already exists", email=email)
+                return await get_member_by_email(email)
+            logger.warning(
+                "Memberstack member creation failed",
+                status=resp.status_code,
+                body=resp.text,
+            )
+    except Exception:
+        logger.warning("Memberstack creation error", exc_info=True)
+    return None
+
+
+async def update_member_metadata(
+    member_id: str, custom_fields: dict
+) -> bool:
+    """Update custom fields on a Memberstack member profile.
+
+    Used after Catalist verification to store DWID + districts.
+    """
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.put(
+                f"https://admin.memberstack.com/members/{member_id}",
+                headers={
+                    "X-API-KEY": settings.memberstack_admin_api_key,
+                    "Content-Type": "application/json",
+                },
+                json={"customFields": custom_fields},
+            )
+            return resp.status_code == 200
+    except Exception:
+        logger.warning("Memberstack update error", exc_info=True)
+    return False
+
+
+async def get_member_by_email(email: str) -> dict | None:
+    """Look up an existing Memberstack member by email."""
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://admin.memberstack.com/members",
+                headers={"X-API-KEY": settings.memberstack_admin_api_key},
+                params={"email": email},
+            )
+            if resp.status_code == 200:
+                members = resp.json().get("data", [])
+                if members:
+                    return members[0]
+    except Exception:
+        logger.warning("Memberstack lookup error", exc_info=True)
+    return None
+```
+
+```python
+# In api/routes/websocket.py — the agent handles the conversational
+# extraction of name/email/DOB/zip from natural language. The structured
+# data is passed to the onboarding service:
+
+async def handle_onboarding_step_a(
+    session_id: str,
+    visitor_id: str,
+    name: str,
+    email: str,
+):
+    """Step A: Create Memberstack account, link to visitor, save opinions."""
+    from votebot.services.memberstack import create_member
+
+    member_data = await create_member(email=email, name=name)
+    if not member_data:
+        return {"success": False, "error": "Account creation failed"}
+
+    member_id = member_data["id"]
+
+    # Link visitor_id → member_id
+    await redis_store.link_visitor_to_member(visitor_id, member_id)
+
+    # Promote opinions
+    await opinion_service.promote_opinions(visitor_id, member_id)
+
+    # Submit to Polis
+    await polis_service.submit_opinions(
+        member_id=member_id,
+        xid=f"votebot_{member_id}",
+    )
+
+    # Update session
+    session = manager.get_session(session_id)
+    if session:
+        session["member_id"] = member_id
+        session["member_name"] = name
+        session["authenticated"] = True
+
+    return {"success": True, "member_id": member_id}
+
+
+async def handle_onboarding_step_b(
+    session_id: str,
+    member_id: str,
+    first_name: str,
+    last_name: str,
+    dob: str,
+    zip_code: str,
+):
+    """Step B: Verify voter via Catalist, update Memberstack profile."""
+    from votebot.services.catalist import verify_voter
+    from votebot.services.memberstack import update_member_metadata
+
+    # Catalist verification
+    result = await verify_voter(
+        first_name=first_name,
+        last_name=last_name,
+        dob=dob,
+        address1="",  # Not collected — zip is sufficient for matching
+        city="",
+        state="",     # Catalist infers from zip
+        zip_code=zip_code,
+    )
+
+    if not result or not result.get("matched"):
+        return {"success": False, "error": "no_match"}
+
+    # Update Memberstack profile with verification data
+    await update_member_metadata(member_id, {
+        "catalist_dwid": result["dwid"],
+        "verified_voter": True,
+        "jurisdiction": result["state"],
+        "congressional_district": result.get("congressional_district"),
+        "state_senate_district": result.get("state_senate_district"),
+        "state_house_district": result.get("state_house_district"),
+    })
+
+    # Update Redis
+    await redis_store.set_member_verification(member_id, result)
+
+    return {
+        "success": True,
+        "state": result["state"],
+        "congressional_district": result.get("congressional_district"),
+    }
+```
+
+#### How the LLM Extracts Structured Data
+
+The agent needs to parse natural language into structured fields. This is handled by adding an **onboarding tool** to the LLM's tool set (same pattern as the existing `get_bill_info` tool):
+
+```python
+# Tool definition for the LLM:
+{
+    "type": "function",
+    "function": {
+        "name": "create_voter_account",
+        "description": "Create a DDP account and optionally verify voter registration. Call this when the user provides their name and email to save their opinions.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "first_name": {"type": "string"},
+                "last_name": {"type": "string"},
+                "email": {"type": "string", "format": "email"},
+                "dob": {"type": "string", "description": "Date of birth (YYYY-MM-DD), if provided"},
+                "zip_code": {"type": "string", "description": "5-digit zip code, if provided"}
+            },
+            "required": ["first_name", "last_name", "email"]
+        }
+    }
+}
+```
+
+When the user provides name + email, the LLM calls `create_voter_account` with those fields (Step A). If the user later provides DOB + zip, the LLM calls it again with the additional fields (Step B). The server differentiates based on which fields are present.
+
+#### Returning Members
+
+When the widget loads and the user is already logged into Memberstack (detected via `$memberstackDom.getCurrentMember()` on the parent page), the widget sends the Memberstack token over WebSocket. The server validates it and links the session:
+
+```javascript
+// In widget.js, after WebSocket connects:
+async function checkExistingAuth() {
+    if (!window.$memberstackDom) return;
+
+    var result = await window.$memberstackDom.getCurrentMember()
+        .catch(function() { return null; });
+
+    if (result && result.data && result.data.tokens) {
+        DDPWebSocket.send({
+            type: 'member_auth',
+            payload: {
+                memberstack_token: result.data.tokens.accessToken,
+                visitor_id: DDPWebSocket.getVisitorId()
+            }
+        });
+    }
+}
+```
+
+For returning members, the server validates the token against Memberstack's API to get the trusted `member_id`:
+
+```python
+# services/memberstack.py
 
 async def validate_memberstack_token(token: str) -> dict | None:
     """Validate a Memberstack JWT and return verified member data.
 
-    This is the ONLY way to get a trusted member_id — never trust
-    a member_id sent directly from the client.
+    Used for returning members who are already logged in.
+    This is the ONLY way to get a trusted member_id from the client
+    — never trust a bare member_id sent over WebSocket.
     """
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -956,53 +1118,29 @@ async def validate_memberstack_token(token: str) -> dict | None:
             )
             if resp.status_code == 200:
                 return resp.json()
-            logger.warning(
-                "Memberstack token validation failed",
-                status=resp.status_code,
-            )
     except Exception:
         logger.warning("Memberstack validation error", exc_info=True)
     return None
 ```
 
-#### Returning Members (Already Logged In)
+#### Identity Lifecycle Summary
 
-When the widget loads and the user is already logged into Memberstack, the widget detects this and sends the token immediately — no modal needed:
+| Scenario | How Identity is Established | Trust Level |
+|---|---|---|
+| **New anonymous user** | `visitor_id` from localStorage | Untrusted (device-level) |
+| **User provides name + email in chat** | Server creates Memberstack account via Admin API → `member_id` | Server-trusted (server created it) |
+| **User provides DOB + zip in chat** | Server calls Catalist → DWID returned | Server-trusted (Catalist verified) |
+| **Returning member (already logged in)** | Widget sends Memberstack JWT → server validates → `member_id` | Server-trusted (token validated) |
+| **User logs in via DDP website** | Memberstack SDK on page → widget detects → sends token | Server-trusted (token validated) |
 
-```javascript
-// In widget.js initWidgetWithContext(), after WebSocket connects:
-async function checkExistingAuth() {
-    if (!window.$memberstackDom) return;
+**Key security principle:** The server either creates the identity itself (Steps A & B) or validates a cryptographic token (returning members). It never trusts a bare `member_id` from the client.
 
-    var result = await window.$memberstackDom.getCurrentMember()
-        .catch(function() { return null; });
+#### Configuration (new settings)
 
-    if (result && result.data && result.data.tokens) {
-        // Already authenticated — link this session
-        sendMemberAuth(result.data);
-    }
-}
+```python
+# In config.py Settings:
+memberstack_admin_api_key: str = ""   # Server-side Admin API key (not client SDK key)
 ```
-
-This means a returning authenticated member's session is linked to their `member_id` from the first message, without any consent prompt. Their opinion vector continues to build from where they left off.
-
-#### Token Lifecycle
-
-| Event | What Happens |
-|---|---|
-| **Widget loads, user not logged in** | Widget has `visitor_id` only. Opinions stored against `visitor_id`. |
-| **User completes consent → signup** | Widget gets Memberstack token, sends to server. Server validates, links identities, promotes opinions. |
-| **Widget loads, user already logged in** | Widget detects Memberstack auth, sends token immediately. Server links session to `member_id`. |
-| **Memberstack token expires** | Widget's Memberstack SDK handles refresh automatically. If server gets a 401 from Memberstack validation, it requests re-auth from the widget. |
-| **User logs out of Memberstack** | Widget detects logout. Session falls back to `visitor_id` only. Existing opinions under `member_id` are preserved. |
-
-#### What the Server Never Trusts
-
-- A `member_id` sent directly from the client (could be spoofed)
-- A WebSocket message claiming to be authenticated without a token
-- An expired or invalid Memberstack token
-
-The `member_id` is always extracted from Memberstack's `/members/current` response after presenting a valid token. This is the only trusted path.
 
 ### Stage 3: Voter File Verification via Catalist
 
@@ -1320,13 +1458,13 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 ### Milestone 5: Consent Flow + Memberstack + Voter Verification (Weeks 11-16)
 - [ ] Conversational consent prompt in chat (Stage 1)
 - [ ] Edit/correct flow in natural language
-- [ ] Memberstack signup/login trigger from widget (Stage 2)
-- [ ] Widget sends Memberstack JWT token (not bare member_id) via `member_auth` WebSocket message
-- [ ] `services/memberstack.py` — server-side JWT validation against Memberstack API
-- [ ] `handle_member_auth()` WebSocket handler — validates token, extracts verified member_id
+- [ ] `services/memberstack.py` — Admin API client (create member, update metadata, validate token)
+- [ ] Onboarding Step A: LLM tool extracts name + email → server creates Memberstack account via Admin API
 - [ ] Server-side visitor-to-member linking (Redis, bidirectional)
-- [ ] Returning member detection (widget sends token on load if already logged in)
-- [ ] Opinion vector promotion (visitor_id → member_id storage)
+- [ ] Opinion vector promotion (visitor_id → member_id durable storage)
+- [ ] Onboarding Step B: LLM tool extracts DOB + zip → Catalist verification → update Memberstack profile
+- [ ] Returning member detection (widget sends Memberstack JWT on load if already logged in)
+- [ ] `create_voter_account` LLM tool definition for structured data extraction
 - [ ] Vote submission to Polis on member confirmation
 - [ ] Catalist Fusion Light API client (`services/catalist.py` — token management, verify_voter)
 - [ ] Voter verification API endpoint (`POST /votebot/v1/voter/verify`)
