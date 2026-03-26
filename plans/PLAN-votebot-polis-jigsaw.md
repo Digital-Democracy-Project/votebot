@@ -698,18 +698,38 @@ The architecture handles bill amendments naturally: when `BillVersionSyncService
 
 ---
 
-## Phase 6: Consent and User Experience
+## Phase 6: Consent, Authentication, and Voter Verification
 
-### The Consent Flow
+### The Consent-to-Auth Funnel
 
-After detecting opinions during a chat session, VoteBot presents a summary when the conversation reaches a natural pause or the user closes the widget.
-
-**Design: Conversational, Not a Form**
+The opinion consent flow is the natural trigger for Memberstack account creation. Saving opinions requires an account; creating an account is the opportunity for voter file verification. The funnel has three stages:
 
 ```
-VoteBot: "Before you go — based on our conversation, it seems like
-you have some views on HB 123. Would you like to contribute them
-to our public opinion map? Here's what I gathered:
+Stage 1: Conversational consent          Stage 2: Account creation           Stage 3: Voter verification
+(in-chat, lightweight)                   (Memberstack signup)                (voter file match)
++-----------------------------------+    +------------------------------+    +------------------------------+
+| VoteBot summarizes extracted      |    | "Create a free account to    |    | "To verify you as a voter,   |
+| opinions, user confirms/edits     |    |  save your views and see     |    |  we'll match your info        |
+|                                   | -> |  how you compare to others"  | -> |  against your state's voter   |
+| No account needed at this stage   |    |                              |    |  registration records"        |
+| Opinions stored against           |    | Memberstack modal (Webflow-  |    |                              |
+| visitor_id temporarily            |    | native, handles email/pass)  |    | Name + DOB + address match   |
++-----------------------------------+    +------------------------------+    +------------------------------+
+        |                                         |                                   |
+        v                                         v                                   v
+  visitor_id + opinions              member_id linked to visitor_id        verified_voter = true
+  (Redis, 90-day TTL)               (permanent, cross-device)             jurisdiction + district confirmed
+                                    opinions promoted to durable           Polis XID = "votebot_{member_id}"
+                                    storage                                full weight in clustering
+```
+
+### Stage 1: Conversational Consent (In-Chat)
+
+After detecting opinions during a chat session, VoteBot presents a summary when the conversation reaches a natural pause:
+
+```
+VoteBot: "Based on our conversation, it seems like you have some
+views on HB 123:
 
 On funding: You support the state formula approach but want
 inflation indexing.
@@ -717,41 +737,155 @@ On teacher certification: You prefer alternative pathways over
 raising standards.
 On timeline: You think 3 years isn't enough.
 
-Does this sound right? You can edit anything, or skip entirely.
-Your responses would be anonymous."
+Does this sound right? You can edit anything, or skip entirely."
 
 User: "Yeah that's about right, but I'm actually neutral on timeline"
 
-VoteBot: "Got it — I've updated that. Ready to submit?"
+VoteBot: "Got it — I've updated that.
+
+Would you like to save your views and see how you compare to
+the 312 other people who've weighed in on this bill? You'll
+need a free DDP account to save them permanently."
 
 User: "Sure"
 
-VoteBot: "Done! Your views have been added. 312 others have also
-weighed in on this bill. Want to see where you land compared to
-others?"
+VoteBot: "Great! I'll open the signup form. Once you're set up,
+your views will be saved and you can update them anytime."
 ```
 
-This is conversational, not a checkbox form. The user can correct errors in natural language. VoteBot updates the opinion vector accordingly.
+At this point, opinions are stored against `visitor_id` in Redis (90-day TTL). The user can close the widget and opinions persist on the same browser. But they're not yet durable, cross-device, or verified.
 
-### Participation Tiers
+### Stage 2: Memberstack Account Creation
 
-| Tier | How Created | Identity Key | Data Used | Can See Group Placement |
-|------|------------|-------------|-----------|------------------------|
-| **Active** | Confirmed stances via consent flow | `visitor_id` (cross-session) | Full weight in clustering + Polis votes submitted | Yes |
-| **Passive** | Any chat user who expressed opinions | `visitor_id` (cross-session) | Reduced weight (0.5x) in aggregate clustering only | No |
-| **Polis Direct** | Voted in Polis embed/site | Polis participant ID (linked via XID to `visitor_id` when available) | Full weight in clustering | Yes (in Polis UI) |
+When the user agrees to save opinions, the widget triggers Memberstack's signup modal (see `PLAN-user-personalization.md` for full Memberstack integration details):
 
-Because `visitor_id` persists across sessions, a passive user who returns later and confirms their stances can be promoted to Active tier with their accumulated opinion history intact.
+```javascript
+// In widget, after user confirms consent:
+if (window.$memberstackDom) {
+    window.$memberstackDom.openModal('SIGNUP').then(function(result) {
+        if (result && result.data) {
+            DDPWebSocket.send({
+                type: 'member_linked',
+                payload: {
+                    member_id: result.data.id,
+                    visitor_id: DDPWebSocket.getVisitorId()
+                }
+            });
+        }
+    });
+}
+```
+
+**On the server**, when `member_linked` arrives:
+1. Link `visitor_id` → `member_id` in Redis (bidirectional, permanent)
+2. Promote opinion vectors from `visitor_id`-keyed Redis (90-day TTL) to `member_id`-keyed durable storage
+3. Set Polis XID to `"votebot_{member_id}"` (stable, cross-device)
+4. Submit confirmed opinions to Polis as votes
+
+If the user already has a Memberstack account, the widget detects it on load via `$memberstackDom.getCurrentMember()` and skips directly to consent → save.
+
+### Stage 3: Voter File Verification
+
+During Memberstack onboarding (or as a subsequent step for existing members), the user is prompted to verify their identity against their state's voter registration file:
+
+```
+Memberstack signup flow (Webflow-native):
+  Step 1: Email + password (standard Memberstack)
+  Step 2: "Verify as a registered voter" (optional)
+
+Voter verification form:
+  - Full legal name
+  - Date of birth
+  - Residential address (street, city, state, zip)
+  - [Verify my registration]
+```
+
+**Verification pipeline:**
+
+```
+User submits verification info
+    |
+    v
+VoteBot API: POST /votebot/v1/voter/verify
+    |
+    v
+Voter file lookup service:
+  1. Normalize name + address
+  2. Query voter file API or database
+     (L2 Political, TargetSmart, or state SOS API)
+  3. Match criteria:
+     - High confidence: last name + DOB + zip
+     - Medium confidence: full name + DOB + state
+  4. Return: match_found, voter_id, jurisdiction,
+     district, party_registration (if public record state)
+    |
+    v
+If match found:
+  - Set member.verified_voter = true
+  - Set member.jurisdiction = matched state
+  - Set member.district = matched district
+  - Store hashed voter_file_id (not raw)
+  - Update Memberstack metadata via API
+  - Opinions now carry "verified voter" weight
+    |
+    v
+If no match:
+  - User can retry with different info
+  - Or continue as unverified member
+  - Opinions still count, just without verified weight
+```
+
+**What voter verification enables:**
+- **Verified opinions carry full weight** in clustering — these are real constituents, not bots
+- **District-level opinion maps** — "Here's what verified voters in District 12 think about HB 123"
+- **Legislator accountability** — "63% of your verified constituents oppose this provision"
+- **Anti-gaming** — one person, one verified opinion per bill (deduplicated by voter file ID)
+
+**What it does NOT do:**
+- Store raw voter file data (only hashed voter ID + jurisdiction/district)
+- Reveal how someone voted in elections (voter file = registration, not ballot)
+- Require verification to use VoteBot or express opinions — always optional
+
+### Voter File Data Sources
+
+| Source | Coverage | Access Model | Cost |
+|--------|----------|-------------|------|
+| **L2 Political** | 50 states + DC | Bulk file or API | $$ (per-state) |
+| **TargetSmart** | 50 states + DC | SmartMatch API | $$$ (enterprise) |
+| **State SOS APIs** | Varies | Free (some states) | Free but inconsistent |
+| **TurboVote / Vote.org** | Varies | Partner API | Free/partnership |
+
+**Recommendation for v1:** Start with states that have public voter file APIs (FL, OH, NC). Expand to L2 or TargetSmart for full coverage once the pipeline is validated.
+
+### Participation Tiers (Updated)
+
+| Tier | How Created | Identity Key | Weight | Capabilities |
+|------|------------|-------------|--------|-------------|
+| **Passive** | Any chat user who expressed opinions | `visitor_id` | 0.5x | Aggregate stats only ("312 discussions") |
+| **Active (anonymous)** | Confirmed stances via in-chat consent | `visitor_id` | 0.7x | Included in clustering, can see own group |
+| **Active (member)** | Confirmed + Memberstack account | `member_id` | 0.9x | Durable, cross-device, Polis votes submitted |
+| **Verified voter** | Active member + voter file match | `member_id` + `voter_file_id` | 1.0x | Full weight, district attribution, anti-gaming |
+| **Polis Direct** | Voted in Polis embed | Polis participant ID | 1.0x | Full weight in clustering |
+
+Progression: **passive → active (anonymous) → active (member) → verified voter**. Each step is opt-in. `visitor_id` bridges anonymous stages; `member_id` bridges authenticated stages; `voter_file_id` provides civic verification.
 
 ### Questions to Consider
 
-18. **When exactly should the consent prompt appear?** Options: on widget close, after N opinion signals detected (3+?), after inactivity timeout (2 min?), or user-triggered ("submit my views"). Too early is annoying. Too late and the user has left.
+18. **When exactly should the consent prompt appear?** Recommendation: after 3+ opinion signals detected and a natural conversation pause. Too early is annoying. Too late and the user has left.
 
-19. **Should the consent prompt be in-chat or a separate UI?** In-chat (as shown above) feels natural but adds messages. A slide-up panel could be cleaner but breaks the conversational metaphor.
+19. **Should the consent prompt be in-chat or a separate UI?** Recommendation: consent summary in-chat (conversational), then hand off to Memberstack modal for account creation. The two-step approach feels natural.
 
-20. **Can a user revise after submitting?** "I changed my mind about the funding" in a later session should update their vector and Polis votes. `visitor_id` (now implemented) enables this for same-browser returning users — their opinion vector is keyed by `visitor_id`, so a revision in a new session can update the existing vector and resubmit Polis votes. Cross-device revision still requires authenticated identity.
+20. **Can a user revise after submitting?** Yes — `member_id` enables revision across devices and sessions. Returning members can update stances; Polis votes are resubmitted. Anonymous visitors can revise via `visitor_id` on the same browser.
 
-21. **What about the passive tier ethically?** Even at 0.5 weight, using inferred opinions without consent is a gray area. Consider: only include passive opinions in aggregate statistics ("312 discussions"), never in individual clustering.
+21. **What about the passive tier ethically?** Recommendation: passive tier contributes only to aggregate counts ("312 discussions"), never to individual clustering or district-level reporting. Only confirmed opinions (Active+) enter the opinion vector space.
+
+22b. **Should voter verification be required or optional?** Optional — requiring it would dramatically reduce participation. Unverified members still contribute valuable signal. Verification adds credibility weight and enables district attribution.
+
+23b. **How do you handle voter file matching errors?** False positives mitigated by requiring multiple fields (name + DOB + address). False negatives happen with stale data or name spelling differences. Allow retry. Never block the user.
+
+24b. **Privacy of voter file data?** Store only hashed voter file ID + jurisdiction/district. Raw name, DOB, and address are not retained after verification. User can request deletion via Memberstack account settings.
+
+25. **What if someone creates multiple Memberstack accounts?** Deduplicate by voter file ID — if two `member_id`s map to the same voter, only the most recent opinion vector counts. For unverified members, accept the limitation that multi-account gaming is possible (same as any web service without identity verification).
 
 ---
 
@@ -830,13 +964,19 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 - [ ] Scheduled recomputation
 - [ ] Minimum participant threshold logic
 
-### Milestone 5: Consent Flow + Results Display (Weeks 11-14)
-- [ ] Conversational consent prompt in chat
+### Milestone 5: Consent Flow + Memberstack + Voter Verification (Weeks 11-16)
+- [ ] Conversational consent prompt in chat (Stage 1)
 - [ ] Edit/correct flow in natural language
-- [ ] Vote submission to Polis on confirmation
+- [ ] Memberstack signup trigger from widget (Stage 2)
+- [ ] Server-side visitor-to-member linking
+- [ ] Opinion vector promotion (visitor_id → member_id storage)
+- [ ] Vote submission to Polis on member confirmation
+- [ ] Voter file verification API endpoint (`POST /votebot/v1/voter/verify`)
+- [ ] Voter file lookup service (start with FL, OH, NC state APIs)
+- [ ] Verified voter badge + weight in clustering
+- [ ] District attribution for verified voters
 - [ ] Cluster summary in VoteBot responses
 - [ ] "Where do I stand?" query handling
-- [ ] Delphi narrative integration
 
 ### Milestone 6: Emergent Positions + Full Loop (Weeks 14-18)
 - [ ] Novel claim clustering pipeline
@@ -886,6 +1026,10 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 | Clustering doesn't converge | No meaningful groups | Min participant threshold, degrade to per-position aggregates |
 | User rejects extraction in consent flow | Lost data | Log rejection as training signal, thank user |
 | LLM editorializes during elicitation | Biased opinions captured | Strong system prompt guardrails, neutral framing |
+| Voter file match returns wrong person | Wrong district attribution | Require multiple fields (name + DOB + address); allow user to dispute |
+| Voter file data is stale | Real voter not found | Allow retry; accept unverified status gracefully |
+| Multi-account gaming (unverified) | Inflated opinion counts | Accept limitation for unverified; voter file ID deduplicates verified |
+| Memberstack signup abandonment | User confirmed opinions but didn't create account | Opinions still stored against visitor_id (90-day TTL); prompt again on return |
 
 ---
 
@@ -910,10 +1054,12 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 14. Minimum coverage threshold for inclusion in clustering?
 17. How to handle emergent positions that split existing ones? (Versioning)
 
-### Ethics
-19. In-chat consent or separate UI?
-20. Can users revise after submitting?
-21. Is the passive participation tier ethically acceptable?
+### Ethics & Privacy
+19. In-chat consent or separate UI? → **Resolved**: in-chat consent, then Memberstack modal for account creation
+20. ~~Can users revise after submitting?~~ → **Resolved**: yes, via `member_id` (cross-device) or `visitor_id` (same browser)
+21. Is the passive participation tier ethically acceptable? → Recommendation: aggregate stats only, no individual clustering
+24b. How long to retain raw voter verification data? → Only hashed voter file ID stored; raw data not retained
+25. How to handle multi-account gaming? → Voter file ID deduplicates verified users; unverified accepted as limitation
 
 ### Architecture
 10. Should Polis voters see topic groupings? (Requires Polis UI changes)
@@ -921,6 +1067,12 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 12. Minimum participant count for meaningful clusters?
 15. Should emergent positions require human approval?
 16. Can emergent positions from one bill inform another? (Cross-bill learning)
+
+### Voter Verification
+26. Which voter file provider for v1? (Recommendation: state SOS APIs for FL/OH/NC, then L2 for expansion)
+27. How to handle states with no public voter file API? (Degrade gracefully — user can still be an unverified member)
+28. Should voter verification be one-time or periodic? (One-time; voter file changes like address updates don't affect opinion validity)
+29. What if a verified voter moves to a new district? (Re-verify on request; old opinions retain original district tag)
 
 ---
 
