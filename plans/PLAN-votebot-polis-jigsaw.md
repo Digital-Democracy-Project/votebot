@@ -755,34 +755,254 @@ your views will be saved and you can update them anytime."
 
 At this point, opinions are stored against `visitor_id` in Redis (90-day TTL). The user can close the widget and opinions persist on the same browser. But they're not yet durable, cross-device, or verified.
 
-### Stage 2: Memberstack Account Creation
+### Stage 2: Memberstack Account Creation + Auth Token Flow
 
-When the user agrees to save opinions, the widget triggers Memberstack's signup modal (see `PLAN-user-personalization.md` for full Memberstack integration details):
+When the user agrees to save opinions, the widget triggers Memberstack's signup modal. After signup/login, the widget obtains a **Memberstack JWT token** and sends it to VoteBot for server-side verification. This is the critical security step — VoteBot must verify the token, not trust a bare `member_id`.
+
+**Why JWT verification is required (not optional):** The personalization plan (`PLAN-user-personalization.md`) treats server-side validation as optional for read-only personalization. But for the opinion system, a spoofed `member_id` on the WebSocket would let someone submit opinions under another person's identity, pollute clustering data, and inject votes into Polis. Token verification is mandatory for any write operation.
+
+#### End-to-End Auth Flow
+
+```
+Browser (Widget)                        VoteBot Server                    Memberstack API
+─────────────────                       ──────────────                    ──────────────
+1. User confirms opinions in chat
+   "Would you like to save?"
+   User: "Sure"
+         |
+         v
+2. Widget opens Memberstack modal
+   $memberstackDom.openModal('SIGNUP')
+         |
+         v
+3. User completes signup/login
+   (email + password, handled by
+    Memberstack — VoteBot never
+    sees credentials)
+         |
+         v
+4. Memberstack SDK returns member
+   data + auth token to widget
+   result.data.id = "mem_abc123"
+   result.data.tokens.accessToken = "eyJ..."
+         |
+         v
+5. Widget sends token + visitor_id     ──►  6. Server receives member_auth
+   over existing WebSocket                      message on the open WebSocket
+   {                                            connection
+     type: "member_auth",
+     payload: {
+       memberstack_token: "eyJ...",           7. Server validates token
+       visitor_id: "v_fcfdd902b491"     ──────►  POST https://admin.memberstack.com
+     }                                              /members/current
+   }                                              Authorization: Bearer eyJ...
+                                                        |
+                                         ◄──────────  8. Memberstack returns member
+                                                        data (id, email, metadata)
+                                                        or 401 if invalid
+                                                        |
+                                                   9. Server extracts verified
+                                                      member_id from response
+                                                      (NOT from the WebSocket
+                                                       payload — that's untrusted)
+                                                        |
+                                                   10. Server links:
+                                                       visitor_id → member_id
+                                                       (Redis, bidirectional,
+                                                        permanent)
+                                                        |
+                                                   11. Server promotes opinions:
+                                                       visitor_id Redis (90d TTL)
+                                                       → member_id durable storage
+                                                        |
+                                                   12. Server sets Polis XID:
+                                                       "votebot_{member_id}"
+                                                        |
+                                                   13. Server submits confirmed
+                                                       opinions to Polis as votes
+         |
+         v
+14. Widget receives confirmation   ◄──  15. Server sends auth_confirmed
+    Shows: "Your views are saved!          { type: "auth_confirmed",
+     312 others have weighed in."            payload: { member_id: "mem_abc123" }}
+```
+
+#### Widget Implementation
 
 ```javascript
-// In widget, after user confirms consent:
-if (window.$memberstackDom) {
-    window.$memberstackDom.openModal('SIGNUP').then(function(result) {
-        if (result && result.data) {
-            DDPWebSocket.send({
-                type: 'member_linked',
-                payload: {
-                    member_id: result.data.id,
-                    visitor_id: DDPWebSocket.getVisitorId()
-                }
-            });
+// In widget, after user confirms consent in chat:
+async function triggerMemberstackAuth() {
+    if (!window.$memberstackDom) {
+        console.error('[DDPChat] Memberstack SDK not loaded');
+        return;
+    }
+
+    // Check if already logged in
+    var currentMember = await window.$memberstackDom.getCurrentMember()
+        .catch(function() { return null; });
+
+    if (currentMember && currentMember.data) {
+        // Already authenticated — send token directly
+        sendMemberAuth(currentMember.data);
+        return;
+    }
+
+    // Open signup/login modal
+    var result = await window.$memberstackDom.openModal('SIGNUP');
+    if (result && result.data) {
+        sendMemberAuth(result.data);
+    }
+}
+
+function sendMemberAuth(memberData) {
+    // Send the Memberstack JWT token — NOT the member_id
+    // The server extracts and verifies the member_id from the token
+    DDPWebSocket.send({
+        type: 'member_auth',
+        payload: {
+            memberstack_token: memberData.tokens.accessToken,
+            visitor_id: DDPWebSocket.getVisitorId()
         }
     });
 }
 ```
 
-**On the server**, when `member_linked` arrives:
-1. Link `visitor_id` → `member_id` in Redis (bidirectional, permanent)
-2. Promote opinion vectors from `visitor_id`-keyed Redis (90-day TTL) to `member_id`-keyed durable storage
-3. Set Polis XID to `"votebot_{member_id}"` (stable, cross-device)
-4. Submit confirmed opinions to Polis as votes
+**Key security principle:** The widget sends the `memberstack_token` (a JWT), not the `member_id`. The server extracts the `member_id` from Memberstack's API response after validating the token. This prevents spoofing — a client can't claim to be a different member.
 
-If the user already has a Memberstack account, the widget detects it on load via `$memberstackDom.getCurrentMember()` and skips directly to consent → save.
+#### Server Implementation
+
+```python
+# In api/routes/websocket.py — new message handler:
+
+async def handle_member_auth(session_id: str, payload: dict):
+    """Handle Memberstack authentication from the widget.
+
+    Validates the token server-side, links visitor to member,
+    promotes opinions, and submits to Polis.
+    """
+    memberstack_token = payload.get("memberstack_token")
+    visitor_id = payload.get("visitor_id")
+
+    if not memberstack_token or not visitor_id:
+        await manager.send_json(session_id, {
+            "type": "auth_error",
+            "payload": {"message": "Missing authentication data"}
+        })
+        return
+
+    # Validate token against Memberstack API
+    member_data = await validate_memberstack_token(memberstack_token)
+    if not member_data:
+        await manager.send_json(session_id, {
+            "type": "auth_error",
+            "payload": {"message": "Authentication failed — please try again"}
+        })
+        return
+
+    # Extract verified member_id from Memberstack response
+    member_id = member_data["id"]
+
+    # Link visitor_id → member_id (bidirectional, permanent)
+    await redis_store.link_visitor_to_member(visitor_id, member_id)
+
+    # Promote opinion vectors from visitor_id → member_id storage
+    await opinion_service.promote_opinions(visitor_id, member_id)
+
+    # Update session with authenticated identity
+    session = manager.get_session(session_id)
+    if session:
+        session["member_id"] = member_id
+        session["authenticated"] = True
+
+    # Submit confirmed opinions to Polis
+    await polis_service.submit_opinions(
+        member_id=member_id,
+        xid=f"votebot_{member_id}",
+    )
+
+    # Confirm to widget
+    await manager.send_json(session_id, {
+        "type": "auth_confirmed",
+        "payload": {"member_id": member_id}
+    })
+
+    logger.info(
+        "Member authenticated and linked",
+        session_id=session_id,
+        member_id=member_id,
+        visitor_id=visitor_id,
+    )
+```
+
+```python
+# services/memberstack.py
+
+import httpx
+import structlog
+
+logger = structlog.get_logger()
+
+async def validate_memberstack_token(token: str) -> dict | None:
+    """Validate a Memberstack JWT and return verified member data.
+
+    This is the ONLY way to get a trusted member_id — never trust
+    a member_id sent directly from the client.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://admin.memberstack.com/members/current",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(
+                "Memberstack token validation failed",
+                status=resp.status_code,
+            )
+    except Exception:
+        logger.warning("Memberstack validation error", exc_info=True)
+    return None
+```
+
+#### Returning Members (Already Logged In)
+
+When the widget loads and the user is already logged into Memberstack, the widget detects this and sends the token immediately — no modal needed:
+
+```javascript
+// In widget.js initWidgetWithContext(), after WebSocket connects:
+async function checkExistingAuth() {
+    if (!window.$memberstackDom) return;
+
+    var result = await window.$memberstackDom.getCurrentMember()
+        .catch(function() { return null; });
+
+    if (result && result.data && result.data.tokens) {
+        // Already authenticated — link this session
+        sendMemberAuth(result.data);
+    }
+}
+```
+
+This means a returning authenticated member's session is linked to their `member_id` from the first message, without any consent prompt. Their opinion vector continues to build from where they left off.
+
+#### Token Lifecycle
+
+| Event | What Happens |
+|---|---|
+| **Widget loads, user not logged in** | Widget has `visitor_id` only. Opinions stored against `visitor_id`. |
+| **User completes consent → signup** | Widget gets Memberstack token, sends to server. Server validates, links identities, promotes opinions. |
+| **Widget loads, user already logged in** | Widget detects Memberstack auth, sends token immediately. Server links session to `member_id`. |
+| **Memberstack token expires** | Widget's Memberstack SDK handles refresh automatically. If server gets a 401 from Memberstack validation, it requests re-auth from the widget. |
+| **User logs out of Memberstack** | Widget detects logout. Session falls back to `visitor_id` only. Existing opinions under `member_id` are preserved. |
+
+#### What the Server Never Trusts
+
+- A `member_id` sent directly from the client (could be spoofed)
+- A WebSocket message claiming to be authenticated without a token
+- An expired or invalid Memberstack token
+
+The `member_id` is always extracted from Memberstack's `/members/current` response after presenting a valid token. This is the only trusted path.
 
 ### Stage 3: Voter File Verification via Catalist
 
@@ -1100,8 +1320,12 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 ### Milestone 5: Consent Flow + Memberstack + Voter Verification (Weeks 11-16)
 - [ ] Conversational consent prompt in chat (Stage 1)
 - [ ] Edit/correct flow in natural language
-- [ ] Memberstack signup trigger from widget (Stage 2)
-- [ ] Server-side visitor-to-member linking
+- [ ] Memberstack signup/login trigger from widget (Stage 2)
+- [ ] Widget sends Memberstack JWT token (not bare member_id) via `member_auth` WebSocket message
+- [ ] `services/memberstack.py` — server-side JWT validation against Memberstack API
+- [ ] `handle_member_auth()` WebSocket handler — validates token, extracts verified member_id
+- [ ] Server-side visitor-to-member linking (Redis, bidirectional)
+- [ ] Returning member detection (widget sends token on load if already logged in)
 - [ ] Opinion vector promotion (visitor_id → member_id storage)
 - [ ] Vote submission to Polis on member confirmation
 - [ ] Catalist Fusion Light API client (`services/catalist.py` — token management, verify_voter)
