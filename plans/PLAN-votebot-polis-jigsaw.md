@@ -376,7 +376,9 @@ class PositionStance:
 
 class OpinionSignal:
     signal_id: str
+    visitor_id: str             # Persistent device identity (localStorage)
     session_id: str
+    conversation_id: str        # From analytics conversation tracking
     bill_webflow_id: str
     jurisdiction: str
     user_message: str
@@ -392,9 +394,9 @@ class OpinionSignal:
 - `contextual`: User responded to a prompted range — high confidence
 - `inferred`: Background extraction from unprompted conversation — moderate confidence
 
-### Building the Opinion Vector Per User
+### Building the Opinion Vector Per Visitor
 
-Across a session, a user might express opinions on multiple topics through multiple messages. The full opinion vector is built incrementally:
+Across sessions, a visitor (identified by `visitor_id`) builds up an opinion vector incrementally. Within a session, the analytics system tracks `conversation_id` and `conversation_message_index`, providing natural scoping for extraction. Across sessions, the vector accumulates — a user who discussed funding last week and returns to discuss teacher certification today gets both sets of stances in their vector.
 
 ```
 Message 1: "The funding formula seems reasonable"
@@ -414,7 +416,7 @@ Final session vector:
   + 1 novel claim flagged for emergent position discovery
 ```
 
-**Conflict resolution within a session:** If a user expresses contradictory stances on the same position across messages, take the most recent one (people refine their views during conversation). If an explicit selection contradicts an earlier inference, the explicit one wins.
+**Conflict resolution:** If a visitor expresses contradictory stances on the same position (within a session or across sessions), take the most recent one (people refine their views over time). If an explicit selection contradicts an earlier inference, the explicit one wins. Cross-session conflicts are resolved the same way — the vector keyed by `visitor_id` is always updated to reflect the latest stance.
 
 ### Questions to Consider
 
@@ -424,7 +426,7 @@ Final session vector:
 
 7. **What if the user doesn't want to express opinions?** Some users come to VoteBot purely for information. The elicitation should be invisible to them. The key indicator: does the user use opinion language ("I think", "I believe", "that's wrong") or information-seeking language ("what does", "how would", "explain")?
 
-8. **Should the conversation history persist across sessions?** If a user discussed funding yesterday and returns today, should VoteBot remember? Currently sessions are tab-scoped (30-min timeout). For meaningful opinion building, longer persistence would help — but requires authentication.
+8. **Should the conversation history persist across sessions?** If a user discussed funding yesterday and returns today, should VoteBot remember? Sessions are tab-scoped (30-min timeout), but we now have `visitor_id` (localStorage-based, persists across sessions on the same browser). This enables cross-session opinion vector accumulation without authentication — opinion vectors can be keyed by `visitor_id` and built up over multiple visits. The limitation is that `visitor_id` tracks browser instances, not people (cleared by incognito, Safari ITP, storage clearing, not shared across devices). Full authenticated identity would be needed for revision flows and cross-device continuity.
 
 9. **How do you prevent the LLM from editorializing?** VoteBot must present positions neutrally. But LLMs have tendencies. The system prompt needs strong guardrails, and the position framings (pro + counter) help balance.
 
@@ -465,7 +467,8 @@ Redis mappings:
 When a chat user confirms their opinions (consent flow):
 
 ```
-Chat user's opinion vector: [P1=+0.6, P8=-0.8, P9=+0.7, ...]
+Chat visitor's opinion vector (keyed by visitor_id):
+  votebot:opinions:{visitor_id}:{bill_webflow_id} -> [P1=+0.6, P8=-0.8, P9=+0.7, ...]
 
 Discretize to Polis votes:
     > +0.3 -> agree (+1)
@@ -482,13 +485,23 @@ Submit to Polis:
 
 Polis voters produce discrete +1/-1/0 per statement. These map directly to the opinion vector since each statement IS a policy position. No aggregation needed — the vector dimensions are already 1:1 with Polis statements.
 
-### Authentication
+### Identity & Authentication
 
-Polis XID JWT system for external identity:
+VoteBot now has a three-level identity model (implemented):
+
+| Level | ID | Lifetime | Use in Opinion System |
+|---|---|---|---|
+| **Visitor** | `visitor_id` | localStorage (permanent, best-effort) | Key for opinion vector accumulation across sessions. Enables returning users to build up their vector over multiple visits without auth. |
+| **Session** | `session_id` | sessionStorage (per-tab, 30-min timeout) | Groups messages within a single visit. |
+| **Conversation** | `conversation_id` | Server-side (resets on page/topic change) | Scopes opinion extraction to a coherent discussion thread. |
+
+**Polis XID mapping:** Use `visitor_id` (not `session_id`) as the Polis external identity so that a returning visitor's Polis votes accumulate correctly:
 - VoteBot service account created in Polis (one-time)
-- Each chat user gets XID: `"votebot_{session_id}"`
-- JWT: `{type: "xid", conversation_id, uid: service_uid, xid: "votebot_{session_id}"}`
+- Each chat user gets XID: `"votebot_{visitor_id}"`
+- JWT: `{type: "xid", conversation_id, uid: service_uid, xid: "votebot_{visitor_id}"}`
 - RSA-256 signed
+
+**Limitation:** `visitor_id` is best-effort device identity (cleared by incognito, Safari ITP, storage clearing). A user switching browsers or devices creates a new visitor. For revision flows ("I changed my mind") and cross-device continuity, authenticated user IDs would be needed — but `visitor_id` is sufficient for the initial implementation.
 
 ### When to Create the Polis Conversation
 
@@ -515,17 +528,17 @@ Runs PCA/UMAP and k-means on the unified opinion matrix to find opinion groups, 
 ### The Unified Matrix
 
 ```
-                P1    P2    P3    P4    P5    P6  ...  P10   P_new1
-polis_user_1:  [+1    -1     0    -1    +1     0        0      ?  ]
-polis_user_2:  [-1    +1    +1     0     0    +1       -1      ?  ]
-chat_user_3:   [+0.6   ?     ?     ?     ?     ?      +0.7    ?  ]
-chat_user_4:   [ ?    +0.9   ?    -0.7  +0.8   ?       ?     +0.6]
-confirmed_5:   [+1     0    +1    -1    +1    -1       +1     -1  ]
+                    P1    P2    P3    P4    P5    P6  ...  P10   P_new1
+polis_user_1:      [+1    -1     0    -1    +1     0        0      ?  ]
+polis_user_2:      [-1    +1    +1     0     0    +1       -1      ?  ]
+v_fcfdd902b491:    [+0.6   ?     ?     ?     ?     ?      +0.7    ?  ]  (chat, cross-session)
+v_a1b2c3d4e5f6:    [ ?    +0.9   ?    -0.7  +0.8   ?       ?     +0.6]  (chat, confirmed)
+confirmed_5:       [+1     0    +1    -1    +1    -1       +1     -1  ]
 ```
 
 - Polis voters: dense, discrete (+1/-1/0)
-- Chat users (unconfirmed): sparse, continuous, lower weight
-- Chat users (confirmed): sparse, discretized, full weight
+- Chat visitors (unconfirmed): sparse, continuous, lower weight — keyed by `visitor_id`, accumulated across sessions
+- Chat visitors (confirmed): sparse, discretized, full weight — `visitor_id` links to Polis XID
 
 ### Clustering Pipeline
 
@@ -722,11 +735,13 @@ This is conversational, not a checkbox form. The user can correct errors in natu
 
 ### Participation Tiers
 
-| Tier | How Created | Data Used | Can See Group Placement |
-|------|------------|-----------|------------------------|
-| **Active** | Confirmed stances via consent flow | Full weight in clustering + Polis votes submitted | Yes |
-| **Passive** | Any chat user who expressed opinions | Reduced weight (0.5x) in aggregate clustering only | No |
-| **Polis Direct** | Voted in Polis embed/site | Full weight in clustering | Yes (in Polis UI) |
+| Tier | How Created | Identity Key | Data Used | Can See Group Placement |
+|------|------------|-------------|-----------|------------------------|
+| **Active** | Confirmed stances via consent flow | `visitor_id` (cross-session) | Full weight in clustering + Polis votes submitted | Yes |
+| **Passive** | Any chat user who expressed opinions | `visitor_id` (cross-session) | Reduced weight (0.5x) in aggregate clustering only | No |
+| **Polis Direct** | Voted in Polis embed/site | Polis participant ID (linked via XID to `visitor_id` when available) | Full weight in clustering | Yes (in Polis UI) |
+
+Because `visitor_id` persists across sessions, a passive user who returns later and confirms their stances can be promoted to Active tier with their accumulated opinion history intact.
 
 ### Questions to Consider
 
@@ -734,7 +749,7 @@ This is conversational, not a checkbox form. The user can correct errors in natu
 
 19. **Should the consent prompt be in-chat or a separate UI?** In-chat (as shown above) feels natural but adds messages. A slide-up panel could be cleaner but breaks the conversational metaphor.
 
-20. **Can a user revise after submitting?** "I changed my mind about the funding" in a later session should update their vector and Polis votes. This requires persistent identity (beyond tab-scoped sessions).
+20. **Can a user revise after submitting?** "I changed my mind about the funding" in a later session should update their vector and Polis votes. `visitor_id` (now implemented) enables this for same-browser returning users — their opinion vector is keyed by `visitor_id`, so a revision in a new session can update the existing vector and resubmit Polis votes. Cross-device revision still requires authenticated identity.
 
 21. **What about the passive tier ethically?** Even at 0.5 weight, using inferred opinions without consent is a gray area. Consider: only include passive opinions in aggregate statistics ("312 discussions"), never in individual clustering.
 
@@ -854,11 +869,12 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 
 ### Data Privacy
 
-- Raw chat messages stored temporarily (Redis, 24h TTL)
-- Opinion vectors are inherently anonymized (no raw text)
-- Polis participants are pseudonymous (XID-based)
+- Raw chat messages stored temporarily (Redis, 24h TTL). Production query logs retain raw text for 90 days, then redact to structured fields only (per analytics logging governance policy).
+- Opinion vectors are keyed by `visitor_id` (opaque UUID, not PII) — inherently pseudonymized
+- Polis participants are pseudonymous (XID = `votebot_{visitor_id}`)
 - Representative quotes in cluster results require consent
 - Novel claims used for emergent positions are aggregated (no individual attribution)
+- `visitor_id` is localStorage-based — users can reset their identity by clearing browser storage
 
 ### Failure Modes
 
@@ -879,7 +895,7 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 5. How aggressively should VoteBot elicit? (Only when asked vs. contextual prompting)
 6. Should VoteBot show how many people hold each position before or after the user opines?
 7. What if the user doesn't want to express opinions? (Invisible elicitation)
-8. Should opinion history persist across sessions? (Requires auth)
+8. ~~Should opinion history persist across sessions? (Requires auth)~~ **Partially resolved** — `visitor_id` enables cross-session persistence on same browser without auth. Full cross-device persistence still requires auth.
 18. When should the consent prompt appear?
 19. In-chat consent or separate UI?
 22. Should VoteBot proactively ask about uncovered positions?
