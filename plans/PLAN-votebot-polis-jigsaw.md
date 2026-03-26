@@ -784,9 +784,9 @@ if (window.$memberstackDom) {
 
 If the user already has a Memberstack account, the widget detects it on load via `$memberstackDom.getCurrentMember()` and skips directly to consent → save.
 
-### Stage 3: Voter File Verification
+### Stage 3: Voter File Verification via Catalist
 
-During Memberstack onboarding (or as a subsequent step for existing members), the user is prompted to verify their identity against their state's voter registration file:
+During Memberstack onboarding (or as a subsequent step for existing members), the user is prompted to verify their identity against the national voter file via the **Catalist Fusion Light API**.
 
 ```
 Memberstack signup flow (Webflow-native):
@@ -794,68 +794,201 @@ Memberstack signup flow (Webflow-native):
   Step 2: "Verify as a registered voter" (optional)
 
 Voter verification form:
-  - Full legal name
+  - First name + Last name
   - Date of birth
   - Residential address (street, city, state, zip)
   - [Verify my registration]
 ```
 
+#### Catalist Fusion Light API Integration
+
+Catalist provides a national voter file matching service covering all 50 states + DC via a single API. The Fusion Light API matches input records against Catalist's voter file in real time and returns enriched data including a **DWID** (nationally unique person identifier), registration status, district assignments, and demographic/model data.
+
+**Authentication:**
+```python
+# services/catalist.py
+
+import httpx
+import time
+from votebot.config import get_settings
+
+# Module-level token cache (24-hour validity)
+_token_cache: dict = {"token": None, "expires_at": 0}
+
+async def _get_catalist_token() -> str:
+    """Get or refresh the Catalist API token.
+
+    IMPORTANT: Catalist requires token reuse — do NOT request a new token
+    per call. Tokens are valid for 24 hours. Catalist will suspend access
+    for applications that request excessive tokens.
+    """
+    if _token_cache["token"] and time.time() < _token_cache["expires_at"] - 300:
+        return _token_cache["token"]
+
+    settings = get_settings()
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://auth.catalist.us/oauth/token",
+            json={
+                "grant_type": "client_credentials",
+                "client_id": settings.catalist_client_id,
+                "client_secret": settings.catalist_client_secret,
+                "audience": "catalist_api_fusion_prod",
+            },
+            headers={"content-type": "application/json"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _token_cache["token"] = data["access_token"]
+        _token_cache["expires_at"] = time.time() + data["expires_in"]
+        return _token_cache["token"]
+```
+
+**Voter verification call:**
+```python
+async def verify_voter(
+    first_name: str,
+    last_name: str,
+    dob: str,          # YYYY-MM-DD
+    address1: str,
+    city: str,
+    state: str,
+    zip_code: str,
+    address2: str | None = None,
+) -> dict | None:
+    """Match a person against the Catalist national voter file.
+
+    Returns enriched voter data if matched, None if no match.
+    The DWID is the unique deduplication key — it persists across
+    address changes and state moves.
+    """
+    settings = get_settings()
+    token = await _get_catalist_token()
+
+    headers_list = [
+        "firstName", "lastName", "dob",
+        "address1", "address2", "city", "state", "zip"
+    ]
+    record = [
+        first_name, last_name, dob,
+        address1, address2 or "", city, state, zip_code
+    ]
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"https://api.catalist.us/fusion/v1/workflow/"
+            f"{settings.catalist_workflow_id}/job?token={token}",
+            json={
+                "executionType": "sync",
+                "headers": headers_list,
+                "records": [record],
+            },
+            headers={"content-type": "application/json"},
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+    # Extract matched record from immediateResult
+    records = result.get("immediateResult", {}).get("records", [])
+    if not records:
+        return None
+
+    matched = records[0]
+    dwid = matched.get("DWID")
+    if not dwid:
+        return None
+
+    return {
+        "dwid": dwid,
+        "matched": True,
+        "state": matched.get("state"),
+        "congressional_district": matched.get("congressional_district"),
+        "state_senate_district": matched.get("state_senate_district"),
+        "state_house_district": matched.get("state_house_district"),
+        "registration_status": matched.get("registration_status"),
+        "party_registration": matched.get("party_registration"),
+        # Additional fields depend on workflow configuration
+    }
+```
+
 **Verification pipeline:**
 
 ```
-User submits verification info
+User submits verification info (name, DOB, address)
     |
     v
 VoteBot API: POST /votebot/v1/voter/verify
     |
     v
-Voter file lookup service:
-  1. Normalize name + address
-  2. Query voter file API or database
-     (L2 Political, TargetSmart, or state SOS API)
-  3. Match criteria:
-     - High confidence: last name + DOB + zip
-     - Medium confidence: full name + DOB + state
-  4. Return: match_found, voter_id, jurisdiction,
-     district, party_registration (if public record state)
+CatalistService.verify_voter()
+  1. Get/reuse 24-hour auth token
+  2. POST to Fusion Light API (sync, single record)
+  3. Catalist normalizes input, matches against national voter file
+  4. Returns DWID + enriched voter data (districts, registration, etc.)
     |
     v
-If match found:
+If DWID returned (match found):
   - Set member.verified_voter = true
+  - Set member.catalist_dwid = DWID (unique, persistent person ID)
   - Set member.jurisdiction = matched state
-  - Set member.district = matched district
-  - Store hashed voter_file_id (not raw)
+  - Set member.congressional_district = from Catalist
+  - Set member.state_senate_district = from Catalist
+  - Set member.state_house_district = from Catalist
   - Update Memberstack metadata via API
   - Opinions now carry "verified voter" weight
     |
     v
 If no match:
-  - User can retry with different info
+  - User can retry with corrected info
+  - Common issues: name spelling, old address, recent move
   - Or continue as unverified member
   - Opinions still count, just without verified weight
 ```
 
+#### Why Catalist / DWID
+
+| Feature | Catalist DWID | State voter file IDs |
+|---------|--------------|---------------------|
+| **Coverage** | All 50 states + DC in one API | Per-state, inconsistent access |
+| **Persistence** | Same DWID across address changes and state moves | Changes when voter re-registers |
+| **Deduplication** | Nationally unique — one person, one DWID | Only unique within state |
+| **Data richness** | Districts, registration, demographics, models | Varies by state |
+| **API model** | Single REST call, sync, <1s latency | Varies: some API, some bulk file, some no access |
+
+The DWID is the deduplication key for the opinion system. If someone creates two Memberstack accounts, both will resolve to the same DWID — only the most recent opinion vector counts.
+
+#### Infrastructure Requirements
+
+| Requirement | Details |
+|---|---|
+| **IP allowlisting** | EC2 public IP must be registered with Catalist (static Elastic IP required) |
+| **Credentials** | `catalist_client_id`, `catalist_client_secret`, `catalist_workflow_id` in env/settings |
+| **Workflow setup** | Catalist configures a workflow with person matching + voter file append. One-time setup with Catalist account rep. |
+| **Token management** | 24-hour tokens cached in memory. Must NOT request new tokens per call — Catalist will suspend access. |
+| **Rate limits** | Up to 20 records per sync request. For voter verification (one user at a time), single-record calls are sufficient. |
+
+#### Configuration (new settings)
+
+```python
+# In config.py Settings:
+catalist_client_id: str = ""
+catalist_client_secret: str = ""
+catalist_workflow_id: str = ""       # e.g., "wkfl-bvns34hg"
+catalist_audience: str = "catalist_api_fusion_prod"
+```
+
 **What voter verification enables:**
 - **Verified opinions carry full weight** in clustering — these are real constituents, not bots
-- **District-level opinion maps** — "Here's what verified voters in District 12 think about HB 123"
+- **District-level opinion maps** — "Here's what verified voters in Congressional District 12 think about HB 123"
+- **Multi-level district attribution** — Congressional, state senate, and state house districts from a single Catalist match
 - **Legislator accountability** — "63% of your verified constituents oppose this provision"
-- **Anti-gaming** — one person, one verified opinion per bill (deduplicated by voter file ID)
+- **Anti-gaming** — one person, one DWID, one verified opinion per bill. Works across Memberstack accounts.
+- **Persistence across moves** — if a voter moves, their DWID follows them. Re-verification updates district but preserves identity.
 
 **What it does NOT do:**
-- Store raw voter file data (only hashed voter ID + jurisdiction/district)
+- Store raw PII (name, DOB, address discarded after verification — only DWID + districts retained)
 - Reveal how someone voted in elections (voter file = registration, not ballot)
 - Require verification to use VoteBot or express opinions — always optional
-
-### Voter File Data Sources
-
-| Source | Coverage | Access Model | Cost |
-|--------|----------|-------------|------|
-| **L2 Political** | 50 states + DC | Bulk file or API | $$ (per-state) |
-| **TargetSmart** | 50 states + DC | SmartMatch API | $$$ (enterprise) |
-| **State SOS APIs** | Varies | Free (some states) | Free but inconsistent |
-| **TurboVote / Vote.org** | Varies | Partner API | Free/partnership |
-
-**Recommendation for v1:** Start with states that have public voter file APIs (FL, OH, NC). Expand to L2 or TargetSmart for full coverage once the pipeline is validated.
 
 ### Participation Tiers (Updated)
 
@@ -883,7 +1016,7 @@ Progression: **passive → active (anonymous) → active (member) → verified v
 
 23b. **How do you handle voter file matching errors?** False positives mitigated by requiring multiple fields (name + DOB + address). False negatives happen with stale data or name spelling differences. Allow retry. Never block the user.
 
-24b. **Privacy of voter file data?** Store only hashed voter file ID + jurisdiction/district. Raw name, DOB, and address are not retained after verification. User can request deletion via Memberstack account settings.
+24b. **Privacy of voter file data?** PII (name, DOB, address) is sent to Catalist in transit only — not stored by VoteBot. Only the Catalist DWID (opaque person ID) + district assignments are retained. User can request deletion of their verified status via Memberstack account settings, which clears the DWID from our records.
 
 25. **What if someone creates multiple Memberstack accounts?** Deduplicate by voter file ID — if two `member_id`s map to the same voter, only the most recent opinion vector counts. For unverified members, accept the limitation that multi-account gaming is possible (same as any web service without identity verification).
 
@@ -971,10 +1104,13 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 - [ ] Server-side visitor-to-member linking
 - [ ] Opinion vector promotion (visitor_id → member_id storage)
 - [ ] Vote submission to Polis on member confirmation
-- [ ] Voter file verification API endpoint (`POST /votebot/v1/voter/verify`)
-- [ ] Voter file lookup service (start with FL, OH, NC state APIs)
+- [ ] Catalist Fusion Light API client (`services/catalist.py` — token management, verify_voter)
+- [ ] Voter verification API endpoint (`POST /votebot/v1/voter/verify`)
+- [ ] Catalist workflow setup (coordinate with Catalist account rep for field selection)
+- [ ] EC2 Elastic IP + Catalist IP allowlisting
+- [ ] DWID-based deduplication logic
 - [ ] Verified voter badge + weight in clustering
-- [ ] District attribution for verified voters
+- [ ] Multi-level district attribution (congressional, state senate, state house)
 - [ ] Cluster summary in VoteBot responses
 - [ ] "Where do I stand?" query handling
 
@@ -1005,16 +1141,20 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 | Landscape generation per bill | ~$0.10/bill | ~$10 (100 bills) |
 | Clustering per bill per run | CPU only | Delphi worker time |
 | Polis infrastructure | Fixed | ~$50-100 (EC2) |
-| **Total incremental** | | **~$105-155/month** |
+| Catalist Fusion Light API | Per Catalist agreement | Depends on volume tier (contact Catalist) |
+| **Total incremental** | | **~$105-155/month + Catalist** |
 
 ### Data Privacy
 
 - Raw chat messages stored temporarily (Redis, 24h TTL). Production query logs retain raw text for 90 days, then redact to structured fields only (per analytics logging governance policy).
 - Opinion vectors are keyed by `visitor_id` (opaque UUID, not PII) — inherently pseudonymized
-- Polis participants are pseudonymous (XID = `votebot_{visitor_id}`)
+- Polis participants are pseudonymous (XID = `votebot_{member_id}` for members, `votebot_{visitor_id}` for anonymous)
 - Representative quotes in cluster results require consent
 - Novel claims used for emergent positions are aggregated (no individual attribution)
 - `visitor_id` is localStorage-based — users can reset their identity by clearing browser storage
+- **Voter verification PII (name, DOB, address) is NOT stored** — submitted to Catalist API in transit, then discarded. Only the Catalist DWID (opaque person ID) + district assignments are retained.
+- Catalist API credentials (`client_secret`) must be stored securely (env vars, not in code). Token cached in memory only.
+- Catalist's own data handling is governed by their client agreement and data use policy.
 
 ### Failure Modes
 
@@ -1026,8 +1166,10 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 | Clustering doesn't converge | No meaningful groups | Min participant threshold, degrade to per-position aggregates |
 | User rejects extraction in consent flow | Lost data | Log rejection as training signal, thank user |
 | LLM editorializes during elicitation | Biased opinions captured | Strong system prompt guardrails, neutral framing |
-| Voter file match returns wrong person | Wrong district attribution | Require multiple fields (name + DOB + address); allow user to dispute |
-| Voter file data is stale | Real voter not found | Allow retry; accept unverified status gracefully |
+| Catalist match returns wrong person | Wrong DWID + district attribution | Catalist's matching is high-confidence (name + DOB + address); allow user to dispute and re-verify |
+| Catalist match fails (real voter not found) | User can't verify | Common causes: recent move, name change, new registration. Allow retry with corrected info; accept unverified status gracefully |
+| Catalist token expired mid-session | Verification call fails | Auto-refresh token (cache checks expiry with 5-min buffer); retry once on 403 |
+| Catalist API down or slow | Verification unavailable | Return graceful error ("verification temporarily unavailable"); user continues as unverified member |
 | Multi-account gaming (unverified) | Inflated opinion counts | Accept limitation for unverified; voter file ID deduplicates verified |
 | Memberstack signup abandonment | User confirmed opinions but didn't create account | Opinions still stored against visitor_id (90-day TTL); prompt again on return |
 
@@ -1068,11 +1210,13 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 15. Should emergent positions require human approval?
 16. Can emergent positions from one bill inform another? (Cross-bill learning)
 
-### Voter Verification
-26. Which voter file provider for v1? (Recommendation: state SOS APIs for FL/OH/NC, then L2 for expansion)
-27. How to handle states with no public voter file API? (Degrade gracefully — user can still be an unverified member)
-28. Should voter verification be one-time or periodic? (One-time; voter file changes like address updates don't affect opinion validity)
-29. What if a verified voter moves to a new district? (Re-verify on request; old opinions retain original district tag)
+### Voter Verification (Catalist)
+26. ~~Which voter file provider for v1?~~ **Resolved** — Catalist Fusion Light API (national coverage, single API, DWID-based dedup)
+27. ~~How to handle states with no public voter file API?~~ **Resolved** — Catalist covers all 50 states + DC
+28. Should voter verification be one-time or periodic? (Recommendation: one-time, with optional re-verify for address/district updates. DWID persists across moves.)
+29. What if a verified voter moves to a new district? (Re-verify updates district assignments from Catalist; DWID stays the same; old opinions retain their original district tag, new opinions get the new district)
+30. What Catalist workflow fields should be included in the append? (Minimum: DWID, registration_status, congressional_district, state_senate_district, state_house_district. Optional: party_registration, demographics. Discuss with Catalist account rep during workflow setup.)
+31. Should Catalist DWID be stored directly or hashed? (Recommendation: store directly — DWID is already an opaque identifier with no PII. Hashing adds complexity without privacy benefit since Catalist assigned the ID.)
 
 ---
 
