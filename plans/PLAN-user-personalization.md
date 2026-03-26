@@ -1,21 +1,23 @@
 # User Personalization Plan: Anonymous-to-Authenticated Identity Pipeline
 
+> **Status note (March 2026):** Phases 0, 1, and 4 of this plan have been largely implemented via the User Analytics & Behavioral Logging system (see `plans/user-analytics-logging.md`, commit `5d1870d`). Phase 2 (Memberstack auth) has been superseded by the conversational onboarding design in `plans/PLAN-votebot-polis-jigsaw.md` Phase 6, which replaces the client-side modal approach with server-side account creation via Memberstack Admin API + Catalist voter verification, all within the chat. Phase 3 (personalization) remains unimplemented and is the primary remaining work in this plan.
+
 ## Problem Statement
 
-VoteBot currently has **zero user identity**. Every chat session is an ephemeral UUID stored in `sessionStorage` (tab-scoped, 30-minute timeout, lost on tab close). We can't distinguish users, track return visits, or build persistent profiles. The production logs show `client_ip: 127.0.0.1` for all 278 queries last week because nginx/DDP-API strip the real IP. We suspect 91% of recent traffic is a single power user, but we literally can't prove it.
+~~VoteBot currently has **zero user identity**.~~ **(Partially resolved)** VoteBot now has a three-level identity model: `visitor_id` (localStorage, cross-session), `session_id` (sessionStorage, per-tab), and `conversation_id` (server-side, per conversation boundary). Event-based analytics logging captures all three levels with intent classification, grounding status, and behavioral metrics.
 
-This plan creates a **progressive identity pipeline**: anonymous visitor tracking from day one, with a clean upgrade path to Memberstack-authenticated profiles. It bridges the gap between "we know nothing about our users" and the Polis/Jigsaw opinion elicitation system (see `PLAN-votebot-polis-jigsaw.md`) that fundamentally requires persistent identity to build opinion vectors across sessions.
+What's still missing: **personalized responses** based on visitor history, **Memberstack authentication** for durable identity, and **returning visitor continuity** (e.g., "since your last visit, this bill passed committee").
 
 ---
 
 ## Goals
 
-1. **Track anonymous visitors** across sessions, tabs, and return visits with a persistent visitor ID
-2. **Capture behavioral signals** (pages viewed, topics engaged with, session patterns) before any login exists
-3. **Provide a clean auth upgrade path** to Memberstack login when the user chooses to authenticate
-4. **Merge anonymous activity** into the authenticated profile seamlessly (no data loss on login)
-5. **Lay the foundation** for persistent opinion vectors needed by the Polis/Jigsaw integration
-6. **Fix the IP blind spot** immediately (X-Forwarded-For propagation)
+1. ~~**Track anonymous visitors** across sessions, tabs, and return visits with a persistent visitor ID~~ **Done** — `visitor_id` in localStorage, sent in every WebSocket payload, logged in all events
+2. ~~**Capture behavioral signals** (pages viewed, topics engaged with, session patterns) before any login exists~~ **Done** — event-based logging with intent, grounding, scroll_depth, time_on_page, conversation tracking
+3. **Provide a clean auth upgrade path** to Memberstack login when the user chooses to authenticate — **Redesigned** in Jigsaw plan: conversational onboarding in chat, server-side Memberstack Admin API account creation
+4. **Merge anonymous activity** into the authenticated profile seamlessly (no data loss on login) — Designed but not yet implemented (visitor_id → member_id linking)
+5. ~~**Lay the foundation** for persistent opinion vectors needed by the Polis/Jigsaw integration~~ **Done** — `visitor_id` is the opinion vector key; `member_id` promotion designed in Jigsaw plan
+6. **Fix the IP blind spot** immediately (X-Forwarded-For propagation) — Still needed (infra task)
 
 ---
 
@@ -81,7 +83,7 @@ The key insight: **we start collecting visitor-level data immediately**, so when
 
 ---
 
-## Phase 0: Fix the IP Blind Spot (Immediate)
+## Phase 0: Fix the IP Blind Spot (Immediate) — NOT YET DONE
 
 **Problem**: Every query logs `client_ip: 127.0.0.1` because the real client IP is lost in the nginx -> DDP-API -> VoteBot proxy chain.
 
@@ -106,11 +108,13 @@ The key insight: **we start collecting visitor-level data immediately**, so when
 
 ---
 
-## Phase 1: Anonymous Visitor Tracking (Widget + Redis)
+## Phase 1: Anonymous Visitor Tracking (Widget + Redis) — IMPLEMENTED
+
+> **Implemented** in the User Analytics & Behavioral Logging system (commit `5d1870d`). The visitor_id, event-based logging, conversation tracking, intent classification, and evaluation script enhancements described below are all live in production. The Redis visitor profile (section 1.2) is NOT yet implemented — visitor data currently lives only in the JSONL event logs, not in a Redis profile. The profile would enable real-time personalization (Phase 3).
 
 ### 1.1 Widget: Persistent Visitor ID
 
-Add a `visitor_id` to the chat widget, stored in `localStorage` (not `sessionStorage`), so it persists across tabs and sessions.
+~~Add a `visitor_id` to the chat widget, stored in `localStorage` (not `sessionStorage`), so it persists across tabs and sessions.~~ **Done** — implemented in `chat-widget/src/websocket.js`.
 
 **`chat-widget/src/websocket.js` changes:**
 
@@ -267,13 +271,23 @@ if visitor_id:
 
 ---
 
-## Phase 2: Memberstack Authentication Integration
+## Phase 2: Memberstack Authentication Integration — SUPERSEDED
 
-### 2.1 How Memberstack Works with Webflow
+> **Superseded** by the conversational onboarding design in `plans/PLAN-votebot-polis-jigsaw.md` Phase 6. The approach below (client-side Memberstack modal, bare member_id on WebSocket URL, optional server-side JWT validation) has been replaced with:
+>
+> - **Server-side account creation** via Memberstack Admin API (no client-side modal needed)
+> - **Conversational onboarding** — VoteBot asks for name + email in chat, creates account server-side
+> - **Catalist voter verification** — VoteBot asks for DOB + zip, verifies against national voter file
+> - **Mandatory server-side identity verification** for any write operation (opinion submission, Polis votes)
+>
+> See the Jigsaw plan for the current design. The sections below are retained for reference but should not be implemented as written.
+
+### 2.1 How Memberstack Works with Webflow *(reference only — see Jigsaw plan)*
 
 Memberstack provides:
 - Login/signup modals on the DDP Webflow site (native integration)
 - A JavaScript SDK (`window.$memberstackDom`) available on all pages
+- **Admin API** for server-side member creation and metadata updates (used by Jigsaw conversational onboarding)
 - JWT tokens for authenticated API calls
 - Member metadata fields (custom JSON per member)
 - Webhooks for signup, login, profile update events
@@ -416,78 +430,83 @@ This requires:
 
 From `PLAN-votebot-polis-jigsaw.md`, the opinion elicitation system needs:
 
-1. **Persistent identity** across sessions — to build opinion vectors incrementally
-2. **Consent tracking** — which users have confirmed their opinions for Polis submission
-3. **Polis XID** — maps VoteBot identity to Polis participant
+1. **Persistent identity** across sessions — ✓ `visitor_id` (implemented), `member_id` (via conversational onboarding in Jigsaw plan)
+2. **Consent tracking** — designed in Jigsaw plan Phase 6 (conversational consent → account creation)
+3. **Polis XID** — `"votebot_{member_id}"` for authenticated members, `"votebot_{visitor_id}"` for anonymous
+4. **Voter verification** — Catalist DWID for anti-gaming and district attribution (Jigsaw plan Phase 6, Stage 3)
 
-The three-layer model solves all three:
-- **Anonymous visitors** get passive opinion extraction stored against `visitor_id` (Phase 2 of Polis plan)
-- **Authenticated members** get consent flow + Polis vote submission with `polis_xid = "votebot_{member_id}"`
-- **Merge on login** — anonymous opinion vectors transfer to the member profile
+The identity pipeline:
+- **Anonymous visitors** → passive opinion extraction stored against `visitor_id`
+- **Conversational onboarding** (Jigsaw) → VoteBot asks for name + email → Memberstack account created server-side → `member_id` linked to `visitor_id` → opinions promoted to durable storage
+- **Voter verification** (optional) → DOB + zip → Catalist match → DWID + districts stored on Memberstack profile
 
 ---
 
-## Phase 4: Analytics and Evaluation Improvements
+## Phase 4: Analytics and Evaluation Improvements — LARGELY IMPLEMENTED
 
-### 4.1 Enhanced Production Evaluator
+> **Largely implemented** in the User Analytics system. The evaluation script now supports `--visitor` and `--event-type` filters, reports unique visitors, queries per visitor, success tiers, intent distribution, conversation metrics, multi-level handoff rates, and grounding distribution. See `plans/user-analytics-logging.md` for the full event schema.
 
-Update `scripts/evaluate_production.py` to:
-- Segment by `visitor_id` instead of just `session_id`
-- Report unique visitors per day/week
-- Identify power users vs. casual visitors
-- Track return visitor rate
-- Measure queries-per-visitor distribution
+### 4.1 Enhanced Production Evaluator — DONE
 
-### 4.2 Visitor Funnel Metrics
+~~Update `scripts/evaluate_production.py` to:~~
+- ✓ Segment by `visitor_id` (`--visitor` flag)
+- ✓ Report unique visitors per day/week
+- ✓ Identify power users vs. casual visitors (queries per visitor)
+- Return visitor rate — requires Redis visitor profiles (Phase 1.2, not yet implemented)
+- ✓ Measure queries-per-visitor distribution
+
+### 4.2 Visitor Funnel Metrics — PARTIALLY DONE
 
 New metrics enabled by visitor tracking:
-- **Unique visitors per day** (deduped by visitor_id)
-- **Return visitor rate** (visitors who come back within 7 days)
-- **Engagement depth** (avg queries per visitor per session)
-- **Bill engagement breadth** (avg distinct bills per visitor)
-- **Conversion rate** (anonymous -> Memberstack signup)
-- **Jurisdiction distribution** (inferred from behavior, not just page_context)
+- ✓ **Unique visitors per day** (deduped by visitor_id)
+- **Return visitor rate** — requires Redis profiles (not yet implemented)
+- ✓ **Engagement depth** (avg queries per visitor per session)
+- **Bill engagement breadth** — requires Redis profiles (not yet implemented)
+- **Conversion rate** (anonymous → Memberstack signup) — requires Memberstack integration (Jigsaw plan)
+- ✓ **Jurisdiction distribution** (from page_context in events)
 
 ---
 
-## Implementation Roadmap
+## Implementation Roadmap (Updated)
 
-### Phase 0: X-Forwarded-For Fix (Day 1)
+### Phase 0: X-Forwarded-For Fix — NOT STARTED
 - [ ] Update DDP-API proxy to forward `X-Forwarded-For` and `X-Real-IP` headers
 - [ ] Verify VoteBot extracts real client IP from forwarded headers
 - [ ] Deploy and confirm IPs appear in query logs
 
-### Phase 1: Anonymous Visitor Tracking (Week 1-2)
-- [ ] Add `visitor_id` to chat widget (`localStorage`-based)
-- [ ] Pass `visitor_id` in WebSocket connection URL
-- [ ] Add visitor profile CRUD to `redis_store.py`
-- [ ] Update WebSocket handler to track visitor activity
-- [ ] Add `visitor_id` to query logger JSONL output
-- [ ] Update `evaluate_production.py` to segment by visitor
-- [ ] Rebuild chat widget (`npm run build`)
-- [ ] Deploy widget + backend, verify visitor tracking in logs
+### Phase 1: Anonymous Visitor Tracking — DONE (except Redis profiles)
+- [x] Add `visitor_id` to chat widget (`localStorage`-based)
+- [x] Send `visitor_id` in WebSocket payload (not URL — implemented in payload)
+- [ ] Add visitor profile CRUD to `redis_store.py` (enables Phase 3 personalization)
+- [x] Update WebSocket handler to track visitor activity
+- [x] Add `visitor_id` to query logger JSONL output
+- [x] Update `evaluate_production.py` to segment by visitor
+- [x] Rebuild chat widget (`npm run build`)
+- [x] Deploy widget + backend, verify visitor tracking in logs ✓ (confirmed working 2026-03-26)
 
-### Phase 2: Memberstack Integration (Week 3-4)
-- [ ] Add Memberstack SDK detection to chat widget
-- [ ] Pass `member_id` in WebSocket connection when authenticated
-- [ ] Implement visitor-to-member linking in Redis
-- [ ] Add `memberstack_api_key` to config/settings
-- [ ] Optional: server-side Memberstack JWT validation for write operations
-- [ ] Add member profile schema to Redis
-- [ ] Deploy and test with Memberstack test account
+### Phase 2: Memberstack Integration — SUPERSEDED BY JIGSAW PLAN
+See `plans/PLAN-votebot-polis-jigsaw.md` Phase 6 for the current design:
+- [ ] `services/memberstack.py` — Admin API client (create_member, update_metadata, validate_token)
+- [ ] Conversational onboarding Step A: name + email → server-side Memberstack account creation
+- [ ] Conversational onboarding Step B: DOB + zip → Catalist voter verification
+- [ ] `create_voter_account` LLM tool for structured data extraction
+- [ ] Returning member detection (Memberstack JWT on widget load)
+- [ ] Visitor-to-member linking in Redis
+- [ ] Opinion vector promotion (visitor_id → member_id)
 
-### Phase 3: Personalization (Week 5-7)
+### Phase 3: Personalization — NOT STARTED (primary remaining work)
+Requires Redis visitor profiles (Phase 1 remainder) and Memberstack integration (Phase 2):
 - [ ] Context-aware welcome messages based on visitor history
 - [ ] Jurisdiction inference from visitor behavior + IP geolocation
 - [ ] "Since your last visit" bill status diffs
 - [ ] Return visitor continuity in agent.py system prompt
 - [ ] A/B test: personalized vs. generic welcome messages
 
-### Phase 4: Analytics + Polis Bridge (Week 8+)
-- [ ] Enhanced production evaluator with visitor segmentation
+### Phase 4: Analytics — LARGELY DONE
+- [x] Enhanced production evaluator with visitor segmentation
 - [ ] Visitor funnel dashboard (Grafana or simple script)
-- [ ] Wire visitor/member identity into Polis XID generation
-- [ ] Consent flow for opinion vector submission (from Polis plan Phase 6)
+- [ ] Wire visitor/member identity into Polis XID generation (Jigsaw plan)
+- [ ] Consent flow for opinion vector submission (Jigsaw plan Phase 6)
 
 ---
 
@@ -536,10 +555,10 @@ New metrics enabled by visitor tracking:
 
 1. **Should we store visitor profiles in Redis or a durable database?** Redis with 90-day TTL is simple but lossy. DynamoDB or PostgreSQL would be permanent but adds infrastructure. Recommendation: Start with Redis; move to DynamoDB only if we need profiles beyond 90 days (i.e., when Polis opinion vectors need long-term storage).
 
-2. **When should we prompt for Memberstack signup?** Options: never (let the website handle it), after N sessions, after expressing opinions (Polis consent flow triggers it), or on "save my preferences" action. Recommendation: Don't prompt from the widget. Let Memberstack signup happen on the DDP website; the widget just detects it.
+2. ~~**When should we prompt for Memberstack signup?**~~ **Resolved** — VoteBot prompts conversationally after 3+ opinion signals, asks for name + email in chat, and creates the Memberstack account server-side via Admin API. No modal, no redirect. See Jigsaw plan Phase 6.
 
 3. **Should the widget show different UI for authenticated users?** E.g., "Logged in as [name]" badge, or a "my profile" button. Recommendation: Not initially. The chat experience should be identical; personalization is invisible (better welcome messages, jurisdiction inference).
 
-4. **How do we handle the Webflow -> Memberstack -> VoteBot auth flow?** Webflow pages embed the widget. Memberstack JS SDK runs on Webflow. The widget reads Memberstack state. VoteBot validates server-side. This is a four-system chain. Recommendation: Widget-side detection only (Phase 2.2); defer server-side validation until we need write operations.
+4. ~~**How do we handle the Webflow -> Memberstack -> VoteBot auth flow?**~~ **Resolved** — Two paths: (a) New users: VoteBot creates Memberstack account server-side via Admin API during conversational onboarding — no client-side SDK interaction needed. (b) Returning members: widget detects Memberstack auth via `$memberstackDom.getCurrentMember()`, sends JWT token over WebSocket, server validates against Memberstack API. See Jigsaw plan Phase 6.
 
 5. **IP geolocation service?** For jurisdiction inference from IP. Options: MaxMind GeoLite2 (free, self-hosted DB), ip-api.com (free tier), or just use the IP as a session-level hint without geocoding. Recommendation: Defer — behavioral jurisdiction inference (which state's bills they read) is more accurate and doesn't require an external service.
