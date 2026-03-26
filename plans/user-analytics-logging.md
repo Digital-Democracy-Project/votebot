@@ -2,7 +2,7 @@
 
 **Goal:** Transform query logging from a flat log file into a behavioral analytics system that supports visitor segmentation, outcome measurement, and product insight.
 
-**Status:** Draft v2 — revised based on feedback
+**Status:** Draft v3 — revised based on second round of feedback
 
 ---
 
@@ -37,22 +37,49 @@ We cannot answer:
 
 ## Core Metrics
 
-Before designing fields, define what decisions this enables. We must be able to compute:
+Before designing fields, define what decisions this enables.
 
-| Metric | What It Tells Us | Required Fields |
+### Metric Definitions
+
+Metrics are defined at three levels. When reporting, always name the level explicitly to avoid conflicting numbers (e.g., "5% query handoff rate" vs "12% conversation handoff rate" can both be true).
+
+| Metric | Level | Definition | Required Fields |
+|---|---|---|---|
+| **Query success rate** | Query | See "Success Tiers" below | `confidence`, `retrieval_count`, `fallback_used`, `handoff_triggered`, `has_citations` |
+| **Retrieval miss rate** | Query | % of queries with `retrieval_count == 0` | `retrieval_count` |
+| **Fallback rate** | Query | % of queries where `fallback_used == true` (not same as web search — see below) | `fallback_used`, `fallback_reason` |
+| **Web search rate** | Query | % of queries where `web_search_used == true` (informational, not necessarily failure) | `web_search_used` |
+| **Query handoff rate** | Query | % of queries that triggered handoff | `handoff_triggered` |
+| **Conversation handoff rate** | Conversation | % of conversations containing at least one handoff | `conversation_id`, `handoff_triggered` |
+| **Session handoff rate** | Session | % of sessions containing at least one handoff | `session_id`, `handoff_triggered` |
+| **Avg queries per conversation** | Conversation | Mean `conversation_message_index` at conversation end | `conversation_id`, `conversation_message_index` |
+| **Drop-off rate** | Conversation | % of conversations with only 1 query | `conversation_id`, `conversation_message_index` |
+| **Unique visitors** | Visitor | Count of distinct `visitor_id` values | `visitor_id` |
+| **Intent distribution** | Query | Breakdown by `primary_intent` and `sub_intent` | `primary_intent`, `sub_intent` |
+| **Conversion to vote** | Session | % of sessions where user clicked vote link | *Not measurable in v1* — requires widget click tracking. Proxy: % of responses containing vote CTA link. |
+
+### Success Tiers
+
+"Query success" is not a single number. Report it as layered tiers:
+
+| Tier | Definition | What It Measures |
 |---|---|---|
-| **Query success rate** | % of queries answered with confidence >= 0.5 | `confidence`, `intent` |
-| **Fallback rate** | % of queries requiring web search | `web_search_used` |
-| **Handoff rate** | % of sessions escalated to human | `handoff_triggered` |
-| **Avg queries per conversation** | User engagement depth | `conversation_id`, `message_index` |
-| **Drop-off rate** | % of conversations abandoned after 1 query | `conversation_id`, `message_index` |
-| **Retrieval miss rate** | % of queries with 0 RAG results | `retrieval_count` |
-| **Unique visitors** | Reach / adoption | `visitor_id` |
-| **Queries per visitor** | Power user identification | `visitor_id` |
-| **Intent distribution** | What users actually ask about | `intent` |
-| **Conversion to vote** | Whether VoteBot drives civic action | `vote_clicked` (future) |
+| **System success** | Response returned, no error, no handoff triggered | "Did the system work?" |
+| **Retrieval success** | `retrieval_count > 0` and `has_citations == true` | "Did we find relevant data?" |
+| **Heuristic answer success** | Confidence >= threshold + no fallback + no handoff + has citations | "Did we probably answer well?" |
+| **User success** | Positive feedback, click-through, or conversion | "Did the user get what they needed?" — *Not measurable in v1.* |
 
-If we can't compute these from the logs, the logging is wrong.
+### Fallback vs Web Search
+
+These are distinct concepts:
+
+| Field | Meaning |
+|---|---|
+| `web_search_used` | OpenAI web search tool was invoked. May be intentional (e.g., current events query) or a fallback. |
+| `fallback_used` | The system fell back from its primary retrieval path because RAG was insufficient. |
+| `fallback_reason` | Why fallback occurred: `no_internal_retrieval`, `low_confidence`, `out_of_scope`, `missing_bill_context` |
+
+Web search can be a normal tool invocation, not necessarily a failure. Treating all web search as fallback inflates apparent failure rate.
 
 ---
 
@@ -64,15 +91,63 @@ If we can't compute these from the logs, the logging is wrong.
 |---|---|---|---|---|
 | **Visitor** | `visitor_id` | `localStorage` | Permanent (best-effort) | Cross-session device tracking |
 | **Session** | `session_id` | `sessionStorage` (existing) | Per-tab, 30-min timeout | Visit-level intent |
-| **Conversation** | `conversation_id` | Server-side (per page context) | Resets on page navigation | Multi-turn behavior |
+| **Conversation** | `conversation_id` | Server-side | See rules below | Multi-turn behavior |
 
-**Important caveat:** `visitor_id` tracks **browser instances**, not people. It is cleared by incognito mode, Safari ITP, storage clearing, and is not shared across devices or browsers. Treat it as best-effort device identity, not stable user identity. If authenticated user IDs become available (Webflow Memberships, etc.), add an optional `user_id` field.
+**Important caveat:** `visitor_id` tracks **browser instances**, not people. It is cleared by incognito mode, Safari ITP, storage clearing, and is not shared across devices or browsers. Treat it as best-effort device identity, not stable user identity.
 
-**`conversation_id`** is new and critical. It's derived from `session_id` + a counter that increments when the user navigates to a new page (context change). This lets us measure conversation length, multi-turn resolution, and drop-off within a single page visit.
+### Conversation Boundary Rules
 
-### Event-Oriented Log Entry
+A new conversation starts when **any** of these occur:
+- Inactivity timeout (no message for 10+ minutes within a session)
+- Explicit new chat / session reset
+- Strong context discontinuity (page type changes, e.g., bill → legislator)
 
-Each log entry becomes a richer event with identity, behavior, and outcome fields:
+A page navigation within the same type (bill → different bill) starts a new conversation. But navigating from a general page to a bill page while asking about that bill does **not** — the user is continuing a journey.
+
+Implementation: the server tracks `last_message_time` and `last_page_context` per session. On each message, it evaluates the boundary rules and either continues the current conversation or increments the counter.
+
+`conversation_id` format: `{session_id}:{n}` where `n` is the conversation counter within the session.
+
+### Message Indexing
+
+Two counters, tracked separately:
+
+| Counter | Scope | Resets When |
+|---|---|---|
+| `session_message_index` | Per session | Never (within session lifetime) |
+| `conversation_message_index` | Per conversation | When `conversation_id` changes |
+
+`conversation_message_index` is the primary field for turn-count and drop-off analysis. `session_message_index` is useful for session-level engagement depth.
+
+### Event Types
+
+Three event types in v1 — enough for a real event model without over-engineering:
+
+| Event | When Emitted | Key Fields |
+|---|---|---|
+| `message_received` | Server receives a user message, before processing | `visitor_id`, `session_id`, `conversation_id`, `message`, `page_context`, `referrer`, `page_url` |
+| `query_processed` | Agent finishes processing and responds | All behavioral/outcome fields (intent, retrieval, confidence, fallback, etc.) |
+| `conversation_ended` | Conversation boundary detected or session disconnects | Summary: `turn_count`, `duration_seconds`, `handoff_occurred`, `fallback_occurred`, `retrieval_miss_occurred`, `terminal_state` |
+
+The `conversation_ended` event is a lightweight summary record that avoids reconstructing conversations from raw query records at analysis time.
+
+`terminal_state` values: `"completed"` (user stopped asking), `"handoff"` (escalated to human), `"abandoned"` (session disconnect mid-conversation), `"navigated"` (user moved to new context).
+
+### Intent Taxonomy
+
+Two-level classification for actionable granularity:
+
+| `primary_intent` | `sub_intent` examples |
+|---|---|
+| `bill` | `summary`, `support_opposition`, `vote_history`, `status`, `explanation`, `comparison` |
+| `legislator` | `voting_record`, `contact`, `bio`, `ddp_score`, `sponsored_bills` |
+| `organization` | `positions`, `info`, `bill_alignment` |
+| `general` | `navigation`, `how_to_vote`, `about_ddp`, `issue_area` |
+| `out_of_scope` | `greeting`, `off_topic`, `meta` |
+
+`primary_intent` is classified via the existing keyword/regex approach (moved from `evaluate_production.py` into the agent). `sub_intent` uses a lightweight keyword match within the primary category. Both are best-effort heuristics, not ML classifiers.
+
+### Event Schema: `query_processed`
 
 ```json
 {
@@ -82,22 +157,29 @@ Each log entry becomes a richer event with identity, behavior, and outcome field
   "visitor_id": "v_a1b2c3d4e5f6",
   "session_id": "16e35df3-507",
   "conversation_id": "16e35df3-507:2",
-  "message_index": 3,
+  "session_message_index": 7,
+  "conversation_message_index": 3,
 
   "message": "What organizations oppose this bill?",
   "response": "...",
 
-  "intent": "organization",
+  "primary_intent": "organization",
+  "sub_intent": "support_opposition",
   "page_context": { "type": "bill", "id": "HB 155", ... },
 
   "confidence": 0.82,
   "retrieval_count": 6,
   "retrieval_sources": ["bill-text", "organization"],
+  "has_citations": true,
+  "citations_count": 2,
+  "grounding_status": "grounded",
+
   "web_search_used": false,
+  "fallback_used": false,
+  "fallback_reason": null,
   "bill_votes_tool_used": false,
   "handoff_triggered": false,
 
-  "platform": "web",
   "device_type": "mobile",
   "referrer": "google.com",
   "page_url": "https://digitaldemocracyproject.org/bills/hb-155",
@@ -114,43 +196,49 @@ Each log entry becomes a richer event with identity, behavior, and outcome field
 }
 ```
 
-### New Fields Breakdown
+### Event Schema: `conversation_ended`
 
-#### Identity fields (from widget)
+```json
+{
+  "timestamp": "2026-03-26T15:42:10.000000+00:00",
+  "event_type": "conversation_ended",
 
-| Field | Source | Notes |
-|---|---|---|
-| `visitor_id` | Widget generates, sends in payload | localStorage-persisted UUID, prefixed `v_`. Best-effort device identity. |
-| `conversation_id` | Server derives from `session_id` + context change counter | Resets when page context changes. Format: `{session_id}:{n}` |
-| `message_index` | Server increments per conversation | 1-indexed position within the conversation |
+  "visitor_id": "v_a1b2c3d4e5f6",
+  "session_id": "16e35df3-507",
+  "conversation_id": "16e35df3-507:2",
 
-#### Behavioral fields (already computed by agent, just not logged)
+  "turn_count": 5,
+  "duration_seconds": 372,
+  "handoff_occurred": false,
+  "fallback_occurred": true,
+  "retrieval_miss_occurred": false,
+  "terminal_state": "navigated",
+  "primary_intents_seen": ["bill", "organization"]
+}
+```
 
-| Field | Source | Notes |
-|---|---|---|
-| `intent` | `classify_query()` result (from `evaluate_production.py`, moved server-side) | `"bill"`, `"legislator"`, `"organization"`, `"general"`, `"out_of_scope"` |
-| `retrieval_sources` | Document types from `RetrievalResult.chunks` metadata | e.g., `["bill-text", "bill-votes", "organization"]` |
-| `web_search_used` | `AgentResult.web_search_used` | Already computed, not logged |
-| `bill_votes_tool_used` | `AgentResult.bill_votes_tool_used` | Already computed, not logged |
-| `handoff_triggered` | `AgentResult.requires_human` | Already computed, not logged |
-| `retrieval_count` | `AgentResult.retrieval_count` | Already computed, not logged |
+### Grounding Status
 
-#### Engagement fields (from widget/NavigationContext)
+Derived server-side from retrieval and citation data:
 
-| Field | Source | Notes |
-|---|---|---|
-| `platform` | Widget detects from viewport | `"web"` or `"mobile-web"` |
-| `device_type` | Server derives from `user_agent` | `"desktop"`, `"mobile"`, `"tablet"` |
-| `referrer` | Widget reads `document.referrer` | Truncated to domain only (privacy). First message per session only. |
-| `page_url` | Widget reads `window.location.href` | Full URL of current page |
-| `scroll_depth` | `NavigationContext.scroll_depth` | 0-1, already in schema but not logged |
-| `time_on_page` | `NavigationContext.time_on_page` | Seconds, already in schema but not logged |
+| Value | Condition |
+|---|---|
+| `"grounded"` | `retrieval_count > 0` and `has_citations == true` |
+| `"partial"` | `retrieval_count > 0` but `has_citations == false` |
+| `"ungrounded"` | `retrieval_count == 0` (response based on LLM knowledge or web search only) |
+| `"web_augmented"` | `web_search_used == true` and web citations present |
 
-#### Event metadata
+### Device Classification
 
-| Field | Source | Notes |
-|---|---|---|
-| `event_type` | Hardcoded per event | `"query_processed"` for now; future: `"handoff_initiated"`, `"handoff_resolved"`, `"feedback_submitted"` |
+Single `device_type` field derived server-side from `user_agent`:
+
+| Value | Detection |
+|---|---|
+| `"desktop"` | Default (no mobile/tablet indicators) |
+| `"mobile"` | UA contains "Mobile", "iPhone", "Android" (not tablet) |
+| `"tablet"` | UA contains "iPad", "Tablet" |
+
+The v1 `platform` field is removed — it overlapped with `device_type` and `channel`, producing contradictions (e.g., `platform: "web"` + `device_type: "mobile"`). `channel` (`websocket`/`rest`) already captures the transport. `device_type` captures the form factor.
 
 ---
 
@@ -190,7 +278,6 @@ const sent = DDPWebSocket.send({
         message: message,
         page_context: pageContext,
         visitor_id: DDPWebSocket.getVisitorId(),
-        platform: detectPlatform(),
         referrer: isFirstMessage ? (extractDomain(document.referrer) || null) : undefined,
         page_url: window.location.href,
         scroll_depth: getScrollDepth(),
@@ -199,82 +286,128 @@ const sent = DDPWebSocket.send({
 });
 ```
 
-**No changes to widget.js, ui.js, or websocket connection logic.** The visitor data rides on the existing `user_message` payload.
+**No changes to widget.js, ui.js, or websocket connection logic.**
 
 ### Layer 2: Server — WebSocket Handler (`api/routes/websocket.py`)
 
-**Session-level conversation tracking:**
+**Session-level tracking:**
 
 ```python
-# In ConnectionManager, add to session init:
 sessions[session_id] = {
     # ... existing fields ...
     "conversation_counter": 0,
-    "message_counter": 0,
+    "conversation_message_counter": 0,
+    "session_message_counter": 0,
+    "last_message_time": None,
+    "last_page_context_type": None,
     "visitor_id": None,
+    "conversation_intents": set(),
+    "conversation_start_time": None,
+    "conversation_had_handoff": False,
+    "conversation_had_fallback": False,
+    "conversation_had_retrieval_miss": False,
 }
 ```
 
-**`handle_context_update()`** — Increment conversation counter on page navigation.
+**Conversation boundary detection** — On each message, check:
+1. Inactivity > 10 minutes since `last_message_time`
+2. Page type changed (bill → legislator, etc.)
+3. Same-type page changed (different bill slug/ID)
 
-**`handle_user_message()`** — Extract new fields from payload, increment message counter, derive `conversation_id`, forward to agent:
+If boundary detected, emit `conversation_ended` for the previous conversation, then start a new one (increment counter, reset `conversation_message_counter` to 0).
 
-```python
-visitor_id = payload.get("visitor_id")
-session["visitor_id"] = visitor_id or session.get("visitor_id")
-session["message_counter"] += 1
+**On WebSocket disconnect** — Emit `conversation_ended` for any active conversation.
 
-conversation_id = f"{session_id}:{session['conversation_counter']}"
-message_index = session["message_counter"]
-```
+**`handle_user_message()`** — Extract new fields, increment counters, derive `conversation_id`, emit `message_received` event, then forward to agent.
 
 ### Layer 3: Server — REST Chat Handler (`api/routes/chat.py`)
 
 - Map `client_metadata.client_id` → `visitor_id`
-- Map `client_metadata.platform` → `platform`
 - Add `referrer` and `page_url` fields to `ClientMetadata` schema
 - Read `navigation_context.scroll_depth` and `navigation_context.time_on_page` for logging
 
 ### Layer 4: Agent (`core/agent.py`)
 
-**`_log_query()`** — Accept and forward all new fields. Also log behavioral data that's already computed but currently discarded:
+**Intent classification** — Move `classify_query()` from `evaluate_production.py` into a shared util. Add `classify_sub_intent()` for the second level. Both are lightweight keyword/regex — no performance concern.
 
-```python
-def _log_query(
-    self,
-    *,
-    # ... existing params ...
-    # Identity:
-    visitor_id: str | None = None,
-    conversation_id: str | None = None,
-    message_index: int | None = None,
-    # Behavioral (from AgentResult — already available):
-    intent: str | None = None,
-    retrieval_sources: list[str] | None = None,
-    web_search_used: bool = False,
-    bill_votes_tool_used: bool = False,
-    handoff_triggered: bool = False,
-    # Engagement:
-    platform: str | None = None,
-    referrer: str | None = None,
-    page_url: str | None = None,
-    scroll_depth: float | None = None,
-    time_on_page: int | None = None,
-) -> None:
-```
-
-**Intent classification** — Move the `classify_query()` logic from `evaluate_production.py` into the agent (or a shared util) so intent is classified at query time rather than only during offline evaluation. This is a lightweight regex/keyword check — no performance concern.
-
-**Retrieval sources** — Extract unique `document_type` values from `RetrievalResult.chunks`:
-
+**Retrieval source extraction:**
 ```python
 retrieval_sources = list({c.metadata.get("document_type") for c in retrieval_result.chunks if c.metadata})
 ```
 
+**Grounding status derivation:**
+```python
+def _derive_grounding_status(retrieval_count, has_citations, web_search_used):
+    if web_search_used:
+        return "web_augmented"
+    if retrieval_count > 0 and has_citations:
+        return "grounded"
+    if retrieval_count > 0:
+        return "partial"
+    return "ungrounded"
+```
+
+**Fallback detection** — Distinguish `fallback_used` from `web_search_used`. Fallback is when web search was triggered specifically because RAG was insufficient (low confidence, no retrieval). Set `fallback_reason` accordingly.
+
+**`_log_query()`** — Accept and forward all fields including the new behavioral data.
+
 ### Layer 5: Query Logger (`services/query_logger.py`)
 
-**`log_query()`** — Accept all new fields and write to JSONL entry. Add `device_type` derivation from `user_agent`:
+**`log_event()`** — New method replacing `log_query()` (keep `log_query()` as a wrapper for backward compatibility):
 
+```python
+async def log_event(
+    self,
+    *,
+    event_type: str,
+    # Identity
+    visitor_id: str | None = None,
+    session_id: str,
+    conversation_id: str | None = None,
+    session_message_index: int | None = None,
+    conversation_message_index: int | None = None,
+    # Content (optional, not present on all event types)
+    message: str | None = None,
+    response: str | None = None,
+    # Behavioral
+    primary_intent: str | None = None,
+    sub_intent: str | None = None,
+    confidence: float | None = None,
+    retrieval_count: int | None = None,
+    retrieval_sources: list[str] | None = None,
+    has_citations: bool | None = None,
+    citations_count: int | None = None,
+    grounding_status: str | None = None,
+    web_search_used: bool = False,
+    fallback_used: bool = False,
+    fallback_reason: str | None = None,
+    bill_votes_tool_used: bool = False,
+    handoff_triggered: bool = False,
+    # Conversation summary (for conversation_ended)
+    turn_count: int | None = None,
+    duration_seconds: int | None = None,
+    handoff_occurred: bool | None = None,
+    fallback_occurred: bool | None = None,
+    retrieval_miss_occurred: bool | None = None,
+    terminal_state: str | None = None,
+    primary_intents_seen: list[str] | None = None,
+    # Context
+    page_context: dict | None = None,
+    device_type: str | None = None,
+    referrer: str | None = None,
+    page_url: str | None = None,
+    scroll_depth: float | None = None,
+    time_on_page: int | None = None,
+    channel: str | None = None,
+    duration_ms: int | None = None,
+    citations: list[dict] | None = None,
+    human_active: bool = False,
+    client_ip: str | None = None,
+    user_agent: str | None = None,
+) -> None:
+```
+
+Device type derivation:
 ```python
 def _derive_device_type(user_agent: str | None) -> str:
     if not user_agent:
@@ -287,21 +420,24 @@ def _derive_device_type(user_agent: str | None) -> str:
     return "desktop"
 ```
 
-Add `event_type` field (hardcoded to `"query_processed"` for now — prepares for future event types).
+All events write to the same date-partitioned JSONL files. The `event_type` field distinguishes them.
 
 ### Layer 6: Evaluation Script (`scripts/evaluate_production.py`)
 
 **New CLI flags:**
 - `--visitor <visitor_id>` — filter to a specific visitor
 - `--conversation` — group results by conversation
+- `--event-type <type>` — filter by event type
 
 **New report sections:**
-- **Unique Visitors** and **Queries per Visitor** summary
-- **Results by Intent** — success rate per intent type
-- **Results by Platform / Device Type**
-- **Conversation Metrics** — avg length, drop-off rate (1-query conversations)
-- **Behavioral Segments** — "users who ask >3 follow-ups", "users who trigger fallback", "users from bill pages"
-- **Outcome Metrics** — fallback rate, handoff rate, retrieval miss rate
+- **Unique Visitors** and **Queries per Visitor**
+- **Success Tiers** — system success, retrieval success, heuristic answer success rates
+- **Intent Distribution** — by `primary_intent` and `sub_intent`
+- **Fallback Analysis** — fallback rate by reason, distinct from web search rate
+- **Conversation Metrics** — avg turn count, drop-off rate, duration distribution (from `conversation_ended` events)
+- **Handoff Rates** — explicitly at query, conversation, and session levels
+- **Behavioral Segments** — "visitors with >3 follow-ups", "visitors who trigger fallback", "visitors from bill pages"
+- **Grounding Distribution** — % grounded vs partial vs ungrounded vs web_augmented
 
 ### Layer 7: `client_ip` Fix
 
@@ -315,28 +451,55 @@ Separate infra task — configure nginx/ALB to set `X-Forwarded-For` properly.
 Widget (browser)                     Server                           Log File
 ─────────────────                    ──────                           ────────
 localStorage → visitor_id     ──►  websocket.py
-document.referrer → referrer  ──►    extracts from payload
-location.href → page_url     ──►    derives conversation_id
-viewport → platform           ──►    increments message_index
-scroll_depth, time_on_page    ──►
+document.referrer → referrer  ──►    evaluates conversation
+location.href → page_url     ──►      boundary rules
+scroll_depth, time_on_page    ──►    emits message_received     ──►  JSONL
 
                                     agent.py
-                                      classifies intent
-                                      extracts retrieval_sources       2026-03-26.jsonl
-                                      reads web_search_used,      ──► { event_type,
-                                        bill_votes_tool_used,           visitor_id,
-                                        handoff_triggered               conversation_id,
-                                      from AgentResult                  intent,
-                                                                        retrieval_sources,
-user_agent header             ──►    derives device_type          ──►   web_search_used,
-                                                                        ... }
+                                      classifies intent (2-level)
+                                      extracts retrieval_sources
+                                      derives grounding_status
+                                      determines fallback_used       JSONL
+                                        + fallback_reason        ──► { event_type:
+                                      reads AgentResult fields         "query_processed",
+                                                                       ... }
+user_agent header             ──►    derives device_type
+
+                                    websocket.py
+                                      on boundary / disconnect   ──► { event_type:
+                                      emits conversation_ended         "conversation_ended",
+                                                                       turn_count, ... }
 ```
+
+---
+
+## Data Governance
+
+### Retention & Access
+
+Raw `message` and `response` fields contain free text that may include personal information entered by users. Define:
+
+- **Retention period:** 90 days for raw logs. After 90 days, logs are archived with `message` and `response` fields redacted (replaced with SHA-256 hash for deduplication).
+- **Access:** Raw logs accessible only to engineering and the analytics lead. Derived/aggregated reports (no raw text) available to broader team.
+- **Derived fields:** For most analytics, use the structured fields (`primary_intent`, `confidence`, `grounding_status`, etc.) rather than raw text. Raw text is for debugging and ground truth evaluation only.
+
+### JSONL as Operational Store
+
+JSONL is the operational source of truth for v1. Known limitations:
+- Aggregation requires full file scans
+- No joins across event types
+- No indexing
+
+Mitigation:
+- `evaluate_production.py` generates periodic derived summary reports (JSON)
+- Migration to columnar analytics (BigQuery / ClickHouse) is triggered by analysis pain, not volume alone
+- The event schema is designed to map cleanly to a columnar table when that migration happens
 
 ---
 
 ## Backward Compatibility
 
-- **Log format:** New fields are additive. Old log entries won't have them. The evaluation script and any downstream consumers must treat missing fields as `null`.
+- **Log format:** New fields are additive. Old log entries won't have them. All consumers must treat missing fields as `null`. New event types (`message_received`, `conversation_ended`) coexist with legacy `query_processed` entries.
 - **Widget protocol:** The `user_message` payload gains optional fields. The server ignores unknown fields, so old widgets work with a new server and vice versa.
 - **REST API:** `ClientMetadata` gains optional fields. Non-breaking.
 - **No database migration** — logs are append-only JSONL files.
@@ -350,18 +513,21 @@ user_agent header             ──►    derives device_type          ──�
 - `client_ip` is already logged (even though it's broken). No new IP collection.
 - `localStorage` can be cleared by the user at any time, resetting visitor identity.
 - No cookies are introduced.
+- Raw message/response text subject to retention policy (see Data Governance).
 
 ---
 
 ## Future Work (Out of Scope for v1)
 
-These are explicitly deferred but the event-oriented log format is designed to accommodate them:
+These are explicitly deferred but the event schema is designed to accommodate them:
 
-1. **Outcome events** — `vote_clicked`, `link_followed`, `feedback_submitted` event types. Requires widget-side click tracking.
-2. **Feedback loop into RAG** — Use logged intent + success/failure to identify weak retrieval areas and improve prompts or ingestion.
-3. **Columnar analytics backend** — When JSONL aggregation becomes painful, migrate to BigQuery or ClickHouse. The event schema is designed to map cleanly to a columnar table.
-4. **Authenticated user ID** — If Webflow Memberships or another auth system is added, extend with an optional `user_id` field.
-5. **Funnel reconstruction** — Build entry → interaction → outcome funnels from ordered events per session.
+1. **Outcome events** — `vote_clicked`, `link_followed`, `feedback_submitted` event types. Requires widget-side click tracking. Until then, "conversion to vote" metric uses proxy (% of responses containing vote CTA link).
+2. **User success tier** — Positive feedback, click-through, or conversion measurement. Requires feedback UI and event instrumentation.
+3. **Feedback loop into RAG** — Use logged intent + success/failure to identify weak retrieval areas and improve prompts or ingestion.
+4. **Columnar analytics backend** — Migrate to BigQuery or ClickHouse when JSONL aggregation becomes painful.
+5. **Authenticated user ID** — If Webflow Memberships or another auth system is added, extend with an optional `user_id` field.
+6. **Funnel reconstruction** — Build entry → interaction → outcome funnels from ordered events per session.
+7. **ML-based intent classification** — Replace keyword heuristics with a lightweight classifier trained on logged data.
 
 ---
 
@@ -370,13 +536,13 @@ These are explicitly deferred but the event-oriented log format is designed to a
 | File | Change |
 |---|---|
 | `chat-widget/src/websocket.js` | Add `visitor_id` generation/persistence via localStorage, expose `getVisitorId()` |
-| `chat-widget/src/chat.js` | Include `visitor_id`, `platform`, `referrer`, `page_url`, `scroll_depth`, `time_on_page` in message payload |
-| `src/votebot/api/routes/websocket.py` | Extract new fields from payload, track `conversation_id` and `message_index` in session, pass to agent |
+| `chat-widget/src/chat.js` | Include `visitor_id`, `referrer`, `page_url`, `scroll_depth`, `time_on_page` in message payload |
+| `src/votebot/api/routes/websocket.py` | Conversation boundary detection, message indexing, emit `message_received` and `conversation_ended` events, extract new fields |
 | `src/votebot/api/routes/chat.py` | Read `client_metadata` and `navigation_context` fields, pass to agent |
 | `src/votebot/api/schemas/chat.py` | Add `referrer`, `page_url` to `ClientMetadata` |
-| `src/votebot/core/agent.py` | Add intent classification, extract retrieval sources, thread all new fields through `_log_query()` |
-| `src/votebot/services/query_logger.py` | Accept and write all new fields, add `device_type` derivation, add `event_type` |
-| `scripts/evaluate_production.py` | Add `--visitor`/`--conversation` filters, behavioral segment reporting, outcome metrics |
+| `src/votebot/core/agent.py` | Two-level intent classification, retrieval source extraction, grounding status, fallback detection, thread all fields through `_log_query()` |
+| `src/votebot/services/query_logger.py` | New `log_event()` method, `device_type` derivation, support for all three event types |
+| `scripts/evaluate_production.py` | Success tiers, fallback analysis, conversation metrics, behavioral segments, multi-level handoff rates |
 
 ---
 
@@ -384,7 +550,7 @@ These are explicitly deferred but the event-oriented log format is designed to a
 
 - **8 files** modified
 - ~100 lines of new widget JS
-- ~120 lines of new/modified Python across server files
-- ~80 lines of new evaluation script code
+- ~200 lines of new/modified Python across server files (conversation tracking + event emission is the largest addition)
+- ~120 lines of new evaluation script code
 - No new dependencies
 - No infrastructure changes required
