@@ -304,7 +304,23 @@ Results are filtered by `similarity_threshold` (0.1) and deduplicated by content
 
 - **WebSocket:** Chunks streamed as `stream_chunk` events, final metadata as `stream_end`
 - **REST:** Full response returned as JSON with `{response, confidence, citations[]}`
-- Query logged to JSONL file via `QueryLogger` (fire-and-forget)
+
+### Step 14: Analytics Event Logging
+
+**Location:** `src/votebot/services/query_logger.py`, `src/votebot/utils/intent.py`
+
+After response delivery, three event types are logged to date-partitioned JSONL files via fire-and-forget (`asyncio.create_task`):
+
+1. **`message_received`** — Emitted by the WebSocket handler before agent processing. Captures visitor identity (`visitor_id` from localStorage), conversation tracking (`conversation_id`, message indexes), and page context. Conversation boundary evaluation (inactivity, page change) happens before this event is emitted, ensuring correct `conversation_id` assignment.
+
+2. **`query_processed`** — Emitted by `VoteBotAgent._log_query()` after response generation. Includes all behavioral/outcome fields:
+   - **Intent**: Two-level classification (`primary_intent` + `sub_intent`) via `utils/intent.py` keyword heuristics
+   - **Retrieval**: `retrieval_count`, `retrieval_sources` (normalized to controlled vocabulary from `MetadataExtractor` document types)
+   - **Grounding**: `grounding_status` (`grounded`/`partial`/`ungrounded`) and `external_augmentation` (`none`/`web`) as independent dimensions
+   - **Fallback**: `fallback_used` + `fallback_reason` (distinct from `web_search_used` — web search can be intentional, not just a fallback)
+   - **Error path**: On processing failure, emitted with `error: true` + `error_type`
+
+3. **`conversation_ended`** — Emitted by the WebSocket handler when a conversation boundary is detected or the session disconnects. Lightweight summary: `turn_count`, `duration_seconds`, `handoff_occurred`, `fallback_occurred`, `retrieval_miss_occurred`, `terminal_state`, `dominant_primary_intent`.
 
 ---
 

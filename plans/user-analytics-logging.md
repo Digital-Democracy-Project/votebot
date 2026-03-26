@@ -2,7 +2,7 @@
 
 **Goal:** Transform query logging from a flat log file into a behavioral analytics system that supports visitor segmentation, outcome measurement, and product insight.
 
-**Status:** Approved — ready for implementation
+**Status:** Implemented (commit `5d1870d`)
 
 ---
 

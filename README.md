@@ -20,7 +20,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
   - Session year fallback (tries current year, then previous 2 years)
   - Party affiliation enrichment for vote records
 - **Web Search Fallback**: Automatically searches the web (via OpenAI web search + Tavily) when RAG confidence is low
-- **Production Query Monitoring**: All production queries and responses are logged to date-partitioned JSONL files for offline evaluation against ground truth
+- **User Analytics & Behavioral Logging**: Event-based logging system with three event types (`message_received`, `query_processed`, `conversation_ended`), three-level identity model (visitor, session, conversation), two-level intent classification, grounding status tracking, fallback detection, and conversation boundary analysis. All events logged to date-partitioned JSONL files for offline evaluation and analytics.
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
 - **Data Sync**: Content ingestion pipeline (bills, legislators, orgs) with sync handlers and CLI scripts. Scheduled sync jobs run via [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync)
@@ -709,7 +709,7 @@ votebot/
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
 │   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification + gov-url write)
 │   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub + active jurisdictions + bill version cache + sync checkpoints)
-│   │   ├── query_logger.py  # Production query logger (JSONL, date-partitioned)
+│   │   ├── query_logger.py  # Event & query logger (JSONL, date-partitioned, 3 event types)
 │   │   └── slack.py         # Slack human handoff
 │   ├── sync/                # Unified sync service
 │   │   ├── service.py       # UnifiedSyncService
@@ -731,7 +731,8 @@ votebot/
 │   │   │   └── pdf.py       # PDF extraction
 │   │   └── chunking.py      # Text chunking
 │   └── utils/               # Utility modules
-│       └── legislative_calendar.py  # Session date lookup (live OpenStates + hardcoded fallback)
+│       ├── legislative_calendar.py  # Session date lookup (live OpenStates + hardcoded fallback)
+│       └── intent.py         # Two-level intent classification (primary + sub) with controlled enums
 ├── scripts/
 │   ├── sync.py              # Unified sync CLI
 │   ├── seed_data.py         # Development data seeding
@@ -851,32 +852,63 @@ Top jurisdictions (bills): MI 100%, WA 100%, VA 100%, FL 100%, US 100%, MA 100%,
 
 See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-sample) for detailed failure analysis.
 
-## Production Query Monitoring
+## User Analytics & Production Monitoring
 
-VoteBot logs all production queries and LLM responses to date-partitioned JSONL files for offline quality evaluation and performance monitoring.
+VoteBot uses an event-based logging system that captures user behavior, query outcomes, and conversation metrics for offline analytics and quality evaluation.
 
-### How It Works
+### Event Model
 
-1. **Automatic capture**: Every call to `process_message()` and `process_message_stream()` is logged via fire-and-forget (`asyncio.create_task`) — zero impact on response latency
-2. **Date-partitioned JSONL**: Logs are written to `logs/queries/YYYY-MM-DD.jsonl`, one JSON object per line
-3. **Multi-worker safe**: Uses `aiofiles` with append mode for atomic writes across uvicorn workers
+Three event types, all written to the same date-partitioned JSONL files:
 
-### Log Entry Fields
+| Event | When Emitted | Purpose |
+|-------|-------------|---------|
+| `message_received` | Server receives a user message, before processing | Tracks message arrival, visitor identity, page context |
+| `query_processed` | Agent finishes processing and responds | Full behavioral/outcome record: intent, retrieval, grounding, fallback, confidence |
+| `conversation_ended` | Conversation boundary detected or session disconnects | Summary: turn count, duration, handoff/fallback/retrieval-miss flags, terminal state |
+
+### Identity Model
+
+| Level | ID | Lifetime | Purpose |
+|---|---|---|---|
+| **Visitor** | `visitor_id` | localStorage (permanent, best-effort) | Cross-session device tracking |
+| **Session** | `session_id` | sessionStorage (per-tab, 30-min timeout) | Visit-level intent |
+| **Conversation** | `conversation_id` | Server-side (resets on boundary) | Multi-turn behavior |
+
+`visitor_id` tracks browser instances, not people. It is generated client-side and sent in the WebSocket payload.
+
+### Key Fields on `query_processed`
 
 | Field | Description |
 |-------|-------------|
 | `timestamp` | ISO 8601 UTC timestamp |
+| `visitor_id` | Persistent device identifier (localStorage) |
 | `session_id` | Chat session identifier |
-| `client_ip` | Client IP address (from X-Forwarded-For or direct connection) |
-| `user_agent` | Client User-Agent header |
-| `message` | User's query text |
-| `response` | LLM response text |
+| `conversation_id` | `{session_id}:{n}` — resets on conversation boundary |
+| `session_message_index` | Message position within session |
+| `conversation_message_index` | Message position within conversation (resets per conversation) |
+| `message` / `response` | User query and LLM response text |
+| `primary_intent` / `sub_intent` | Two-level intent classification (central enum, keyword heuristics) |
 | `confidence` | Response confidence score (0-1) |
-| `citations` | List of citation objects |
-| `page_context` | Page context (type, id, title, jurisdiction, webflow_id, slug) |
-| `channel` | Source: "rest" or "websocket" |
-| `duration_ms` | End-to-end response time in milliseconds |
-| `human_active` | Whether a human agent was active |
+| `retrieval_count` | Number of RAG chunks retrieved |
+| `retrieval_sources` | Document types retrieved (normalized to controlled vocabulary) |
+| `has_citations` / `citations_count` | Whether citations were surfaced and how many |
+| `grounding_status` | `grounded`, `partial`, or `ungrounded` |
+| `external_augmentation` | `none` or `web` |
+| `web_search_used` | Whether OpenAI web search was invoked |
+| `fallback_used` / `fallback_reason` | Whether RAG was insufficient and why |
+| `handoff_triggered` | Whether human handoff was triggered |
+| `error` / `error_type` | Whether processing failed and error category |
+| `device_type` | `desktop`, `mobile`, or `tablet` (derived from User-Agent) |
+| `entry_referrer` | Referring domain (first message per session only, null by design thereafter) |
+| `page_url` / `scroll_depth` / `time_on_page` | Page engagement data from widget |
+
+### Conversation Boundaries
+
+A new conversation starts when:
+1. Explicit session reset
+2. Inactivity > 10 minutes
+3. Page type changes (bill → legislator, etc.)
+4. Page ID changes within same type (only if previous conversation had a response)
 
 ### Configuration
 
@@ -885,9 +917,9 @@ VoteBot logs all production queries and LLM responses to date-partitioned JSONL 
 | `QUERY_LOG_ENABLED` | Enable/disable query logging | `true` |
 | `QUERY_LOG_DIR` | Directory for JSONL files | `logs/queries` |
 
-### Offline Evaluation
+### Offline Evaluation & Analytics
 
-The evaluation script reads production logs and validates responses against Webflow CMS ground truth:
+The evaluation script reads production logs, validates against Webflow CMS ground truth, and generates analytics reports:
 
 ```bash
 # Evaluate today's queries
@@ -899,16 +931,24 @@ PYTHONPATH=src python scripts/evaluate_production.py --date 2026-02-08
 # Evaluate last 7 days, filtered by jurisdiction
 PYTHONPATH=src python scripts/evaluate_production.py --days 7 --jurisdiction FL --verbose
 
-# Custom log directory
-PYTHONPATH=src python scripts/evaluate_production.py --log-dir /var/log/votebot/queries
+# Filter to a specific visitor
+PYTHONPATH=src python scripts/evaluate_production.py --days 30 --visitor v_a1b2c3d4e5f6
+
+# Filter by event type
+PYTHONPATH=src python scripts/evaluate_production.py --days 7 --event-type conversation_ended
 ```
 
-The evaluation report includes:
-- **Pass rate per entity type** (bill, organization, legislator) validated against ground truth
-- **Confidence distribution** with low-confidence query flagging (< 0.5)
-- **Citation rate** and average citation count
-- **Latency metrics** (average and P95)
-- **Breakdown by jurisdiction, entity type, and query category**
+The report includes:
+- **Ground truth validation**: Pass rate per entity type (bill, organization, legislator)
+- **Success tiers**: System success, citation-grounded success, heuristic answer success
+- **Intent distribution**: Breakdown by `primary_intent` and `sub_intent`
+- **Fallback analysis**: Fallback rate by reason, distinct from web search rate
+- **Grounding distribution**: % grounded vs partial vs ungrounded, cross-tabulated with external augmentation
+- **Conversation metrics**: Avg turns, drop-off rate, duration, terminal state distribution (from `conversation_ended` events)
+- **Handoff rates**: At query, conversation, and session levels
+- **Visitor metrics**: Unique visitors, queries per visitor
+- **Device distribution**: Desktop vs mobile vs tablet
+- **Confidence and citation analysis**: Low-confidence flagging, citation rates
 
 ## Performance Targets
 
