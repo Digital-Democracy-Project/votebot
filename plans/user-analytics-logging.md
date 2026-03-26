@@ -2,7 +2,7 @@
 
 **Goal:** Transform query logging from a flat log file into a behavioral analytics system that supports visitor segmentation, outcome measurement, and product insight.
 
-**Status:** Draft v3 — revised based on second round of feedback
+**Status:** Draft v4 — final revision, ready for implementation
 
 ---
 
@@ -65,7 +65,7 @@ Metrics are defined at three levels. When reporting, always name the level expli
 | Tier | Definition | What It Measures |
 |---|---|---|
 | **System success** | Response returned, no error, no handoff triggered | "Did the system work?" |
-| **Retrieval success** | `retrieval_count > 0` and `has_citations == true` | "Did we find relevant data?" |
+| **Citation-grounded success** | `retrieval_count > 0` and `has_citations == true` | "Did we find and cite relevant data?" (Conservative proxy — a valid answer may exist without surfaced citations, e.g., tool-returned facts.) |
 | **Heuristic answer success** | Confidence >= threshold + no fallback + no handoff + has citations | "Did we probably answer well?" |
 | **User success** | Positive feedback, click-through, or conversion | "Did the user get what they needed?" — *Not measurable in v1.* |
 
@@ -98,15 +98,16 @@ Web search can be a normal tool invocation, not necessarily a failure. Treating 
 ### Conversation Boundary Rules
 
 A new conversation starts when **any** of these occur:
-- Inactivity timeout (no message for 10+ minutes within a session)
-- Explicit new chat / session reset
-- Strong context discontinuity (page type changes, e.g., bill → legislator)
+1. Explicit new chat / session reset
+2. Inactivity timeout (no message for 10+ minutes within a session)
+3. Page type changes (e.g., bill → legislator, legislator → organization)
+4. Page ID changes within the same type (e.g., bill HB-155 → bill SB-200), **but only if the previous conversation had at least one completed response**. This avoids splitting the user's initial exploration journey too aggressively.
 
-A page navigation within the same type (bill → different bill) starts a new conversation. But navigating from a general page to a bill page while asking about that bill does **not** — the user is continuing a journey.
-
-Implementation: the server tracks `last_message_time` and `last_page_context` per session. On each message, it evaluates the boundary rules and either continues the current conversation or increments the counter.
+These rules are deterministic and ordered by priority. The server tracks `last_message_time`, `last_page_context_type`, `last_page_context_id`, and `conversation_has_response` per session.
 
 `conversation_id` format: `{session_id}:{n}` where `n` is the conversation counter within the session.
+
+**Note:** These boundaries are a v1 heuristic. They may overcount conversations in some edge cases (e.g., a user exploring related bills in quick succession). The rules should be evaluated against real log data after deployment and tuned if conversation metrics look anomalous.
 
 ### Message Indexing
 
@@ -125,13 +126,17 @@ Three event types in v1 — enough for a real event model without over-engineeri
 
 | Event | When Emitted | Key Fields |
 |---|---|---|
-| `message_received` | Server receives a user message, before processing | `visitor_id`, `session_id`, `conversation_id`, `message`, `page_context`, `referrer`, `page_url` |
+| `message_received` | Server receives a user message, before processing | `visitor_id`, `session_id`, `conversation_id`, `message`, `page_context`, `entry_referrer`, `page_url` |
 | `query_processed` | Agent finishes processing and responds | All behavioral/outcome fields (intent, retrieval, confidence, fallback, etc.) |
-| `conversation_ended` | Conversation boundary detected or session disconnects | Summary: `turn_count`, `duration_seconds`, `handoff_occurred`, `fallback_occurred`, `retrieval_miss_occurred`, `terminal_state` |
+| `conversation_ended` | Conversation boundary detected or session disconnects | Summary: `turn_count`, `duration_seconds`, `handoff_occurred`, `fallback_occurred`, `retrieval_miss_occurred`, `terminal_state`, `dominant_primary_intent` |
 
 The `conversation_ended` event is a lightweight summary record that avoids reconstructing conversations from raw query records at analysis time.
 
-`terminal_state` values: `"completed"` (user stopped asking), `"handoff"` (escalated to human), `"abandoned"` (session disconnect mid-conversation), `"navigated"` (user moved to new context).
+`terminal_state` values:
+- `"inactive_end"` — user stopped asking (inactivity timeout). Does **not** imply success — user may have been satisfied, confused, or distracted.
+- `"handoff"` — escalated to human agent.
+- `"abandoned"` — session disconnected mid-conversation (WebSocket close while streaming or within a turn).
+- `"navigated"` — user moved to a new page context, starting a new conversation.
 
 ### Intent Taxonomy
 
@@ -173,15 +178,18 @@ Two-level classification for actionable granularity:
   "has_citations": true,
   "citations_count": 2,
   "grounding_status": "grounded",
+  "external_augmentation": "none",
 
   "web_search_used": false,
   "fallback_used": false,
   "fallback_reason": null,
   "bill_votes_tool_used": false,
   "handoff_triggered": false,
+  "error": false,
+  "error_type": null,
 
   "device_type": "mobile",
-  "referrer": "google.com",
+  "entry_referrer": "google.com",
   "page_url": "https://digitaldemocracyproject.org/bills/hb-155",
 
   "scroll_depth": 0.6,
@@ -213,20 +221,31 @@ Two-level classification for actionable granularity:
   "fallback_occurred": true,
   "retrieval_miss_occurred": false,
   "terminal_state": "navigated",
-  "primary_intents_seen": ["bill", "organization"]
+  "primary_intents_seen": ["bill", "organization"],
+  "dominant_primary_intent": "bill"
 }
 ```
 
-### Grounding Status
+### Grounding & Augmentation
 
-Derived server-side from retrieval and citation data:
+Two separate fields — grounding quality and external augmentation are independent dimensions:
+
+**`grounding_status`** — How well the response is grounded in internal RAG data:
 
 | Value | Condition |
 |---|---|
 | `"grounded"` | `retrieval_count > 0` and `has_citations == true` |
 | `"partial"` | `retrieval_count > 0` but `has_citations == false` |
-| `"ungrounded"` | `retrieval_count == 0` (response based on LLM knowledge or web search only) |
-| `"web_augmented"` | `web_search_used == true` and web citations present |
+| `"ungrounded"` | `retrieval_count == 0` |
+
+**`external_augmentation`** — Whether an external source supplemented the response:
+
+| Value | Condition |
+|---|---|
+| `"none"` | No external source used |
+| `"web"` | Web search was used (regardless of whether it was a fallback or intentional) |
+
+A web-augmented answer can still be grounded, partially grounded, or ungrounded. These are orthogonal.
 
 ### Device Classification
 
@@ -278,7 +297,7 @@ const sent = DDPWebSocket.send({
         message: message,
         page_context: pageContext,
         visitor_id: DDPWebSocket.getVisitorId(),
-        referrer: isFirstMessage ? (extractDomain(document.referrer) || null) : undefined,
+        entry_referrer: isFirstMessage ? (extractDomain(document.referrer) || null) : undefined,
         page_url: window.location.href,
         scroll_depth: getScrollDepth(),
         time_on_page: getTimeOnPage()
@@ -323,7 +342,7 @@ If boundary detected, emit `conversation_ended` for the previous conversation, t
 ### Layer 3: Server — REST Chat Handler (`api/routes/chat.py`)
 
 - Map `client_metadata.client_id` → `visitor_id`
-- Add `referrer` and `page_url` fields to `ClientMetadata` schema
+- Add `entry_referrer` and `page_url` fields to `ClientMetadata` schema
 - Read `navigation_context.scroll_depth` and `navigation_context.time_on_page` for logging
 
 ### Layer 4: Agent (`core/agent.py`)
@@ -335,17 +354,20 @@ If boundary detected, emit `conversation_ended` for the previous conversation, t
 retrieval_sources = list({c.metadata.get("document_type") for c in retrieval_result.chunks if c.metadata})
 ```
 
-**Grounding status derivation:**
+**Grounding and augmentation derivation:**
 ```python
-def _derive_grounding_status(retrieval_count, has_citations, web_search_used):
-    if web_search_used:
-        return "web_augmented"
+def _derive_grounding_status(retrieval_count, has_citations):
     if retrieval_count > 0 and has_citations:
         return "grounded"
     if retrieval_count > 0:
         return "partial"
     return "ungrounded"
+
+def _derive_external_augmentation(web_search_used):
+    return "web" if web_search_used else "none"
 ```
+
+**Error handling** — If processing fails, `query_processed` is still emitted with `error: true`, `error_type` (e.g., `"llm_timeout"`, `"retrieval_error"`, `"internal_error"`), and `response: null`. This ensures system success rate is computable without cross-referencing `message_received` events.
 
 **Fallback detection** — Distinguish `fallback_used` from `web_search_used`. Fallback is when web search was triggered specifically because RAG was insufficient (low confidence, no retrieval). Set `fallback_reason` accordingly.
 
@@ -378,11 +400,14 @@ async def log_event(
     has_citations: bool | None = None,
     citations_count: int | None = None,
     grounding_status: str | None = None,
+    external_augmentation: str | None = None,
     web_search_used: bool = False,
     fallback_used: bool = False,
     fallback_reason: str | None = None,
     bill_votes_tool_used: bool = False,
     handoff_triggered: bool = False,
+    error: bool = False,
+    error_type: str | None = None,
     # Conversation summary (for conversation_ended)
     turn_count: int | None = None,
     duration_seconds: int | None = None,
@@ -391,10 +416,11 @@ async def log_event(
     retrieval_miss_occurred: bool | None = None,
     terminal_state: str | None = None,
     primary_intents_seen: list[str] | None = None,
+    dominant_primary_intent: str | None = None,
     # Context
     page_context: dict | None = None,
     device_type: str | None = None,
-    referrer: str | None = None,
+    entry_referrer: str | None = None,
     page_url: str | None = None,
     scroll_depth: float | None = None,
     time_on_page: int | None = None,
@@ -437,7 +463,9 @@ All events write to the same date-partitioned JSONL files. The `event_type` fiel
 - **Conversation Metrics** — avg turn count, drop-off rate, duration distribution (from `conversation_ended` events)
 - **Handoff Rates** — explicitly at query, conversation, and session levels
 - **Behavioral Segments** — "visitors with >3 follow-ups", "visitors who trigger fallback", "visitors from bill pages"
-- **Grounding Distribution** — % grounded vs partial vs ungrounded vs web_augmented
+- **Grounding Distribution** — % grounded vs partial vs ungrounded, cross-tabulated with `external_augmentation`
+
+**Note:** `evaluate_production.py` is becoming both an evaluator and an analytics engine. This is acceptable for v1, but if scope continues to grow, consider splitting into separate scripts (e.g., `analytics_report.py` for metrics/segments, `evaluate_production.py` for ground-truth validation).
 
 ### Layer 7: `client_ip` Fix
 
@@ -451,7 +479,7 @@ Separate infra task — configure nginx/ALB to set `X-Forwarded-For` properly.
 Widget (browser)                     Server                           Log File
 ─────────────────                    ──────                           ────────
 localStorage → visitor_id     ──►  websocket.py
-document.referrer → referrer  ──►    evaluates conversation
+document.referrer → entry_referrer ──►    evaluates conversation
 location.href → page_url     ──►      boundary rules
 scroll_depth, time_on_page    ──►    emits message_received     ──►  JSONL
 
@@ -479,9 +507,13 @@ user_agent header             ──►    derives device_type
 
 Raw `message` and `response` fields contain free text that may include personal information entered by users. Define:
 
-- **Retention period:** 90 days for raw logs. After 90 days, logs are archived with `message` and `response` fields redacted (replaced with SHA-256 hash for deduplication).
+- **Retention period:** 90 days for raw logs. After 90 days, logs are archived with `message` and `response` fields replaced by:
+  - SHA-256 hash (for deduplication and matching)
+  - A short auto-generated summary label (e.g., "bill summary request for HB-155") derived from `primary_intent`, `sub_intent`, and `page_context`
+  - All structured fields (`primary_intent`, `confidence`, `grounding_status`, etc.) are preserved permanently
+  This preserves long-term value for failure pattern analysis, prompt regression review, and retrieval gap analysis, while removing raw free text.
 - **Access:** Raw logs accessible only to engineering and the analytics lead. Derived/aggregated reports (no raw text) available to broader team.
-- **Derived fields:** For most analytics, use the structured fields (`primary_intent`, `confidence`, `grounding_status`, etc.) rather than raw text. Raw text is for debugging and ground truth evaluation only.
+- **Derived fields:** For most analytics, use the structured fields rather than raw text. Raw text is for debugging and ground truth evaluation only.
 
 ### JSONL as Operational Store
 
@@ -509,7 +541,7 @@ Mitigation:
 ## Privacy Considerations
 
 - `visitor_id` is a random opaque UUID — no PII. Cannot be reverse-mapped to a person.
-- `referrer` is truncated to domain only — no search query leakage.
+- `entry_referrer` is truncated to domain only — no search query leakage. It is session-entry context only (populated on first message per session, null thereafter).
 - `client_ip` is already logged (even though it's broken). No new IP collection.
 - `localStorage` can be cleared by the user at any time, resetting visitor identity.
 - No cookies are introduced.
@@ -536,12 +568,12 @@ These are explicitly deferred but the event schema is designed to accommodate th
 | File | Change |
 |---|---|
 | `chat-widget/src/websocket.js` | Add `visitor_id` generation/persistence via localStorage, expose `getVisitorId()` |
-| `chat-widget/src/chat.js` | Include `visitor_id`, `referrer`, `page_url`, `scroll_depth`, `time_on_page` in message payload |
+| `chat-widget/src/chat.js` | Include `visitor_id`, `entry_referrer` (first message only), `page_url`, `scroll_depth`, `time_on_page` in message payload |
 | `src/votebot/api/routes/websocket.py` | Conversation boundary detection, message indexing, emit `message_received` and `conversation_ended` events, extract new fields |
 | `src/votebot/api/routes/chat.py` | Read `client_metadata` and `navigation_context` fields, pass to agent |
-| `src/votebot/api/schemas/chat.py` | Add `referrer`, `page_url` to `ClientMetadata` |
-| `src/votebot/core/agent.py` | Two-level intent classification, retrieval source extraction, grounding status, fallback detection, thread all fields through `_log_query()` |
-| `src/votebot/services/query_logger.py` | New `log_event()` method, `device_type` derivation, support for all three event types |
+| `src/votebot/api/schemas/chat.py` | Add `entry_referrer`, `page_url` to `ClientMetadata` |
+| `src/votebot/core/agent.py` | Two-level intent classification, retrieval source extraction, grounding status + external augmentation, fallback detection, error path in `query_processed`, thread all fields through `_log_query()` |
+| `src/votebot/services/query_logger.py` | New `log_event()` method, `device_type` derivation, support for all three event types, `dominant_primary_intent` on `conversation_ended` |
 | `scripts/evaluate_production.py` | Success tiers, fallback analysis, conversation metrics, behavioral segments, multi-level handoff rates |
 
 ---
