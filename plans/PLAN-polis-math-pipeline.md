@@ -2,6 +2,8 @@
 
 This document traces the exact data flow from when a user's opinion enters Polis as votes through PCA, clustering, and representativeness analysis to reportable results. All code references are to the polis repo.
 
+> **Context:** This is the technical reference for the clustering pipeline described in `plans/PLAN-votebot-polis-jigsaw.md` Phase 4. The Jigsaw plan defines the opinion landscape (topics, policy positions), elicitation flow, and identity model. This document covers what happens to those opinions once they enter Polis as votes — the math is identity-agnostic and requires no modifications to support VoteBot chat input.
+
 ---
 
 ## Step 1: Opinions Enter Polis as Votes
@@ -110,7 +112,7 @@ Each vote is a `(participant_id, statement_id, vote_value)` triple that updates 
 - Maximum 100,000 participants per conversation
 - Maximum 10,000 comments/statements per conversation
 - Moderated-out comments are zeroed in the matrix
-- Participants must have voted on at least 7 statements OR be in the top 15 voters to be included in the "in-conv" set
+- Participants must have voted on at least 7 statements OR be in the top 15 voters to be included in the "in-conv" set. **Note for VoteBot integration:** Chat users who cover only 3-5 positions will be excluded from clustering. See `PLAN-votebot-polis-jigsaw.md` question 14 for mitigation strategies.
 
 **Source files:**
 - Matrix construction: `math/src/polismath/math/conversation.clj` (lines 164-205)

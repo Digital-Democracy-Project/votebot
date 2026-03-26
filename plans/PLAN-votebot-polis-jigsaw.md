@@ -521,6 +521,8 @@ VoteBot now has a three-level identity model (implemented):
 
 ## Phase 4: Clustering and Results
 
+> **Technical reference:** For the complete data flow through Polis's math pipeline — vote matrix construction, PCA (power iteration), k-means (two-level), representativeness analysis, consensus detection, and results storage — see `plans/PLAN-polis-math-pipeline.md`. That document traces every step with exact code references. The key insight: **we don't need to modify the Polis math pipeline at all** — our policy positions become seed comments, chat opinions become weighted votes, and the existing Clojure math service computes everything identically.
+
 ### What This Phase Does
 
 Runs PCA/UMAP and k-means on the unified opinion matrix to find opinion groups, then surfaces results in both VoteBot and Polis.
@@ -636,6 +638,13 @@ if page_context.type == "bill" and settings.elicitation_enabled:
 13. **Should passive (unconfirmed) chat opinions be included in clustering?** They add volume but introduce noise from extraction errors. Options: include at low weight (0.5), exclude entirely, or include only above a confidence threshold (0.8+).
 
 14. **How do you handle the Polis/chat density asymmetry?** A Polis power user votes on all 30 positions. A casual chat user covers 3. Should sparse users pull the clusters less? PCA naturally handles this, but consider whether to set a minimum coverage threshold (e.g., must have stances on 5+ positions).
+
+    **Critical constraint from Polis math pipeline:** The Polis Clojure math service requires participants to have voted on **at least 7 statements** to be included in the "in-conv" set used for PCA and clustering (see `PLAN-polis-math-pipeline.md` Step 3 — `conversation.clj` filtering logic). Chat users who cover only 3-5 positions will be **excluded from clustering entirely**. This means either:
+    - **(a)** The elicitation flow must guide chat users to cover 7+ positions (e.g., walk them through at least 2-3 topics at 3-4 positions each), or
+    - **(b)** The Polis minimum threshold must be lowered in our deployment (configurable in `conversation.clj`), or
+    - **(c)** Chat users below 7 positions are included only in aggregate counts but not in cluster assignment — their opinions still reach Polis as votes and will be counted if they return and vote on more positions later (accumulation via `visitor_id`/`member_id`)
+
+    Recommendation: **(c)** for v1 — accept that casual chat users may not meet the threshold, and rely on cross-session accumulation to build up their coverage over time. The Jigsaw explicit elicitation mode (Mode 3) naturally covers 7+ positions.
 
 ---
 
