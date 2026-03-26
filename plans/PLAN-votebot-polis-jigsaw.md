@@ -1,0 +1,927 @@
+# Integration Plan: VoteBot as Guided Opinion Elicitation Tool
+
+## Vision
+
+VoteBot becomes a **guided opinion elicitation tool** for legislation. When users chat about a bill, VoteBot doesn't just answer questions — it understands the landscape of policy positions on that bill and helps users articulate where they stand. Users can select from known positions, express nuance, or introduce entirely new perspectives. Their opinions feed a shared opinion space alongside direct Polis voters, producing a living map of public sentiment on every tracked bill.
+
+The chatbot is the primary modality. Polis provides a complementary direct-voting experience for users who prefer structured participation. Both inputs converge in a single, multi-dimensional opinion vector space where clustering reveals the real fault lines in public opinion.
+
+**What makes this different from a survey:** The conversation is natural. Users don't see a form — they chat. VoteBot surfaces relevant policy positions contextually, when the conversation naturally turns to a topic. Users can push back, add nuance, or raise concerns the system hasn't seen before. The elicitation feels like a conversation with a knowledgeable person, not a questionnaire.
+
+---
+
+## Core Model: Multi-Position Opinion Vectors
+
+### Why Not Single-Dimension Topics
+
+A single "funding stance" dimension (-1 to +1) can't distinguish between:
+- "Fund through income tax increases"
+- "Fund through reallocation from other programs"
+- "Tie funding to local property taxes"
+- "Reduce funding overall"
+
+These are all different positions on the same topic. People who agree on "more funding" might deeply disagree on *how*. A single dimension collapses this. We need multiple dimensions per topic.
+
+### The Representation
+
+Each topic in a bill has 3-6 **policy positions** — distinct stances that real people hold. Each position is one dimension of the opinion vector. A user's opinion is encoded as their agreement/disagreement with each position:
+
+```
+Bill: HB 123 (Education Reform)
+
+Topic: Funding Approach
+  Positions:
+    P1: "Fund through the bill's proposed state formula"
+    P2: "Tie funding to local property tax base instead"
+    P3: "Fund through reallocation, not new revenue"
+    P4: "Reduce overall education spending"
+
+Topic: Teacher Requirements
+  Positions:
+    P5: "Raise certification standards as proposed"
+    P6: "Focus on alternative certification pathways"
+    P7: "Let districts set their own standards"
+
+Topic: Implementation Timeline
+  Positions:
+    P8: "Three-year rollout is appropriate"
+    P9: "Need 5+ years for districts to adapt"
+    P10: "Should take effect immediately"
+```
+
+A user's opinion vector across all positions:
+
+```
+           P1    P2    P3    P4    P5    P6    P7    P8    P9    P10
+user_1:  [+0.8, -0.3, +0.5,  0,  +0.7, -0.2,  0,  -0.6, +0.9,  0 ]
+user_2:  [ 0,   +0.9,  0,  -0.7,  0,   +0.8, +0.3,  0,    0,  +0.6]
+user_3:  [-0.5,  0,    0,  +0.8, -0.9,  0,   +0.7, +0.4,  0,  -0.3]
+```
+
+Positions aren't mutually exclusive — a user can support both P1 and P3 (the bill's formula AND reallocation). PCA finds the real axes of disagreement, which might not align with any single topic.
+
+### Compatibility with Polis
+
+Each policy position maps to a Polis seed statement. Polis voters agree/disagree with statements = filling in the same vector with +1/-1/0. Chat users fill it with continuous values extracted from conversation. Same coordinate space, different granularity.
+
+```
+Polis voter:  P1=+1, P2=-1, P3=0, P4=-1, ...  (discrete)
+Chat user:    P1=+0.8, P2=?, P3=+0.5, P4=?, ...  (continuous, sparse)
+```
+
+The sparsity difference is acceptable — PCA and UMAP handle missing values, and chat users typically cover fewer positions than deliberate Polis voters. The clustering still works because even partial vectors carry signal.
+
+---
+
+## System Architecture
+
+```
+    DDP Website — Bill Page
+    +--------------------------------------------+
+    |                                            |
+    |  +------------------+  +----------------+  |
+    |  | VoteBot Chat     |  | Polis Embed    |  |
+    |  | (primary input)  |  | (optional)     |  |
+    |  |                  |  |                |  |
+    |  | Guided           |  | Direct vote    |  |
+    |  | elicitation      |  | on statements  |  |
+    |  +--------+---------+  +-------+--------+  |
+    +-----------|--------------------|-----------+
+                |                    |
+                v                    v
+         VoteBot API            Polis API
+              |                    |
+              v                    v
+      Opinion Extraction     Vote Matrix
+      + Position Matching    (+1/-1/0 per stmt)
+              |                    |
+              v                    v
+    +---------+--------------------+---------+
+    |     Multi-Position Opinion Vectors     |
+    |     (participants x positions)         |
+    +-------------------+--------------------+
+                        |
+                        v
+                  PCA / UMAP / K-means
+                        |
+                        v
+                  Opinion Clusters
+                  + Narratives
+                        |
+              +---------+---------+
+              v                   v
+        VoteBot responses    Polis visualization
+        ("others think...")  (PCA opinion map)
+```
+
+---
+
+## Phase 1: Bill Analysis — Topics, Positions, and the Opinion Landscape
+
+### What This Phase Does
+
+When a bill is synced to VoteBot, an LLM analyzes the legislation and produces the **opinion landscape**: the set of topics and the range of real policy positions people hold on each.
+
+### The Opinion Landscape
+
+```python
+class PolicyPosition:
+    position_id: str            # "hb123_funding_state_formula"
+    topic_id: str               # "hb123_funding"
+    text: str                   # "Fund schools through the bill's proposed state formula"
+    short_label: str            # "State formula (as proposed)"
+    framing: str                # How a supporter would explain this position
+    counter_framing: str        # The strongest argument against it
+    bill_sections: list[str]    # Which sections of the bill support this position
+    source: str                 # "bill_text" | "org_position" | "emergent"
+    polis_tid: int | None       # Corresponding Polis statement ID, once created
+
+class BillTopic:
+    topic_id: str               # "hb123_funding"
+    bill_webflow_id: str
+    name: str                   # "Funding Approach"
+    description: str            # Neutral description of what's at stake
+    positions: list[PolicyPosition]  # 3-6 positions spanning the opinion space
+    bill_sections: list[str]
+    created_at: str
+
+class OpinionLandscape:
+    bill_webflow_id: str
+    bill_title: str
+    jurisdiction: str
+    topics: list[BillTopic]     # 5-10 topics, each with 3-6 positions
+    total_positions: int        # Sum of positions across topics (target: 25-50)
+    version: int                # Increments when new positions/topics are added
+    created_at: str
+    updated_at: str
+```
+
+### Generating the Landscape
+
+**Step 1: Topic extraction from bill text**
+
+```
+Analyze this legislation and identify the 5-10 key aspects that
+people would have opinions about.
+
+For each topic:
+- Name (2-5 words)
+- Neutral description of what the bill proposes
+- Which sections of the bill address this
+
+Focus on substantive provisions, not procedural details.
+Identify topics where reasonable people genuinely disagree.
+```
+
+**Step 2: Position generation per topic**
+
+```
+For the topic "{topic_name}" in {bill_title}, generate 3-6 distinct
+policy positions that real people hold.
+
+Requirements:
+- Each position is a genuine stance someone would advocate for
+- Positions should span the realistic opinion space
+- Include at least one position that supports the bill's approach
+- Include at least one position that opposes or offers an alternative
+- Positions are NOT just "support" and "oppose" — they represent
+  different APPROACHES and PRIORITIES
+- Each position should be a clear, concrete policy preference
+  (not vague values like "fairness" or "freedom")
+- Write each as a statement someone would agree with (under 100 chars)
+
+Also provide:
+- A short label (2-4 words) for UI display
+- How a supporter would frame this position (1 sentence)
+- The strongest counter-argument (1 sentence)
+```
+
+**Step 3: Enrichment from organization positions**
+
+VoteBot already has org support/oppose data from Webflow CMS. These real-world positions anchor the landscape:
+
+```
+Topic: Funding Approach
+  Position from bill text: "Fund through state formula as proposed"
+  Position from Teachers Union: "Increase funding but index to inflation"  <-- NEW
+  Position from Taxpayer Alliance: "Cap spending at current levels"  <-- NEW
+```
+
+Org-sourced positions get `source: "org_position"` and inherit credibility from being real advocacy positions.
+
+### Storage
+
+```
+Redis:
+  votebot:landscape:{bill_webflow_id} -> JSON OpinionLandscape
+  votebot:landscape:version:{bill_webflow_id} -> int (for cache invalidation)
+
+DynamoDB (durable):
+  Delphi_OpinionLandscape -> Full landscape with history
+```
+
+### When to Generate
+
+- **On bill sync** (during existing scheduler job). Piggybacks on bill text ingestion.
+- **Re-generate on bill version change** (existing `BillVersionSyncService` detects this). New text may introduce new provisions = new topics.
+- **Incrementally update** when emergent positions are discovered from chat (Phase 5).
+
+### Questions to Consider
+
+1. **How many total positions across all topics?** Too few (<15) and the opinion space is underspecified — clustering won't find meaningful groups. Too many (>60) and the vector is too sparse from chat input. Target: 25-50 total positions across 5-10 topics, averaging 4-5 per topic.
+
+2. **Should positions be mutually exclusive within a topic?** In the gun policy example, someone could support BOTH assault weapons ban AND red flag laws. If positions are independent (non-exclusive), you get richer signal but a wider vector. If exclusive (pick one), you get cleaner signal but lose nuance. Recommendation: **non-exclusive** — let people agree with multiple positions within a topic. The clustering will figure out which combinations are common.
+
+3. **How do you ensure positions are genuinely distinct?** The LLM might generate "increase funding" and "more money for schools" — semantically identical. Embed all positions and reject any pair with cosine similarity > 0.85.
+
+4. **Should the bill's actual provisions be treated as a position?** "Implement the bill as written" is always a valid position. Should it be auto-generated for every topic?
+
+---
+
+## Phase 2: Guided Elicitation in VoteBot Chat
+
+### What This Phase Does
+
+VoteBot becomes aware of the opinion landscape for each bill. During natural conversation, it detects when a user expresses or approaches an opinion, and surfaces relevant positions to help them articulate their stance.
+
+### How It Works: Three Modes
+
+#### Mode 1: Passive Extraction (Always On)
+
+Every chat message is analyzed for opinion signals, regardless of whether the user is "in elicitation mode." This is the async post-response extraction from the original plan.
+
+```
+User: "I think this bill needs way more funding than what they proposed"
+
+VoteBot answers the question normally.
+
+Background extraction:
+  Topic matched: "Funding Approach"
+  Position matched: None exactly, but closest to
+    "Increase funding but index to inflation" (similarity: 0.72)
+  Stance: supports MORE funding than bill proposes
+  Extracted vector: P1=-0.3, P2=+0.6, P3=-0.5, P4=-0.9
+  Confidence: 0.78
+```
+
+This runs on every message at zero latency cost. Opinions are stored even if the user never sees the elicitation UI.
+
+#### Mode 2: Contextual Prompting (Natural Conversation)
+
+When VoteBot detects that a user has expressed interest in or opinions about a topic, it can naturally introduce the range of positions:
+
+```
+User: "What are people saying about the funding in this bill?"
+
+VoteBot: "The funding provisions in HB 123 have been one of the most
+discussed aspects. People generally fall into a few camps:
+
+  - Support the bill's proposed state funding formula
+  - Prefer tying funding to local property taxes
+  - Want increased funding but through reallocation, not new revenue
+  - Think overall education spending should be reduced
+
+Based on 234 people who've weighed in, the first two positions have
+the most support, but there's a notable group advocating for
+reallocation. Where do you come down on this?"
+```
+
+The user might:
+- **Select a position**: "I'm in the reallocation camp" → direct vector entry
+- **Express nuance**: "I like the state formula but think it needs inflation indexing" → LLM maps to positions + captures the nuance
+- **Introduce something new**: "None of those — I think funding should come from a lottery system" → flagged as emergent position
+- **Decline to engage**: "I was just curious" → no opinion recorded
+
+This is the **guided elicitation** — VoteBot presents the landscape, the user navigates it conversationally.
+
+#### Mode 3: Explicit Elicitation (Opt-In)
+
+A user could explicitly ask VoteBot to walk them through the bill's key issues:
+
+```
+User: "Help me figure out where I stand on this bill"
+
+VoteBot: "Sure! HB 123 covers several key areas. Let's go through them.
+
+First, on funding: this bill proposes a new state funding formula for
+K-12 schools. Here are the main positions people hold:
+
+  1. Support the bill's formula as written
+  2. Prefer tying funding to local property taxes
+  3. Fund through reallocation from other state programs
+  4. Reduce overall education spending
+
+Which of these resonates with you? Or do you see it differently?"
+
+User: "Probably #1, but I also think reallocation makes sense"
+
+VoteBot: "Got it — you support the bill's formula and are open to
+reallocation rather than new revenue. Let me note that.
+
+Next, on teacher certification requirements..."
+```
+
+This is the most structured mode — essentially a conversational survey. But because it's driven by the user asking for it, it doesn't feel intrusive.
+
+### The Elicitation Prompt System
+
+VoteBot needs new prompt context to enable guided elicitation. When a user is on a bill page:
+
+```python
+# In agent.py, during system prompt construction:
+if page_context.type == "bill" and settings.elicitation_enabled:
+    landscape = await opinion_service.get_landscape(page_context.webflow_id)
+    if landscape:
+        elicitation_context = format_landscape_for_llm(landscape)
+        # Append to system prompt
+```
+
+The LLM system prompt addition:
+
+```
+## Opinion Landscape for {bill_title}
+
+You are aware of the following policy positions that people hold on
+this bill. When the user expresses an opinion or asks about public
+sentiment, you may reference these positions to help them articulate
+their views.
+
+DO:
+- Surface relevant positions when the conversation naturally turns
+  to a topic
+- Present positions neutrally, without advocating for any
+- Ask which position resonates when the user seems engaged
+- Accept nuanced responses that don't fit neatly into one position
+- Note when a user introduces a perspective not listed here
+
+DO NOT:
+- Force elicitation — if the user is asking factual questions, answer them
+- Present this as a survey or questionnaire
+- Push the user to express opinions they haven't volunteered
+- Limit the user to only the listed positions
+
+Topics and positions:
+{formatted_landscape}
+```
+
+### Opinion Signal Schema (Updated)
+
+```python
+class PositionStance:
+    position_id: str            # References a PolicyPosition
+    stance: float               # -1.0 to +1.0 (disagree to agree)
+    confidence: float           # 0-1 confidence in extraction
+    source: str                 # "explicit_selection" | "inferred" | "contextual"
+    evidence: str               # The user's words that support this
+
+class OpinionSignal:
+    signal_id: str
+    session_id: str
+    bill_webflow_id: str
+    jurisdiction: str
+    user_message: str
+    bot_response: str
+    elicitation_mode: str       # "passive" | "contextual" | "explicit"
+    position_stances: list[PositionStance]
+    novel_claims: list[str]     # Opinions that don't match any position
+    timestamp: str
+```
+
+**Source field matters for weighting:**
+- `explicit_selection`: User directly chose a position ("I'm in camp #1") — highest confidence
+- `contextual`: User responded to a prompted range — high confidence
+- `inferred`: Background extraction from unprompted conversation — moderate confidence
+
+### Building the Opinion Vector Per User
+
+Across a session, a user might express opinions on multiple topics through multiple messages. The full opinion vector is built incrementally:
+
+```
+Message 1: "The funding formula seems reasonable"
+  -> P1 (state formula): +0.6 (inferred, confidence 0.7)
+
+Message 4: User responds to contextual prompt about enforcement
+  -> P8 (3-year timeline): -0.8 (explicit_selection, confidence 0.95)
+  -> P9 (5+ years): +0.7 (explicit_selection, confidence 0.95)
+
+Message 7: "None of those options for teacher certification —
+            I think national standards should apply"
+  -> P5, P6, P7: no match
+  -> novel_claim: "National teacher certification standards"
+
+Final session vector:
+  P1=+0.6  P2=?  P3=?  P4=?  P5=?  P6=?  P7=?  P8=-0.8  P9=+0.7  P10=?
+  + 1 novel claim flagged for emergent position discovery
+```
+
+**Conflict resolution within a session:** If a user expresses contradictory stances on the same position across messages, take the most recent one (people refine their views during conversation). If an explicit selection contradicts an earlier inference, the explicit one wins.
+
+### Questions to Consider
+
+5. **How aggressively should VoteBot elicit?** There's a spectrum from "only surface positions when explicitly asked" to "proactively ask about every topic." Too aggressive feels like a survey. Too passive captures few opinions. Recommendation: contextual prompting when the user shows interest in a topic, but never push unprompted.
+
+6. **Should VoteBot reveal how many people hold each position?** "234 people have weighed in; 42% support the state formula" gives social proof but could anchor opinions. Showing counts might bias toward popular positions. Option: show counts only AFTER the user has expressed their own view.
+
+7. **What if the user doesn't want to express opinions?** Some users come to VoteBot purely for information. The elicitation should be invisible to them. The key indicator: does the user use opinion language ("I think", "I believe", "that's wrong") or information-seeking language ("what does", "how would", "explain")?
+
+8. **Should the conversation history persist across sessions?** If a user discussed funding yesterday and returns today, should VoteBot remember? Currently sessions are tab-scoped (30-min timeout). For meaningful opinion building, longer persistence would help — but requires authentication.
+
+9. **How do you prevent the LLM from editorializing?** VoteBot must present positions neutrally. But LLMs have tendencies. The system prompt needs strong guardrails, and the position framings (pro + counter) help balance.
+
+---
+
+## Phase 3: Polis Bridge — Shared Opinion Space
+
+### What This Phase Does
+
+Creates and maintains the Polis conversation for each bill, maps policy positions to Polis seed statements, and ensures both modalities feed the same opinion vector space.
+
+### Conversation Setup
+
+```
+OpinionLandscape generated (Phase 1)
+    |
+    v
+Create Polis conversation
+    POST /api/v3/conversations
+    topic: "{bill_title} — Public Input"
+    conversation_id: "bill_{jurisdiction}_{number}"
+    |
+    v
+For each PolicyPosition in the landscape:
+    POST /api/v3/comments
+    txt: position.text
+    is_seed: true
+    Store: position.polis_tid = response.tid
+    |
+    v
+Redis mappings:
+    votebot:polis:bill:{bill_webflow_id} -> conversation_id
+    votebot:polis:positions:{bill_webflow_id} -> {position_id: polis_tid}
+```
+
+### Projecting Chat Users into Polis
+
+When a chat user confirms their opinions (consent flow):
+
+```
+Chat user's opinion vector: [P1=+0.6, P8=-0.8, P9=+0.7, ...]
+
+Discretize to Polis votes:
+    > +0.3 -> agree (+1)
+    < -0.3 -> disagree (-1)
+    else   -> pass (0)
+
+Submit to Polis:
+    POST /api/v3/votes {tid: P1.polis_tid, vote: +1}
+    POST /api/v3/votes {tid: P8.polis_tid, vote: -1}
+    POST /api/v3/votes {tid: P9.polis_tid, vote: +1}
+```
+
+### Projecting Polis Voters into the Unified Space
+
+Polis voters produce discrete +1/-1/0 per statement. These map directly to the opinion vector since each statement IS a policy position. No aggregation needed — the vector dimensions are already 1:1 with Polis statements.
+
+### Authentication
+
+Polis XID JWT system for external identity:
+- VoteBot service account created in Polis (one-time)
+- Each chat user gets XID: `"votebot_{session_id}"`
+- JWT: `{type: "xid", conversation_id, uid: service_uid, xid: "votebot_{session_id}"}`
+- RSA-256 signed
+
+### When to Create the Polis Conversation
+
+| Trigger | Pros | Cons |
+|---------|------|------|
+| **On landscape generation** (recommended) | Ready when users arrive; Polis voters can start immediately | Some conversations may never get traffic |
+| **On first confirmed opinion** | Only creates what's needed | Polis embed won't work until first chat user opines |
+| **Manual** | Full control | Doesn't scale |
+
+### Questions to Consider
+
+10. **Should Polis voters see the topic groupings?** Polis normally presents statements in random/priority order. Grouping by topic could help voters think systematically, but Polis doesn't natively support topic-grouped presentation. This might require Polis UI modifications.
+
+11. **One conversation per bill or per topic?** One per bill keeps everything together and enables cross-topic clustering. One per topic gives cleaner Polis UX but fragments the opinion space. Recommendation: one per bill.
+
+---
+
+## Phase 4: Clustering and Results
+
+### What This Phase Does
+
+Runs PCA/UMAP and k-means on the unified opinion matrix to find opinion groups, then surfaces results in both VoteBot and Polis.
+
+### The Unified Matrix
+
+```
+                P1    P2    P3    P4    P5    P6  ...  P10   P_new1
+polis_user_1:  [+1    -1     0    -1    +1     0        0      ?  ]
+polis_user_2:  [-1    +1    +1     0     0    +1       -1      ?  ]
+chat_user_3:   [+0.6   ?     ?     ?     ?     ?      +0.7    ?  ]
+chat_user_4:   [ ?    +0.9   ?    -0.7  +0.8   ?       ?     +0.6]
+confirmed_5:   [+1     0    +1    -1    +1    -1       +1     -1  ]
+```
+
+- Polis voters: dense, discrete (+1/-1/0)
+- Chat users (unconfirmed): sparse, continuous, lower weight
+- Chat users (confirmed): sparse, discretized, full weight
+
+### Clustering Pipeline
+
+Run as a Delphi job (leverages existing infrastructure):
+
+```
+Job type: OPINION_LANDSCAPE_CLUSTERING
+Input: bill_webflow_id
+Steps:
+  1. Fetch Polis vote matrix for bill's conversation
+  2. Fetch confirmed + unconfirmed chat opinion vectors from Redis
+  3. Merge into unified matrix
+  4. Handle missing values (impute with 0 or use masking)
+  5. Run PCA (2D projection for visualization)
+  6. Run k-means (k=2-5, selected by silhouette score)
+  7. For each cluster:
+     - Compute mean stance per position
+     - Identify defining positions (highest variance between clusters)
+     - Generate narrative label via LLM
+     - Select representative quotes from chat users in cluster
+  8. Store results in DynamoDB
+  9. Cache summary in Redis for VoteBot
+```
+
+### Weighting
+
+| Source | Weight | Rationale |
+|--------|--------|-----------|
+| Polis vote (explicit) | 1.0 | Deliberate, unambiguous |
+| Chat opinion (confirmed via consent) | 0.9 | User verified the extraction |
+| Chat opinion (explicit selection in elicitation) | 0.85 | Direct but through LLM intermediary |
+| Chat opinion (contextual prompt response) | 0.7 | High confidence but conversational |
+| Chat opinion (passive inference) | 0.5 | LLM-extracted, no user verification |
+
+### Cluster Output
+
+```python
+class OpinionCluster:
+    cluster_id: int
+    size: int
+    percentage: float
+    label: str                          # "Supportive but cost-conscious"
+    defining_positions: list[dict]      # Positions that most distinguish this cluster
+    mean_stances: dict[str, float]      # Average stance per position
+    representative_quotes: list[str]    # Best chat excerpts
+    polis_repness: list[dict]           # Most representative Polis statements
+
+class ClusteringResult:
+    bill_webflow_id: str
+    total_participants: int
+    n_clusters: int
+    clusters: list[OpinionCluster]
+    consensus_positions: list[str]      # Positions all clusters agree on
+    divisive_positions: list[str]       # Positions that most separate clusters
+    pca_explained_variance: list[float] # How much each PC explains
+    last_computed: str
+```
+
+### Surfacing Results in VoteBot
+
+```python
+# In agent.py, alongside existing pre-fetch:
+if page_context.type == "bill" and settings.elicitation_enabled:
+    clusters = await opinion_service.get_clustering_result(
+        page_context.webflow_id
+    )
+    if clusters and clusters.total_participants >= MIN_PARTICIPANTS:
+        cluster_context = format_clusters_for_llm(clusters)
+```
+
+**Example VoteBot response with cluster data:**
+
+> User: "What do people think about the funding in this bill?"
+>
+> VoteBot: "312 people have shared their views on HB 123. On funding specifically, there are two main groups:
+>
+> **Group A (58%)** — 'Pragmatic supporters': They support the bill's state funding formula but want spending caps to control costs. As one participant put it: 'The formula is sound but we need guardrails on total expenditure.'
+>
+> **Group B (42%)** — 'Local control advocates': They prefer tying funding to local property taxes and oppose a one-size-fits-all state formula. A common view: 'Districts know their needs better than the state does.'
+>
+> Both groups agree that current funding levels are inadequate — the disagreement is about mechanism, not need.
+>
+> Where do you fall on this?"
+
+### Recomputation Frequency
+
+- **Daily** at 05:00 UTC (after bill version sync at 04:00 UTC)
+- **Threshold-triggered**: When 20+ new confirmed opinions arrive since last run
+- **On-demand**: Admin trigger
+
+### Questions to Consider
+
+12. **What's the minimum participant count for meaningful clusters?** With a 30-dimensional vector, you probably need 50+ participants for PCA to find stable axes. Below that, show aggregate stance distributions per position without clustering.
+
+13. **Should passive (unconfirmed) chat opinions be included in clustering?** They add volume but introduce noise from extraction errors. Options: include at low weight (0.5), exclude entirely, or include only above a confidence threshold (0.8+).
+
+14. **How do you handle the Polis/chat density asymmetry?** A Polis power user votes on all 30 positions. A casual chat user covers 3. Should sparse users pull the clusters less? PCA naturally handles this, but consider whether to set a minimum coverage threshold (e.g., must have stances on 5+ positions).
+
+---
+
+## Phase 5: Emergent Position Discovery
+
+### What This Phase Does
+
+Captures opinions from chat that don't match any existing policy position, clusters them, and generates new positions to expand the opinion landscape.
+
+### Pipeline
+
+```
+Novel claims from chat (flagged in Phase 2)
+    "Funding should come from a state lottery"
+    "What about funding through public-private partnerships?"
+    "We should fund this by cutting the highway budget"
+    |
+    v
+[Accumulate until threshold]
+    Minimum 5 distinct users with novel claims on same bill
+    |
+    v
+[Cluster novel claims]
+    Embed with SentenceTransformer
+    Cluster with HDBSCAN
+    |
+    v
+[For each cluster of 3+ claims:]
+    LLM generates candidate PolicyPosition:
+      - text, short_label, framing, counter_framing
+    |
+    v
+[Quality gate]
+    Semantic distance from all existing positions > 0.15
+    Not too vague ("things should be better") — specificity check
+    Clearly about the bill, not general political commentary
+    |
+    v
+[Integration]
+    Add to OpinionLandscape (source: "emergent")
+    Generate Polis seed statement
+    Submit to Polis: POST /api/v3/comments (is_seed=true)
+    Backfill: re-score existing chat opinions against new position
+    Next clustering run includes new dimension
+```
+
+### Why Bill-Scoped Topics Minimize Drift
+
+Because the initial positions come from bill text, the coordinate system is anchored to something concrete. A bill's provisions don't change (unless amended). Emergent positions expand the space but don't move existing axes. The stable backbone (bill-derived positions) plus the controlled growth (emergent positions with high threshold) keeps drift manageable.
+
+The architecture handles bill amendments naturally: when `BillVersionSyncService` detects new bill text, re-run Phase 1 landscape generation. New provisions become new topics/positions. Existing ones persist.
+
+### Questions to Consider
+
+15. **Should emergent positions require human approval?** Options: auto-approve above threshold (fast, scalable), queue for admin review (safe, slow), or auto-approve + notify admin (balanced). Recommendation: auto-approve + notify for the first version, tighten later if quality issues emerge.
+
+16. **Can emergent positions from one bill inform another?** If users keep raising "impact on homeschool families" on education bills across multiple states, that's a pattern worth codifying. Cross-bill learning could improve initial landscape generation.
+
+17. **What if an emergent position splits an existing one?** "Fund through the state formula" might split into "Fund through state formula with inflation indexing" vs. "Fund through state formula at fixed levels." Should the original position be retired and replaced with the two more specific ones? This changes the vector dimensions — need a versioning strategy.
+
+---
+
+## Phase 6: Consent and User Experience
+
+### The Consent Flow
+
+After detecting opinions during a chat session, VoteBot presents a summary when the conversation reaches a natural pause or the user closes the widget.
+
+**Design: Conversational, Not a Form**
+
+```
+VoteBot: "Before you go — based on our conversation, it seems like
+you have some views on HB 123. Would you like to contribute them
+to our public opinion map? Here's what I gathered:
+
+On funding: You support the state formula approach but want
+inflation indexing.
+On teacher certification: You prefer alternative pathways over
+raising standards.
+On timeline: You think 3 years isn't enough.
+
+Does this sound right? You can edit anything, or skip entirely.
+Your responses would be anonymous."
+
+User: "Yeah that's about right, but I'm actually neutral on timeline"
+
+VoteBot: "Got it — I've updated that. Ready to submit?"
+
+User: "Sure"
+
+VoteBot: "Done! Your views have been added. 312 others have also
+weighed in on this bill. Want to see where you land compared to
+others?"
+```
+
+This is conversational, not a checkbox form. The user can correct errors in natural language. VoteBot updates the opinion vector accordingly.
+
+### Participation Tiers
+
+| Tier | How Created | Data Used | Can See Group Placement |
+|------|------------|-----------|------------------------|
+| **Active** | Confirmed stances via consent flow | Full weight in clustering + Polis votes submitted | Yes |
+| **Passive** | Any chat user who expressed opinions | Reduced weight (0.5x) in aggregate clustering only | No |
+| **Polis Direct** | Voted in Polis embed/site | Full weight in clustering | Yes (in Polis UI) |
+
+### Questions to Consider
+
+18. **When exactly should the consent prompt appear?** Options: on widget close, after N opinion signals detected (3+?), after inactivity timeout (2 min?), or user-triggered ("submit my views"). Too early is annoying. Too late and the user has left.
+
+19. **Should the consent prompt be in-chat or a separate UI?** In-chat (as shown above) feels natural but adds messages. A slide-up panel could be cleaner but breaks the conversational metaphor.
+
+20. **Can a user revise after submitting?** "I changed my mind about the funding" in a later session should update their vector and Polis votes. This requires persistent identity (beyond tab-scoped sessions).
+
+21. **What about the passive tier ethically?** Even at 0.5 weight, using inferred opinions without consent is a gray area. Consider: only include passive opinions in aggregate statistics ("312 discussions"), never in individual clustering.
+
+---
+
+## Phase 7: Closing the Loop
+
+### Polis on the DDP Site
+
+For users who prefer structured voting, embed the Polis conversation on each bill page:
+
+- Polis statements = policy positions from the opinion landscape
+- Users can vote directly (standard Polis experience)
+- If they also chatted with VoteBot, their confirmed opinions are pre-voted
+- XID links the two identities
+
+### VoteBot Awareness of Clusters
+
+VoteBot uses cluster data to enrich every bill conversation:
+
+- **"What do people think?"** → Direct cluster summary with representative quotes
+- **After user expresses opinion** → "Your view aligns with 42% of participants who also prioritize local control"
+- **Guided elicitation enrichment** → "Most people who support the state formula also support inflation indexing — what about you?"
+- **Narrative summaries** → Delphi-generated narratives per cluster, quoted by VoteBot
+
+### Bidirectional Flow
+
+```
+Chat discovers new positions → Added to Polis as seed statements
+Polis voting reveals cluster structure → VoteBot uses in responses
+Polis voters cover positions chat users missed → Fills sparse vectors
+Chat users raise concerns Polis didn't seed → Expands the landscape
+```
+
+The two modalities are genuinely complementary: Polis provides breadth (every voter covers all positions), chat provides depth (nuanced, contextualized opinions with reasoning).
+
+### Questions to Consider
+
+22. **Should VoteBot proactively ask about positions the user hasn't covered?** "You've shared your views on funding and timeline, but not teacher certification. Want to weigh in?" This improves vector density but could feel pushy.
+
+23. **How do you prevent the LLM from steering opinions?** If VoteBot says "most people agree with position X" before the user has expressed a view, that's anchoring. Show cluster data only AFTER the user has spoken, or only when explicitly asked.
+
+24. **What does the mobile experience look like?** Chat widget on mobile is already tight. Embedding Polis visualization alongside it is impractical. For mobile: chat-only with text-based cluster summaries, link to full Polis on desktop.
+
+---
+
+## Implementation Roadmap
+
+### Milestone 1: Opinion Landscape Generation (Weeks 1-3)
+- [ ] BillTopic and PolicyPosition extraction from bill text
+- [ ] Position enrichment from org positions (Webflow CMS)
+- [ ] Deduplication via embedding similarity
+- [ ] Storage in Redis + DynamoDB
+- [ ] Integration with bill sync scheduler
+- [ ] **Validation**: Generate landscapes for 10 real bills, human-evaluate quality
+
+### Milestone 2: Guided Elicitation in VoteBot (Weeks 3-6)
+- [ ] Landscape-aware system prompt injection
+- [ ] Passive opinion extraction (post-response async)
+- [ ] Position-matching: opinion -> PolicyPosition + stance score
+- [ ] Novel claim detection and storage
+- [ ] Incremental opinion vector construction per session
+- [ ] Feature flag and config
+- [ ] **Validation**: Run on 200 production logs, measure extraction accuracy
+
+### Milestone 3: Polis Bridge (Weeks 6-8)
+- [ ] Polis client service (create conversations, submit comments/votes)
+- [ ] XID JWT generation
+- [ ] Position -> Polis seed statement mapping
+- [ ] Auto-create conversation on landscape generation
+- [ ] Chat opinion -> Polis vote discretization and submission
+
+### Milestone 4: Clustering Pipeline (Weeks 8-11)
+- [ ] Unified matrix construction (Polis + chat)
+- [ ] PCA + k-means implementation (or Delphi job type)
+- [ ] Cluster labeling via LLM
+- [ ] Results storage in DynamoDB + Redis cache
+- [ ] Scheduled recomputation
+- [ ] Minimum participant threshold logic
+
+### Milestone 5: Consent Flow + Results Display (Weeks 11-14)
+- [ ] Conversational consent prompt in chat
+- [ ] Edit/correct flow in natural language
+- [ ] Vote submission to Polis on confirmation
+- [ ] Cluster summary in VoteBot responses
+- [ ] "Where do I stand?" query handling
+- [ ] Delphi narrative integration
+
+### Milestone 6: Emergent Positions + Full Loop (Weeks 14-18)
+- [ ] Novel claim clustering pipeline
+- [ ] Candidate position generation and quality gate
+- [ ] Auto-injection into landscape + Polis
+- [ ] Polis embed on DDP bill pages
+- [ ] Cross-modality flow (chat <-> Polis)
+- [ ] Production monitoring, A/B testing, iteration
+
+---
+
+## Technical Considerations
+
+### Deployment
+
+- VoteBot (EC2, 2 uvicorn workers) handles chat, extraction, and elicitation
+- Polis (Docker Compose, separate EC2 recommended) handles direct voting + math
+- Delphi handles clustering jobs (existing worker infrastructure)
+- DDP-API proxy routes to both services
+
+### Cost Estimates
+
+| Component | Per-unit | Monthly (750 queries/day) |
+|-----------|----------|---------------------------|
+| Opinion extraction (Haiku/4o-mini) | ~$0.002/msg | ~$45 |
+| Landscape generation per bill | ~$0.10/bill | ~$10 (100 bills) |
+| Clustering per bill per run | CPU only | Delphi worker time |
+| Polis infrastructure | Fixed | ~$50-100 (EC2) |
+| **Total incremental** | | **~$105-155/month** |
+
+### Data Privacy
+
+- Raw chat messages stored temporarily (Redis, 24h TTL)
+- Opinion vectors are inherently anonymized (no raw text)
+- Polis participants are pseudonymous (XID-based)
+- Representative quotes in cluster results require consent
+- Novel claims used for emergent positions are aggregated (no individual attribution)
+
+### Failure Modes
+
+| Failure | Impact | Mitigation |
+|---------|--------|------------|
+| Landscape generation produces bad positions | Poor elicitation | Human review of first 10 bills, iterate prompts |
+| Opinion extraction misclassifies | Wrong vector entries | Confidence threshold, consent flow catches errors |
+| Polis API down | Can't submit votes | Queue in Redis, retry with backoff |
+| Clustering doesn't converge | No meaningful groups | Min participant threshold, degrade to per-position aggregates |
+| User rejects extraction in consent flow | Lost data | Log rejection as training signal, thank user |
+| LLM editorializes during elicitation | Biased opinions captured | Strong system prompt guardrails, neutral framing |
+
+---
+
+## Open Design Questions (Summary)
+
+### Product & UX
+5. How aggressively should VoteBot elicit? (Only when asked vs. contextual prompting)
+6. Should VoteBot show how many people hold each position before or after the user opines?
+7. What if the user doesn't want to express opinions? (Invisible elicitation)
+8. Should opinion history persist across sessions? (Requires auth)
+18. When should the consent prompt appear?
+19. In-chat consent or separate UI?
+22. Should VoteBot proactively ask about uncovered positions?
+23. How do you prevent LLM anchoring/steering?
+
+### Data Model
+1. How many total positions per bill? (Target: 25-50)
+2. Should positions be mutually exclusive within a topic? (Recommend: no)
+3. How to ensure positions are genuinely distinct? (Embedding similarity check)
+4. Should "implement as written" be auto-generated for every topic?
+13. Should passive (unconfirmed) chat opinions be included in clustering?
+14. Minimum coverage threshold for inclusion in clustering?
+17. How to handle emergent positions that split existing ones? (Versioning)
+
+### Ethics
+19. In-chat consent or separate UI?
+20. Can users revise after submitting?
+21. Is the passive participation tier ethically acceptable?
+
+### Architecture
+10. Should Polis voters see topic groupings? (Requires Polis UI changes)
+11. One conversation per bill or per topic?
+12. Minimum participant count for meaningful clusters?
+15. Should emergent positions require human approval?
+16. Can emergent positions from one bill inform another? (Cross-bill learning)
+
+---
+
+## Recommendation
+
+**Start with Milestone 1** (landscape generation) as a standalone experiment. Generate opinion landscapes for 10 real bills across your tracked jurisdictions. Have 2-3 people evaluate:
+
+1. Do the topics capture what people would actually debate?
+2. Are the positions genuinely distinct and meaningful?
+3. Is the range comprehensive — or are obvious positions missing?
+4. Would you feel comfortable selecting from these options?
+
+If the landscapes are good, **Milestone 2** (guided elicitation) is the product-defining step. Run it against production traffic with passive extraction only (no prompting) for 2 weeks, then enable contextual prompting for a subset of users. Measure:
+
+- What % of messages contain extractable opinions?
+- How many positions per session does a typical user cover?
+- Do users engage with contextual prompts, or ignore them?
+- What % of novel claims represent genuinely new positions?
+
+The opinion landscape is the foundation everything builds on. If the positions are good, the elicitation works naturally, the vectors are meaningful, and the clustering produces real insight. If the positions are bad, nothing downstream can fix it. Invest the most iteration time here.

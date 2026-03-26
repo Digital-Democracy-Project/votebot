@@ -2,7 +2,7 @@
 
 **Goal:** Transform query logging from a flat log file into a behavioral analytics system that supports visitor segmentation, outcome measurement, and product insight.
 
-**Status:** Approved — ready for implementation
+**Status:** Draft v4 — final revision, ready for implementation
 
 ---
 
@@ -56,7 +56,7 @@ Metrics are defined at three levels. When reporting, always name the level expli
 | **Drop-off rate** | Conversation | % of conversations with only 1 query | `conversation_id`, `conversation_message_index` |
 | **Unique visitors** | Visitor | Count of distinct `visitor_id` values | `visitor_id` |
 | **Intent distribution** | Query | Breakdown by `primary_intent` and `sub_intent` | `primary_intent`, `sub_intent` |
-| **Vote CTA exposure rate** | Session | % of sessions where a response contained a vote CTA link | Proxy for conversion — true conversion (click-through) *not measurable in v1*, requires widget click tracking. Do not label this as "conversion" in reports. |
+| **Conversion to vote** | Session | % of sessions where user clicked vote link | *Not measurable in v1* — requires widget click tracking. Proxy: % of responses containing vote CTA link. |
 
 ### Success Tiers
 
@@ -107,15 +107,6 @@ These rules are deterministic and ordered by priority. The server tracks `last_m
 
 `conversation_id` format: `{session_id}:{n}` where `n` is the conversation counter within the session.
 
-**Event sequencing:** Conversation boundary evaluation occurs **before** `message_received` is emitted. The processing order on each incoming message is:
-1. Receive message
-2. Evaluate conversation boundary rules
-3. If boundary detected, emit `conversation_ended` for the previous conversation
-4. Assign new or current `conversation_id`
-5. Emit `message_received` with the final assigned `conversation_id`
-
-This ensures each message is logged against its correct conversation.
-
 **Note:** These boundaries are a v1 heuristic. They may overcount conversations in some edge cases (e.g., a user exploring related bills in quick succession). The rules should be evaluated against real log data after deployment and tuned if conversation metrics look anomalous.
 
 ### Message Indexing
@@ -144,10 +135,8 @@ The `conversation_ended` event is a lightweight summary record that avoids recon
 `terminal_state` values:
 - `"inactive_end"` — user stopped asking (inactivity timeout). Does **not** imply success — user may have been satisfied, confused, or distracted.
 - `"handoff"` — escalated to human agent.
-- `"abandoned"` — session disconnected mid-conversation (WebSocket close while streaming or within a turn). **Caution:** This is a transport-level proxy and may overstate true abandonment — users may close the tab after getting their answer, background the page, or lose connectivity briefly. Do not interpret as definitive dissatisfaction.
+- `"abandoned"` — session disconnected mid-conversation (WebSocket close while streaming or within a turn).
 - `"navigated"` — user moved to a new page context, starting a new conversation.
-
-`dominant_primary_intent` is the most frequent `primary_intent` observed in the conversation. Ties break to the first-seen intent.
 
 ### Intent Taxonomy
 
@@ -162,8 +151,6 @@ Two-level classification for actionable granularity:
 | `out_of_scope` | `greeting`, `off_topic`, `meta` |
 
 `primary_intent` is classified via the existing keyword/regex approach (moved from `evaluate_production.py` into the agent). `sub_intent` uses a lightweight keyword match within the primary category. Both are best-effort heuristics, not ML classifiers.
-
-**Implementation requirement:** Both `primary_intent` and `sub_intent` values must be defined as a central enum/constant list in the codebase. Do not add new values casually — taxonomy creep will degrade analytics consistency. New values require a deliberate decision.
 
 ### Event Schema: `query_processed`
 
@@ -212,7 +199,7 @@ Two-level classification for actionable granularity:
   "duration_ms": 4200,
   "citations": [...],
   "human_active": false,
-  "client_ip": "...",      // debug/infra only — not for v1 analytics
+  "client_ip": "...",
   "user_agent": "..."
 }
 ```
@@ -235,7 +222,7 @@ Two-level classification for actionable granularity:
   "retrieval_miss_occurred": false,
   "terminal_state": "navigated",
   "primary_intents_seen": ["bill", "organization"],
-  "dominant_primary_intent": "bill"  // most frequent; ties break to first seen
+  "dominant_primary_intent": "bill"
 }
 ```
 
@@ -367,8 +354,6 @@ If boundary detected, emit `conversation_ended` for the previous conversation, t
 retrieval_sources = list({c.metadata.get("document_type") for c in retrieval_result.chunks if c.metadata})
 ```
 
-**`retrieval_sources` must be normalized to the controlled vocabulary** defined in `MetadataExtractor` (`document_type` values: `bill`, `bill-text`, `bill-history`, `bill-votes`, `legislator`, `legislator-votes`, `organization`, `training`). Any unexpected values should be logged as warnings and mapped to `"unknown"` rather than passed through raw — inconsistent casing or naming (e.g., `"org"` vs `"organization"`) will produce noisy analytics.
-
 **Grounding and augmentation derivation:**
 ```python
 def _derive_grounding_status(retrieval_count, has_citations):
@@ -480,7 +465,7 @@ All events write to the same date-partitioned JSONL files. The `event_type` fiel
 - **Behavioral Segments** — "visitors with >3 follow-ups", "visitors who trigger fallback", "visitors from bill pages"
 - **Grounding Distribution** — % grounded vs partial vs ungrounded, cross-tabulated with `external_augmentation`
 
-**Note:** `evaluate_production.py` is becoming both an evaluator and an analytics engine. It is a **reporting layer over logs, not the source of truth** — all core metric definitions and field derivations live in the logger and agent code, not in the report script. This is acceptable for v1, but if scope continues to grow, consider splitting into separate scripts (e.g., `analytics_report.py` for metrics/segments, `evaluate_production.py` for ground-truth validation).
+**Note:** `evaluate_production.py` is becoming both an evaluator and an analytics engine. This is acceptable for v1, but if scope continues to grow, consider splitting into separate scripts (e.g., `analytics_report.py` for metrics/segments, `evaluate_production.py` for ground-truth validation).
 
 ### Layer 7: `client_ip` Fix
 
@@ -556,7 +541,7 @@ Mitigation:
 ## Privacy Considerations
 
 - `visitor_id` is a random opaque UUID — no PII. Cannot be reverse-mapped to a person.
-- `entry_referrer` is truncated to domain only — no search query leakage. It is session-entry context: canonically populated on the first `message_received` of each session, `null` on subsequent events **by design** (not because the referrer is unknown). Analysts should not treat `null` as missing data.
+- `entry_referrer` is truncated to domain only — no search query leakage. It is session-entry context only (populated on first message per session, null thereafter).
 - `client_ip` is already logged (even though it's broken). No new IP collection.
 - `localStorage` can be cleared by the user at any time, resetting visitor identity.
 - No cookies are introduced.
