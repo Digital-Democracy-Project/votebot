@@ -207,43 +207,70 @@ Structured questions (Modes 2.5 and 3) are tools for fixing ambiguity and increa
   "engagement_score": 0.72,
   "confirmations_used": 1,
   "structured_prompts_used": 0,
-  "add_your_voice_shown": false
+  "add_your_voice_shown": false,
+  "hesitation_detected": false,
+  "turns_since_last_prompt": 2,
+  "topics_surfaced": ["funding", "timeline"],
+  "total_user_turns": 5
 }
 ```
 
+When `hesitation_detected` is true, the orchestration layer disables all elicitation modes except Mode 1 (passive) for the remainder of the session. `turns_since_last_prompt` enforces the cooldown rule. `topics_surfaced` caps at 2-3 per session.
+
 ### Decision Engine (priority order, evaluated every turn)
 
-1. **Always run Mode 1** (passive extraction) — on every user message
-2. **If extraction is high-confidence (>= 0.65) and < 2 confirmations used** → consider Mode 1.5
-3. **If ambiguity or low confidence (< 0.6)** → consider Mode 2.5 (structured clarification)
-4. **If natural expansion possible (user discussing a topic)** → consider Mode 2 (contextual)
-5. **If 2+ positions and positive engagement** → consider Mode 3 / "Add your voice"
+1. **Always run Mode 1** (passive extraction) — on every user message, regardless of state
+2. **If `hesitation_detected`** → stop here. No further elicitation this session.
+3. **If `turns_since_last_prompt` < 2** → stop here. Cooldown active.
+4. **If `structured_prompts_used` >= 2** → stop here. Session cap reached.
+5. **If extraction is high-confidence (>= 0.65) and `confirmations_used` < 2** → consider Mode 1.5
+6. **If ambiguity or low confidence (< 0.6) and `topics_surfaced` < 3** → consider Mode 2.5 (structured clarification)
+7. **If natural expansion possible (user discussing a topic) and `topics_surfaced` < 3** → consider Mode 2 (contextual)
+8. **If 2+ positions and positive engagement and not yet shown** → consider "Add your voice"
+
+Steps 2-4 are hard gates — they override everything below them.
 
 ### Hard Guardrails
 
 These are non-negotiable. Violating any of these turns the system into a survey.
 
 **Never do:**
-- [ ] 2 structured prompts in a row (Modes 2.5 or 3)
-- [ ] More than 3 total structured prompts per session
+- [ ] 2 structured prompts in a row (Modes 2.5 or 3) — require at least 1-2 organic user turns between any two elicitation prompts (cooldown)
+- [ ] More than **2** total structured prompts per session (reduced from 3 — the third prompt is where users start feeling surveyed)
 - [ ] Structured prompt without conversational context (don't drop options cold)
 - [ ] Structured prompt at conversation start (wait for natural engagement)
 - [ ] Present options without "something else" / free-text escape
+- [ ] Surface more than **2-3 topics** from the landscape per session — even if the landscape has 10 topics, only expose the most relevant ones based on conversation flow
 
 **Always:**
 - [ ] Allow skip on any prompt
 - [ ] Allow free-text override on any structured question
 - [ ] Prioritize answering the user's actual question over elicitation
-- [ ] Stop immediately on signs of friction (short replies, topic changes, "I don't know")
+- [ ] **Detect hesitation and immediately disable elicitation** for the rest of the session: short replies ("ok", "sure", "idk"), "I don't know", topic shifts, declining a prompt. Once hesitation is detected, fall back to passive-only mode.
+
+**Cooldown rule:** After any elicitation prompt (Modes 1.5, 2, 2.5, or 3), wait for at least 1 organic user turn before considering another prompt. This prevents the experience from feeling like a sequence of questions.
 
 ### What to Measure (Orchestration Health)
 
 | Metric | What It Tells You | Alarm Threshold |
 |---|---|---|
 | Structured prompt acceptance rate | Are users engaging with options? | < 20% = prompts are unwelcome |
-| Free-text override rate ("something else") | Are your positions missing nuance? | > 40% = landscape needs improvement |
-| Drop-off after structured prompt | Are you overusing them? | > 15% increase vs. baseline = too aggressive |
+| Free-text override rate ("something else") | Are your positions missing nuance? (Note: high override can also mean users want nuance, not just bad positions) | > 40% = investigate landscape quality |
+| **Drop-off by mode** | Which mode is hurting engagement? | > 15% increase vs. baseline for any specific mode = that mode needs tuning |
 | Completion rate (≥3 positions) | North star metric | < 10% = system isn't working |
+| Hesitation detection rate | How often are users showing friction? | > 50% of sessions = elicitation is too aggressive overall |
+
+**User segmentation (critical):** All metrics above must be split by session depth:
+
+| User Segment | Description | Expected Behavior |
+|---|---|---|
+| 1-turn users | Ask one question, leave | No elicitation triggered, passive only |
+| 2-3 turn users | Brief conversation | Mode 1.5 may trigger once; most won't engage further |
+| 4+ turn users | Extended conversation | Primary audience for Modes 2, 2.5, and "Add your voice" |
+
+This segmentation explains everything. If completion rate is 10% overall but 40% among 4+ turn users, the system is working — the bottleneck is session depth, not elicitation quality.
+
+**Explicit acknowledgment:** This system is designed for **engaged users, not average users**. Most casual visitors (1-2 turn sessions) will never interact with elicitation features. That's acceptable — the goal is high-quality signal from willing participants, not low-quality signal from everyone. The methodology and product language must reflect this: opinion data represents "people who engaged with the topic," not "all visitors."
 
 ---
 
@@ -290,8 +317,26 @@ Incremental opinion vectors keyed by `visitor_id` in Redis.
 
 ### Conflict Resolution Rules
 
-1. **Most recent wins** -- if a user changes their mind, the latest stance replaces the old one
-2. **Explicit beats inferred at any timestamp** -- a stance from `explicit_elicitation` or `contextual_prompt` always overrides a `passive` stance, even if the passive extraction is more recent
+1. **Most recent wins for the current stance** — if a user changes their mind, the latest stance becomes `current_stance`
+2. **Explicit beats inferred at any timestamp** — a stance from `explicit_elicitation` or `contextual_prompt` always overrides a `passive` stance
+3. **Stance history is preserved, never overwritten** — every stance change is appended to a `history` array on the vector entry. This captures opinion evolution, internal contradictions, and uncertainty — all of which are valuable signal for understanding how people form views on legislation.
+
+```json
+{
+  "hb123_funding_formula": {
+    "current_stance": +0.7,
+    "current_confidence": 0.85,
+    "current_source": "contextual_prompt",
+    "last_updated": "2026-04-01T15:30:00Z",
+    "history": [
+      {"stance": +0.4, "confidence": 0.55, "source": "passive", "timestamp": "2026-04-01T15:25:00Z"},
+      {"stance": +0.7, "confidence": 0.85, "source": "contextual_prompt", "timestamp": "2026-04-01T15:30:00Z"}
+    ]
+  }
+}
+```
+
+The `history` array enables future analysis of opinion formation patterns — how do users refine their views during conversation? Do they become more or less certain? This data is lost if you only store the current stance.
 
 ### Redis Key Structure
 
