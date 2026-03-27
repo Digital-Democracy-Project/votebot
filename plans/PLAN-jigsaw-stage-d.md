@@ -131,7 +131,18 @@ vector_confidence = 0.4 * coverage + 0.3 * avg_confidence + 0.3 * explicit_frac
 | `avg_confidence` | Mean extraction confidence across non-missing positions | 0.0 - 1.0 |
 | `explicit_frac` | Fraction of stances from explicit elicitation or confirmation (not passive) | 0.0 - 1.0 |
 
-### Routing Thresholds
+### Component Floors (must pass before composite applies)
+
+The composite score alone can mask problems. A user with high `explicit_frac` but terrible `coverage` (only answered 2 questions very firmly) should not enter clustering. Require minimum floors on each component before the composite is even evaluated:
+
+| Component | Minimum Floor | Rationale |
+|---|---|---|
+| `coverage` | >= 0.15 (roughly 4-5 of 30 positions) | Must have enough breadth to be placed meaningfully |
+| `avg_confidence` | >= 0.5 | Must have reasonable extraction trust |
+
+If either floor fails, the user is routed to "per-position aggregates only" regardless of composite score.
+
+### Routing Thresholds (after floors pass)
 
 | Score | Treatment |
 |-------|-----------|
@@ -213,6 +224,17 @@ Delphi adds human-readable meaning to raw cluster data:
 - **Narrative synthesis** per cluster (2-3 sentence summary of what this group believes)
 - Results stored in DynamoDB, keyed by `{bill_webflow_id}:{snapshot_id}`
 
+**Narrative constraints (critical — the most dangerous hallucinations are sociological, not factual):**
+
+Delphi-generated narratives can sound more authoritative than the data warrants. LLM-generated labels may overfit, narratives may exaggerate coherence, and summaries may smooth over important internal disagreement. Rules:
+
+- [ ] Every narrative must be **traceable to defining positions and representative quotes**. No free-floating prose without evidence anchors.
+- [ ] Cluster labels are **editorial overlays, not factual names**. Display them as descriptive tags, not identity labels.
+- [ ] Narratives must reference the **top 2-3 representative positions** (by repness score) that define the cluster.
+- [ ] Narratives must include **at least one representative quote** from an actual participant (with consent).
+- [ ] **VoteBot must not embellish Delphi narratives.** The system prompt for cluster responses should use Delphi output as-is, not rephrase or editorialize further.
+- [ ] Human review of Delphi narratives for the first 5 bills before auto-display.
+
 ---
 
 ## 6. Clustering Results in VoteBot
@@ -229,32 +251,45 @@ On cache miss, VoteBot fetches from Polis + Delphi and repopulates the cache.
 
 ### Participant Thresholds
 
-| Participants | VoteBot Behavior |
-|-------------|-----------------|
-| < 10 | "Not enough people have shared their views on this bill yet. You're one of the first!" |
-| 10 - 29 | Per-position aggregates only: "Of the 23 people who've weighed in, 74% support the state funding formula." |
-| 30 - 99 | Full clusters with margin of error: "Three main groups have emerged among the 67 people who've shared detailed views..." |
-| 100+ | Confident reporting: "312 people have weighed in on this bill. Here's what we're seeing..." |
+| Participants | VoteBot Behavior | Language Tier |
+|-------------|-----------------|---|
+| < 10 | "Not enough people have shared their views on this bill yet. You're one of the first!" | **No data** |
+| 10 - 29 | Per-position aggregates only: "Of the 23 people who've weighed in, 74% support the state funding formula." | **Aggregates only** |
+| 30 - 99 | Clusters shown with **experimental/early signal language**: "Among the 67 people who shared detailed views, we're seeing three recurring patterns..." | **Early signal** |
+| 100+ | Confident cluster reporting: "312 people have weighed in on this bill. Here's what we're seeing..." | **Established** |
+
+**Critical language principle:** Clusters are mathematical partitions of a self-selected, engaged subset — not sociological facts. At 30-99 participants, use:
+- "we're seeing three recurring patterns" (not "three groups have emerged")
+- "three clusters appear in the current data" (not "there are three groups of opinion")
+- "among participants who shared detailed views" (not "among voters" or "among people")
+
+At 100+, language can be somewhat stronger but should never imply statistical representativeness of the full electorate.
 
 ### Example VoteBot Responses
 
-**"What do other people think about this bill?"** (67 participants, 3 clusters)
+**"What do other people think about this bill?"** (67 participants, 3 clusters — early signal tier)
 
-> Among the 67 people who shared detailed views on HB 123, three main groups have emerged:
+> Among the 67 people who shared detailed views on HB 123, we're seeing three recurring patterns:
 >
-> **Group 1 (28 people):** Support the state funding formula but want stronger enforcement timelines. They tend to agree that local property tax funding creates inequity.
+> **Pattern 1 (~28 people):** Tend to support the state funding formula but want stronger enforcement timelines. Generally agree that local property tax funding creates inequity.
 >
-> **Group 2 (22 people):** Prefer local control of funding, with the state providing minimum standards only. They're skeptical of the bill's enforcement mechanisms.
+> **Pattern 2 (~22 people):** Lean toward local control of funding, with the state providing minimum standards only. Tend to be skeptical of the bill's enforcement mechanisms.
 >
-> **Group 3 (17 people):** Want to reduce overall education spending and oppose new funding formulas of any kind.
+> **Pattern 3 (~17 people):** Lean toward reducing overall education spending and tend to oppose new funding formulas.
 >
-> These groups aren't rigid — many people share views across groups. Want to see where your views fit?
+> These patterns aren't rigid — many people share views across groups. This is an early signal based on a self-selected group, not a poll. Want to see where your views fit?
+
+**"What do other people think about this bill?"** (312 participants — established tier)
+
+> 312 people have shared detailed views on HB 123. Three clear patterns have emerged: [same structure but without "early signal" caveat, still with sample size visible]
 
 **"Where do I stand?"** (user has confirmed opinions, cluster assigned)
 
-> Based on your confirmed views, you're closest to Group 1 — the people who support state funding but want stronger enforcement. You share their support for the funding formula (+0.8) and opposition to property-tax-based funding (-0.6).
+> Based on the views you've shared so far, your current best fit is with Pattern 1 — the people who tend to support state funding but want stronger enforcement. You share their support for the funding formula and opposition to property-tax-based funding.
 >
-> Where you differ: you're more supportive of the 5-year timeline than most people in your group. On that point, you're actually closer to Group 2.
+> Where you differ: you're more supportive of the 5-year timeline than most people in that group. On that point, you're actually closer to Pattern 2.
+>
+> _(This placement is based on your [N] confirmed views and may shift as you weigh in on more topics.)_
 
 **"Where do I stand?"** (user has opinions but < 7 confirmed positions)
 
@@ -276,24 +311,53 @@ Each tracked bill with 30+ cluster participants gets a public opinion report pag
 
 ### Per-District Report
 
-For bills with sufficient verified voters in a district:
+For bills with sufficient verified voters in a district. **District thresholds are stricter than bill-level** because small samples can swing narratives dramatically:
 
-- **District participation count** — "89 verified voters in District 14 have weighed in"
-- **District-specific cluster distribution** — how this district's voters are distributed across the bill-wide clusters
-- **Comparison to statewide** — "District 14 skews toward Group 1 (42% vs. 33% statewide)"
-- **Minimum threshold:** 15 verified voters per district before showing district-specific data
+| Verified Voters in District | Display Level |
+|---|---|
+| < 15 | No district-specific data shown |
+| 15 - 29 | **Early district signal** only: participation count + per-position aggregates. No cluster distribution, no comparative claims. Badge: "Early signal — small sample, interpret cautiously." |
+| 30 - 49 | District cluster distribution shown with prominent margin of error and "provisional" label |
+| 50+ | Full district reporting: cluster distribution + comparison to statewide + verified voter count |
+
+**What each level shows:**
+- **15-29:** "15 verified voters in District 14 have weighed in. Here's a preliminary look at their per-position stances." (No "District 14 skews toward..." language.)
+- **30-49:** "34 verified voters in District 14 have weighed in. Provisional cluster distribution: [chart with margin of error bars]."
+- **50+:** "89 verified voters in District 14 have weighed in. District 14 leans toward Pattern 1 (42% vs. 33% statewide)." (Comparative language allowed with sample size visible.)
+
+### Inline UI Caveats (not just a methodology page)
+
+Almost nobody reads methodology pages. If the main product surfaces say "three patterns have emerged" and "District 14 leans toward Pattern 1," the nuance on a separate page won't save you. Caveats must be **inline on every report surface:**
+
+| Context | Inline Caveat |
+|---|---|
+| Any cluster display at 30-99 participants | Badge: "Early signal — based on [N] self-selected participants" |
+| Any cluster display at 100+ | "Based on [N] participants who shared detailed views (not a representative poll)" |
+| District data at 15-29 | Badge: "Early district signal — small sample, interpret cautiously" |
+| District data at 30-49 | "Provisional — [N] verified voters" |
+| "Where do I stand?" | "Based on the views you've shared so far — may shift as you weigh in on more topics" |
+| First rollout (all bills) | **"Experimental" badge** on all opinion reports during initial launch period |
+
+### Freshness Indicators
+
+Users expect their new input to be reflected quickly. If votes are queued or recomputation hasn't happened, the UI should not look "live" when it's stale.
+
+- [ ] Show **"Last updated: [timestamp]"** on every report page and in VoteBot cluster responses
+- [ ] If votes are queued (Polis down, pending recomputation): show **"New input pending — results will update shortly"**
+- [ ] Carry freshness into the chat layer: if cluster results are >24 hours stale, VoteBot should say "Based on data from [date]..." not present it as current
 
 ### Methodology Page
 
-A standing methodology page linked from every report:
+A standing methodology page linked from every report and every inline caveat:
 
 - How opinions are collected (chat extraction + direct voting)
-- How confidence weighting works
+- How confidence weighting works (**explicitly stated as provisional heuristics, not validated science**)
 - Sample size thresholds and what they mean
 - How clusters are computed (PCA + k-means, non-technical explanation)
 - What "verified voter" means (Catalist matching)
 - Limitations: self-selected sample, not a poll, not representative of all voters
 - Confidence intervals where applicable
+- Weight values and their status (heuristic vs. empirically calibrated)
 
 ---
 
@@ -319,6 +383,8 @@ Every user-facing number must be labeled with its actual meaning. Never conflate
 ## 9. Weight Calibration
 
 Run after 200+ opinions have been collected to validate passive extraction accuracy.
+
+**Important:** The current weights (confirmed 0.85, contextual 0.7, passive 0.5) are **provisional heuristics, not empirically validated**. The methodology page and any technical documentation must state this explicitly. The math will look precise; the weights are still judgment calls. Calibration is the process of turning them into evidence-based values.
 
 ### Calibration Process
 
@@ -414,8 +480,11 @@ All three gates must pass before clustering results are shown publicly.
 ### Gate 3: Sample Size Enforcement
 
 - Participant thresholds (< 10, 10-29, 30-99, 100+) are enforced in code, not just UI
-- VoteBot API returns the appropriate response tier based on participant count
-- District reports require 15+ verified voters — no exceptions, no "close enough"
+- VoteBot API returns the appropriate response tier and language tier based on participant count
+- District thresholds (< 15 hidden, 15-29 early signal, 30-49 provisional, 50+ full) enforced in code
+- **Inline caveats are mandatory** at the API level — the response includes the caveat text, not just the data
+
+**Important:** Stable clusters (Gate 2) do not necessarily mean meaningful clusters. You could have mathematically stable but semantically bad groupings. Gate 1 (human intuition) catches this. Both gates are necessary; neither alone is sufficient. Do not overinterpret the automated stability gate as stronger than it is.
 
 ---
 
