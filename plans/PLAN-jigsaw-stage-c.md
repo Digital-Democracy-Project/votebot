@@ -403,7 +403,9 @@ Prevents repeat usage from draining cost. Requires identity — anonymous users 
 
 **UX:** Soft warning at ~80% → hard stop at 100% with "continue tomorrow" framing.
 
-**Implementation:** Redis `votebot:daily_budget:{visitor_id}` — `{tokens_today, last_reset}`. Reset daily at UTC midnight.
+**Implementation:** Redis `votebot:daily_budget:{composite_id}` — `{tokens_used, window_start}`. Uses a **rolling 24-hour window** per user (not UTC midnight reset — simultaneous reset creates traffic/cost spikes). `composite_id` = `hash(visitor_id + IP + user_agent)` for anonymous users, `member_id` for authenticated members.
+
+**Per-IP daily cap (anonymous abuse resistance):** Max 200k tokens/day per IP, regardless of visitor_id. Redis `votebot:ip_budget:{ip}`. This catches multi-session, multi-identity abuse from a single source.
 
 ### Layer 3: Rate Limiting + Abuse Detection (Stage A+)
 
@@ -443,10 +445,25 @@ Before generating a response, check remaining budget and adapt:
 
 ```python
 if remaining_session_budget < estimated_response_cost:
-    # Downgrade model for this response
+    # Downgrade response model (GPT-4.1 → Sonnet/4o)
     # Or shorten response (add "concise: true" to system prompt)
     # Or skip opinion extraction this turn
 ```
+
+**Token estimation:** Use conservative estimates (1.5-2x expected tokens) to avoid exceeding limits. Underestimate budget remaining, not overestimate.
+
+**Response model fallback ladder:**
+- Budget > 50%: full model (GPT-4.1/Opus)
+- Budget 30-50%: mid model (Sonnet/4o)
+- Budget < 30%: cheap model (Haiku/4o-mini) + concise system prompt
+
+### Layer 5b: Budget Persistence (Stage A+)
+
+Redis budget counters are volatile — eviction, restart, or TTL expiry can silently reset them. Persist to PostgreSQL for audit:
+
+- [ ] Every 15 minutes, write current budget state (per composite_id and per IP) to a `budget_snapshots` table
+- [ ] On Redis restart, restore from latest snapshot
+- [ ] Audit trail enables cost analysis and abuse investigation after the fact
 
 ### Layer 6: Progressive Identity Incentive (Stage C)
 
@@ -474,18 +491,29 @@ Track daily:
 | Total tokens/day (by stage) | Are we within budget? |
 | Cost per user (avg + p95) | Who's expensive? |
 | **Cost per meaningful outcome** (cost per user with ≥3 positions) | Is the spend producing value? |
-| Token distribution (short/long/outlier sessions) | Where does cost concentrate? |
-| Abuse signals (high-frequency, high-cost users) | Are we being gamed? |
+| **Cost per session cohort** (1-msg, 3-msg, 10-msg sessions) | Where does cost concentrate? |
+| Token distribution (short/long/outlier sessions) | Are outliers driving spend? |
+| Abuse signals (high-frequency, high-cost IPs/composites) | Are we being gamed? |
+| Velocity alerts triggered | How often does the proactive guard fire? |
 
 ### Layer 8: Kill Switch (Non-negotiable)
 
-Automatic cost protection when daily spend exceeds threshold:
+Two-level automatic cost protection:
 
+**Velocity guard (proactive):** Triggers on rate-of-spend, catches spikes before the daily threshold is reached.
+```python
+if spend_last_5min > COST_VELOCITY_THRESHOLD:
+    # Throttle: reduce anonymous session limit, pause extraction
+    # Alert admin via Slack immediately
+```
+
+**Daily threshold (reactive):** Triggers when total daily spend exceeds budget.
 ```python
 if daily_spend > COST_ALERT_THRESHOLD:
     # Reduce anonymous session limit: 10 → 6 turns
     # Reduce token caps by 30%
     # Switch all extraction to cheapest model
+    # Switch response model to mid-tier
     # Alert admin via Slack
 ```
 
@@ -502,6 +530,9 @@ if daily_spend > COST_ALERT_THRESHOLD:
 | `RATE_LIMIT_PER_10S` | 5 | Max requests per 10 seconds |
 | `RATE_LIMIT_PER_MIN` | 20 | Max requests per minute |
 | `COST_ALERT_THRESHOLD` | 50.00 | Daily USD spend that triggers kill switch |
+| `COST_VELOCITY_THRESHOLD` | 10.00 | USD spend in 5-min window that triggers proactive throttle |
+| `IP_DAILY_TOKEN_LIMIT` | 200000 | Max tokens per IP per day (anonymous abuse cap) |
+| `RESPONSE_MODEL_MID` | sonnet | Mid-tier model for budget-constrained responses |
 | `EXTRACTION_MODEL` | haiku | Model used for opinion extraction |
 | `RESPONSE_MODEL` | gpt-4.1 | Model used for user-facing responses |
 
@@ -510,7 +541,9 @@ if daily_spend > COST_ALERT_THRESHOLD:
 | Key Pattern | Value | TTL |
 |---|---|---|
 | `votebot:session_budget:{session_id}` | `{messages, tokens_used}` | Session TTL (30 min) |
-| `votebot:daily_budget:{visitor_id}` | `{tokens_today, last_reset}` | 24 hours |
+| `votebot:daily_budget:{composite_id}` | `{tokens_used, window_start}` | Rolling 24 hours |
+| `votebot:ip_budget:{ip}` | `{tokens_used, window_start}` | Rolling 24 hours |
+| `votebot:spend_velocity` | Rolling 5-min spend total | 5 minutes |
 | `votebot:rate:{visitor_id}` | Request timestamps | 60 seconds |
 | `votebot:ip_rate:{ip}` | Request timestamps | 60 seconds |
 | `votebot:daily_spend` | Running USD total | 24 hours |

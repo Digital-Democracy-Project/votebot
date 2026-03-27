@@ -305,10 +305,15 @@ This is the **longest lead-time item** in the Jigsaw roadmap and is NOT on the c
 Stage A introduces LLM extraction calls on every bill-page message — the first new cost surface. The full cost control architecture is defined in [PLAN-jigsaw-stage-c.md](PLAN-jigsaw-stage-c.md) Section 12. Stage A implements:
 
 - [ ] **Per-session token limit** (Layer 1): Cap anonymous sessions at ~10k tokens. Track in Redis `votebot:session_budget:{session_id}`.
+- [ ] **Composite identity budgets**: Track anonymous cost by `hash(visitor_id + IP + user_agent)`, not just `visitor_id` alone. This prevents bypass via cookie clearing or visitor_id spoofing.
+- [ ] **Per-IP daily cap**: Max 200k tokens/day per IP address (catches multi-session abuse from a single source). Redis `votebot:ip_budget:{ip}`.
 - [ ] **Rate limiting** (Layer 3): Max 5 requests/10s, 20 requests/min per visitor_id/IP. Redis-based.
 - [ ] **Model routing** (Layer 4): Use cheap model (Haiku/4o-mini) for opinion extraction. Keep GPT-4.1 for user-facing responses only. Extraction is the highest-volume new call — routing it cheap reduces cost by 50-80%.
-- [ ] **Kill switch** (Layer 8): If daily spend exceeds threshold, reduce extraction to sampling (every 3rd message) and alert admin.
-- [ ] **Cost tracking**: Log tokens used per extraction call in analytics events. Monitor daily cost per user.
+- [ ] **Response model fallback**: When remaining session budget < 30%, downgrade response model to mid-tier (Sonnet/4o). User still gets a quality answer; cost per response drops significantly.
+- [ ] **Spend velocity guard** (Layer 8): Monitor rate of spend, not just total. If `spend_last_5min > $5`, activate throttling before the daily threshold is reached. This catches spikes before damage is done.
+- [ ] **Kill switch** (Layer 8): If daily spend exceeds threshold, reduce extraction to **probabilistic sampling** (`random() < 0.33` — not "every 3rd message," which biases toward early messages) and alert admin.
+- [ ] **Cost tracking**: Log tokens used per extraction call in analytics events. Track **cost per session cohort** (1-message, 3-message, 10-message sessions separately). Monitor daily cost per user.
+- [ ] **Budget persistence**: Periodically write Redis budget counters to PostgreSQL for audit trail (every 15 min). Redis eviction or restart must not silently reset budgets.
 
 Tiered daily budgets (Layer 2) and identity-based incentives (Layer 6) come in Stage C when Memberstack accounts enable per-user tracking.
 
