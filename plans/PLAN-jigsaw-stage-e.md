@@ -29,7 +29,9 @@ The system learns from users and improves itself. Stage E closes the loop:
 
 ## 3. v1 Posture: Conservative
 
-Bias toward **fewer emergent additions** and **stricter approval**. A growing position space improves coverage but reduces interpretability -- every new dimension makes clustering harder and opinion vectors sparser.
+Bias toward **fewer emergent additions** and **stricter approval**. A growing position space improves coverage but reduces interpretability — every new dimension makes clustering harder and opinion vectors sparser.
+
+> **The deep system risk:** Stage E is where the system stops just measuring opinion and starts **shaping the space of possible opinions**. Users express views → system creates positions → future users select from them → those selections reinforce positions. This feedback loop is unavoidable but must be monitored and managed. Left unchecked, the system can converge on its own framing of reality.
 
 | Principle | Rationale |
 |-----------|-----------|
@@ -37,6 +39,9 @@ Bias toward **fewer emergent additions** and **stricter approval**. A growing po
 | Auto-approve + notify (not auto-approve silently) | Admin awareness on every addition |
 | No removal of initial positions | Bill-text-anchored positions are stable ground truth |
 | Expand automation only after observing real patterns | Let the data teach us what "good enough" looks like |
+| **Max 3-5 new emergent positions per bill per week** (soft cap) | Prevents runaway expansion; admin can override |
+| **Diversity constraint on emergence** | Claims must come from different sessions + different time windows |
+| **Track emergent vs original balance** | If emergent positions dominate selections, the system is drifting |
 
 ---
 
@@ -76,10 +81,12 @@ Admin notification
 - [ ] Each claim stored with: `visitor_id`, `bill_id`, `raw_text`, `embedding`, `timestamp`
 - [ ] Deduplication: skip claims with cosine similarity > 0.92 to an existing buffered claim from the same visitor
 
-### 4.2 Threshold
+### 4.2 Threshold + Diversity Constraint
 
 - [ ] Minimum **5 distinct users** with novel claims on the same bill before clustering runs
+- [ ] **Diversity constraint:** the 5 users must come from at least **3 distinct sessions** (not all from one session) AND span at least **48 hours** of calendar time. This prevents a small coordinated group from injecting positions in a single burst.
 - [ ] Check runs on a schedule (daily) or triggered when a new novel claim arrives and count crosses threshold
+- [ ] **Weekly cap:** max 3-5 new emergent positions per bill per week (soft cap, admin override available)
 
 ### 4.3 Clustering
 
@@ -97,13 +104,26 @@ Admin notification
 
 | Check | Criterion | Failure action |
 |-------|-----------|----------------|
-| Semantic distance | Cosine distance from nearest existing position > **0.15** | Reject (too similar to existing) |
+| Semantic distance | Cosine distance from nearest existing position > **adaptive threshold** (0.20 when landscape < 20 positions, 0.15 when 20-40, 0.12 when 40+). Stricter when landscape is small to prevent early duplicates; relaxes as the space fills. | Reject (too similar to existing) |
 | Specificity | Position references concrete policy mechanism, not vague sentiment | Reject with reason logged |
 | Bill relevance | Position relates to provisions in the bill text | Reject with reason logged |
 
 ### 4.6 Integration
 
 - [ ] Add approved position to landscape with `source: "emergent"` and `created_at` timestamp
+- [ ] **Position lineage tracking:** every emergent position records its origin metadata:
+  ```json
+  {
+    "source": "emergent",
+    "origin_cluster_size": 4,
+    "origin_claim_count": 7,
+    "origin_user_count": 5,
+    "origin_time_span_hours": 72,
+    "first_seen": "2026-05-01T...",
+    "adoption_rate": 0.0,
+    "growth_rate": 0.0
+  }
+  ```
 - [ ] Generate corresponding Polis seed statement and submit via Polis API
 - [ ] Backfill existing opinion vectors: set new dimension to `null` (unasked) for all prior users
 - [ ] Admin notification on every new emergent position (email + dashboard alert)
@@ -152,6 +172,21 @@ Drift risk is proportional to how loosely "bill relevance" is defined. The v1 po
 
 - [ ] Polis statements = policy positions from the bill's landscape
 - [ ] Users can vote directly in the Polis embed (standard Polis experience)
+
+### Population Mixing Awareness
+
+Chat users and Polis direct voters are **different populations** with different behavioral patterns:
+
+| Population | Behavior | Vector Density | Risk |
+|---|---|---|---|
+| Chat users | Exploratory, conversational | Sparse (3-10 positions) | Underrepresented in clustering |
+| Polis voters | Decisive, structured | Dense (most/all positions) | May dominate cluster structure |
+
+This mixing is by design — it's what makes the system more comprehensive than either modality alone. But it means clusters are shaped more by dense Polis voters than sparse chat users. The methodology must acknowledge this:
+
+- [ ] Track and report the source mix in every clustering run (% chat-origin vs. % Polis-origin participants)
+- [ ] If Polis voters are >80% of cluster participants, note this in public reporting: "Clusters primarily reflect structured voting; chat-derived opinions are supplementary"
+- [ ] Monitor whether adding the Polis embed changes cluster structure materially vs. chat-only (run both and compare for the first 3 bills)
 - [ ] If a user has also chatted and confirmed opinions, pre-vote those positions via Polis XID mapping
 - [ ] Embed alongside VoteBot chat widget on each bill page
 - [ ] Polis conversation ID stored in bill metadata (`polis_conversation_id`)
@@ -223,9 +258,26 @@ Every bill conversation can draw on live cluster data to enrich the dialog. Thre
 
 > **Bot:** Most people who support limiting agricultural consolidation also support the small-farm grant program in Section 7 -- what about you?
 
+### 8.4 Counterfactual Elicitation (anti-reinforcement)
+
+**Critical safeguard against self-reinforcing clusters.** If VoteBot only says "people who support X also support Y," it guides users toward cluster-consistent answers, making clusters more defined than reality.
+
+**Counterfactual prompts** deliberately probe across cluster boundaries:
+
+> **Bot:** Interestingly, some people who support the funding formula actually oppose the enforcement timeline — they think the formula is right but implementation is too rushed. What's your view on the timeline?
+
+- [ ] For every 2-3 correlation-based prompts (8.3), include at least 1 counterfactual prompt
+- [ ] Counterfactual targets: positions where intra-cluster agreement is lowest (most internal disagreement)
+- [ ] Frame as genuine diversity, not as a challenge: "Interestingly..." / "Some people who agree with you on X actually differ on Y..."
+
+This prevents clusters from becoming self-fulfilling prophecies.
+
+### Implementation Tasks
+
 - [ ] Implement cluster summary endpoint (returns top N groups with % and representative quotes)
 - [ ] Implement alignment lookup (given a partial opinion vector, return nearest cluster)
 - [ ] Implement correlation-based suggestion (given confirmed stances, return positions with highest intra-cluster correlation that user hasn't addressed)
+- [ ] Implement counterfactual suggestion (return positions with lowest intra-cluster agreement for the user's current cluster)
 - [ ] Rate-limit cluster references: max 2 per session to avoid making users feel categorized
 
 ---
@@ -264,7 +316,9 @@ All opinion-related events across analytics and the opinion system write to a si
 
 ---
 
-## 10. Phase 8: Future -- Legislative Drafting Pipeline
+## 10. Phase 8: Future — Legislative Drafting Pipeline
+
+> **Strictly internal for now.** Even though this section is labeled "conceptual," users and stakeholders will hear "this system can generate policy" if it's discussed externally. Keep this roadmap internal until the opinion system is validated at scale and drafting tools are evaluated. Premature expectations create credibility pressure that can compromise the opinion system's integrity.
 
 **This phase is conceptual only.** No implementation is specified or scheduled.
 
@@ -335,6 +389,7 @@ Community review (verified voters review and iterate)
 - [ ] Cluster summary endpoint
 - [ ] Alignment feedback after opinion expression
 - [ ] Correlation-based guided elicitation suggestions
+- [ ] **Counterfactual elicitation prompts** (1 per 2-3 correlation prompts)
 - [ ] Rate limiting on cluster references (max 2/session)
 
 ### Unified Event Model
@@ -342,10 +397,22 @@ Community review (verified voters review and iterate)
 - [ ] Event emitters for all five event types
 - [ ] Log ingestion pipeline for analytics
 
+### Emergence Monitoring Dashboard (non-optional)
+
+This is the primary safeguard against feedback loops and runaway drift. Must be built alongside the emergent pipeline, not after.
+
+- [ ] **Position lineage view**: for every emergent position, show origin claim count, origin user count, time span, adoption rate, growth rate
+- [ ] **Emergent vs original balance**: % of user selections from emergent positions vs. bill-text-anchored positions. Alert if emergent selections exceed 40% — system may be drifting from bill-anchored reality.
+- [ ] **Coverage decay monitor**: average user coverage (positions filled / total positions) over time. If coverage is declining, the landscape is growing faster than users can keep up — slow down emergence.
+- [ ] **Adoption rate per position**: how quickly each emergent position accumulates stances after creation. Fast adoption = real demand. Slow adoption = possibly noise.
+- [ ] **Coordinated noise detection**: flag emergent positions where origin claims cluster in a narrow time window from few IPs/visitors
+- [ ] **Position count per bill over time**: chart showing landscape growth. If a bill reaches 60+ positions, flag for consolidation review.
+
 ### Production Operations
 - [ ] Production monitoring for emergent pipeline (latency, rejection rate, quality scores)
 - [ ] A/B testing framework for cluster-aware responses vs. standard
 - [ ] Iteration plan: review emergent positions weekly, adjust thresholds based on data
+- [ ] **Weekly admin review** of emergence dashboard: new positions, adoption rates, coverage trends, balance metrics
 
 ---
 
