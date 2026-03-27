@@ -8,6 +8,19 @@ The chatbot is the primary modality. Polis provides a complementary direct-votin
 
 **What makes this different from a survey:** The conversation is natural. Users don't see a form — they chat. VoteBot surfaces relevant policy positions contextually, when the conversation naturally turns to a topic. Users can push back, add nuance, or raise concerns the system hasn't seen before. The elicitation feels like a conversation with a knowledgeable person, not a questionnaire.
 
+### Long-Term Goal: From Opinion to Legislation
+
+The full vision extends beyond opinion mapping. The end goal is a pipeline where verified voter conversations produce not just "here's what people think" but actionable legislative output:
+
+```
+Voter conversations → Opinion vectors → Clustering & consensus
+    → Policy directives → Draft amendments / new legislation
+```
+
+**This plan covers the first three stages** — opinion elicitation, clustering, and reporting results on the DDP website. The legislative drafting stage is not yet specified and will depend on emerging tools for AI-assisted legislative drafting. However, every design decision in this plan is made with the drafting stage in mind: opinion stances trace back to specific bill sections, novel claims capture what voters want that the bill doesn't address, and the data model is tool-agnostic so a future drafting service can consume it.
+
+See "Phase 7: Future — Legislative Drafting Pipeline" at the end of this document for the conceptual outline of how the drafting stage would connect.
+
 ---
 
 ## Core Model: Multi-Position Opinion Vectors
@@ -97,21 +110,36 @@ The sparsity difference is acceptable — PCA and UMAP handle missing values, an
               |                    |
               v                    v
     +---------+--------------------+---------+
-    |     Multi-Position Opinion Vectors     |
-    |     (participants x positions)         |
+    |     Multi-Position Opinion Vectors     |  ← PostgreSQL (durable)
+    |     (participants x positions)         |  ← Redis (hot cache)
     +-------------------+--------------------+
                         |
                         v
-                  PCA / UMAP / K-means
-                        |
+                  PCA / UMAP / K-means         ← Polis Clojure math
+                        |                      ← Delphi enhancement
                         v
                   Opinion Clusters
                   + Narratives
                         |
-              +---------+---------+
-              v                   v
-        VoteBot responses    Polis visualization
-        ("others think...")  (PCA opinion map)
+              +---------+---------+-----------------+
+              v                   v                 v
+        VoteBot responses    Polis visualization    DDP Website
+        ("others think...")  (PCA opinion map)      (opinion reports)
+                                                    |
+                                            - - - - v - - - - - -
+                                            :                   :
+                                            : [FUTURE]          :
+                                            : Legislative       :
+                                            : Drafting Service  :
+                                            :                   :
+                                            : Consensus +       :
+                                            : bill sections     :
+                                            :       ↓           :
+                                            : Policy directives :
+                                            :       ↓           :
+                                            : Draft amendments  :
+                                            :                   :
+                                            - - - - - - - - - - -
 ```
 
 ---
@@ -212,12 +240,12 @@ Org-sourced positions get `source: "org_position"` and inherit credibility from 
 ### Storage
 
 ```
-Redis:
+Redis (hot cache):
   votebot:landscape:{bill_webflow_id} -> JSON OpinionLandscape
   votebot:landscape:version:{bill_webflow_id} -> int (for cache invalidation)
 
-DynamoDB (durable):
-  Delphi_OpinionLandscape -> Full landscape with history
+PostgreSQL (durable):
+  opinion_landscapes table -> Full landscape with version history
 ```
 
 ### When to Generate
@@ -561,7 +589,7 @@ Steps:
      - Identify defining positions (highest variance between clusters)
      - Generate narrative label via LLM
      - Select representative quotes from chat users in cluster
-  8. Store results in DynamoDB
+  8. Store results (Delphi writes to its DynamoDB tables)
   9. Cache summary in Redis for VoteBot
 ```
 
@@ -1430,13 +1458,92 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 
 ---
 
+## Phase 8: Future — Legislative Drafting Pipeline (Not Yet Specified)
+
+> **Status:** Conceptual roadmap only. This phase depends on the opinion pipeline (Phases 1-7) being operational and on identifying appropriate tools for AI-assisted legislative drafting. It is documented here to ensure upstream design decisions support this eventual goal.
+
+### The Gap
+
+Phases 1-7 produce: "Here's what verified voters think about this bill, organized by topic, with consensus and fault lines identified."
+
+The missing step: "Here's draft legislative text that reflects what they want."
+
+### Conceptual Pipeline
+
+```
+Input: Clustering results + Opinion landscape + Bill text
+    |
+    v
+Step 1: Consensus → Policy Directives
+    For each consensus position or strong majority stance:
+    - Map to specific bill section(s) via PolicyPosition.bill_sections
+    - Generate a concrete policy directive:
+      "Amend Section 3(b)(2) to index the per-pupil funding formula to CPI-U"
+    - Include evidence: voter count, agreement %, representative quotes
+    |
+    v
+Step 2: Policy Directives → Legislative Text
+    - Reference the existing bill text (already in RAG as bill-text documents)
+    - Reference the relevant statutory code being amended
+    - Generate draft amendment language following legislative conventions:
+      amending clauses, cross-references, insertion/deletion formatting
+    - Or generate a new bill section for novel claims not addressed by the original
+    |
+    v
+Step 3: Community Review
+    - Draft provisions become new Polis statements: "Do you support this amendment?"
+    - Or VoteBot presents the draft: "Based on input from 312 voters, here's a
+      proposed change to the funding formula. Does this capture what you meant?"
+    - Feedback loop: revise draft based on community response
+    |
+    v
+Output: Voter-informed draft amendment with provenance
+    - Which voters contributed (anonymized, by district)
+    - What consensus positions it reflects
+    - Margin of support
+    - Methodology link
+```
+
+### Why the Current Data Model Supports This
+
+Design decisions made in Phases 1-7 that enable the drafting pipeline:
+
+| Decision | How It Helps Drafting |
+|---|---|
+| `PolicyPosition.bill_sections` links stances to specific bill sections | Drafting tool knows exactly which sections to amend |
+| `novel_claims` in OpinionSignal captures unaddressed voter concerns | Source material for new provisions, not just amendments |
+| Opinion vectors in PostgreSQL with relational queries | "All confirmed stances on Section 3 from District 7 voters" is a SQL query |
+| `verified_voters` table with district attribution | Draft can cite "63% of verified voters in CD-7 support this change" |
+| Landscape version history preserved | Drafting tool can reference the exact position definitions voters responded to |
+| Bill text already in RAG system (`bill-text` documents in Pinecone) | Drafting tool can retrieve the exact language being amended |
+| Consent + provenance audit trail | Every opinion traces back to a signal, a conversation, and a verified voter |
+
+### What's Needed (Not Yet Built)
+
+1. **Legislative drafting LLM service** — Takes policy directives + bill text + statutory code → draft amendment language. This is a specialized capability; general LLMs can approximate it but may not produce legally valid text. Exploring tools in this space.
+
+2. **Statutory code retrieval** — The RAG system has bill text but not the underlying statute being amended. For example, if HB 123 amends Florida Statute §1002.33, the drafting tool needs access to the current text of §1002.33. This may require a new data source (state legislative code databases).
+
+3. **Amendment formatting conventions** — Each state and Congress have specific formatting rules for amendments (e.g., "On page 3, line 12, strike 'shall' and insert 'may'"). These conventions would need to be encoded in the drafting prompts or handled by a specialized tool.
+
+4. **Legal review workflow** — AI-drafted legislative text needs human review before it can be presented as a serious proposal. The system should produce drafts for review, not final text.
+
+### Questions for Future Exploration
+
+32. What existing tools or services handle AI-assisted legislative drafting? (e.g., state legislative drafting offices, legal AI startups, academic projects)
+33. Should the drafting output be a full amendment or a structured "policy brief" that a human drafter converts to legislative language?
+34. How do you handle conflicts between majority opinion and legal/constitutional constraints? (Voters may want something that isn't legally permissible.)
+35. What's the minimum participant count for a draft to carry democratic legitimacy? (Higher bar than opinion reporting.)
+
+---
+
 ## Implementation Roadmap
 
 ### Milestone 1: Opinion Landscape Generation (Weeks 1-3)
 - [ ] BillTopic and PolicyPosition extraction from bill text
 - [ ] Position enrichment from org positions (Webflow CMS)
 - [ ] Deduplication via embedding similarity
-- [ ] Storage in Redis + DynamoDB
+- [ ] Storage in Redis (cache) + PostgreSQL (durable)
 - [ ] Integration with bill sync scheduler
 - [ ] **Validation**: Generate landscapes for 10 real bills, human-evaluate quality
 
@@ -1460,7 +1567,7 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 - [ ] Unified matrix construction (Polis + chat)
 - [ ] PCA + k-means implementation (or Delphi job type)
 - [ ] Cluster labeling via LLM
-- [ ] Results storage in DynamoDB + Redis cache
+- [ ] Results read from Delphi DynamoDB + cached in Redis
 - [ ] Scheduled recomputation
 - [ ] Minimum participant threshold logic
 
@@ -1504,10 +1611,13 @@ This section defines the complete storage layout for all opinion-related data. E
 | System | Role | Durability |
 |---|---|---|
 | **Redis** | Hot storage — active sessions, opinion vectors under construction, caches | Volatile (TTL-based). Data survives restarts if persistence is enabled, but not the system of record. |
-| **DynamoDB** | Durable storage — finalized opinion vectors, landscapes, clustering results, audit trail | Permanent. Source of truth for anything that survives beyond 90 days. |
-| **Polis PostgreSQL** | Vote storage — discretized votes submitted to Polis for math pipeline | Permanent. Polis math service reads from here. VoteBot writes, never modifies. |
+| **PostgreSQL (RDS)** | Durable storage — finalized opinion vectors, landscapes, signals, verified voters, audit trail | Permanent. Source of truth for anything that survives beyond 90 days. Existing RDS instance shared with other DDP services. |
+| **Polis PostgreSQL** | Vote storage — discretized votes submitted to Polis for math pipeline | Permanent. Polis math service reads from here. VoteBot writes, never modifies. Separate instance from DDP RDS. |
+| **DynamoDB** | Delphi output — clustering results, narrative reports, topic labels | Permanent. Owned by Delphi (external tool). VoteBot reads as a consumer, does not write. |
 | **Memberstack** | Member metadata — DWID, districts, verified status | Permanent. Synced from VoteBot on verification. |
 | **JSONL logs** | Raw event trail — query_processed events contain extraction evidence | 90 days raw, then redacted (per analytics governance). Not queried at runtime. |
+
+**Why PostgreSQL over DynamoDB for VoteBot's opinion data:** The opinion system will eventually need relational queries — joining opinion vectors with bill text, querying by district, aggregating across bills. PostgreSQL handles this natively. DDP already runs an RDS instance for other services. DynamoDB remains for Delphi's output (we're consumers, not owners of that infrastructure). A future legislative drafting service will also benefit from having opinion data, bill text references, and statutory code in the same relational database.
 
 ### Record 1: Opinion Landscape (per bill)
 
@@ -1524,15 +1634,24 @@ Value:  Integer version counter
 TTL:    None
 ```
 
-**DynamoDB (durable):**
-```
-Table:  Delphi_OpinionLandscape
-PK:     bill_webflow_id
-SK:     version (integer)
-Item:   Full OpinionLandscape JSON + created_at + updated_at
+**PostgreSQL (durable):**
+```sql
+CREATE TABLE opinion_landscapes (
+    id SERIAL PRIMARY KEY,
+    bill_webflow_id TEXT NOT NULL,
+    version INT NOT NULL,
+    bill_title TEXT,
+    jurisdiction TEXT,
+    landscape JSONB NOT NULL,          -- Full OpinionLandscape (topics, positions, metadata)
+    total_positions INT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (bill_webflow_id, version)
+);
+
+CREATE INDEX idx_landscapes_bill ON opinion_landscapes (bill_webflow_id);
 ```
 
-**Lifecycle:** Created on bill sync (Phase 1). Re-generated when `BillVersionSyncService` detects new bill text. Old versions retained in DynamoDB for audit. Redis always holds the latest version.
+**Lifecycle:** Created on bill sync (Phase 1). Re-generated when `BillVersionSyncService` detects new bill text. Old versions retained in PostgreSQL for audit. Redis always holds the latest version.
 
 ### Record 2: Opinion Signal (per extraction event)
 
@@ -1545,37 +1664,30 @@ Value:  JSON array of OpinionSignal objects
 TTL:    90 days (refreshed on each append)
 ```
 
-**DynamoDB (durable archive):**
-```
-Table:  DDP_OpinionSignals
-PK:     visitor_id
-SK:     signal_id (UUID, sortable by timestamp)
-Item:   {
-          signal_id: str,
-          visitor_id: str,
-          member_id: str | null,        # Populated on account linking
-          session_id: str,
-          conversation_id: str,
-          bill_webflow_id: str,
-          jurisdiction: str,
-          elicitation_mode: "passive" | "contextual" | "explicit" | "add_your_voice",
-          position_stances: [
-            {
-              position_id: str,         # e.g., "hb123_funding_state_formula"
-              stance: float,            # -1.0 to +1.0
-              confidence: float,        # 0.0 to 1.0
-              source: "explicit_selection" | "inferred" | "contextual"
-            }
-          ],
-          novel_claims: [str],
-          user_message: str,            # The exact message that produced this signal
-          bot_response: str,            # VoteBot's response for context
-          timestamp: str                # ISO 8601
-        }
-TTL:    None (permanent)
+**PostgreSQL (durable archive):**
+```sql
+CREATE TABLE opinion_signals (
+    signal_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    visitor_id TEXT,
+    member_id TEXT,                          -- Backfilled on account linking
+    session_id TEXT NOT NULL,
+    conversation_id TEXT,
+    bill_webflow_id TEXT NOT NULL,
+    jurisdiction TEXT,
+    elicitation_mode TEXT NOT NULL,          -- 'passive', 'contextual', 'explicit', 'add_your_voice'
+    position_stances JSONB NOT NULL,         -- [{position_id, stance, confidence, source}]
+    novel_claims JSONB,                      -- [str]
+    user_message TEXT,                       -- The exact message that produced this signal
+    bot_response TEXT,                       -- VoteBot's response for context
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_signals_visitor_bill ON opinion_signals (visitor_id, bill_webflow_id);
+CREATE INDEX idx_signals_member ON opinion_signals (member_id) WHERE member_id IS NOT NULL;
+CREATE INDEX idx_signals_bill ON opinion_signals (bill_webflow_id);
 ```
 
-**Lifecycle:** Created on every message that produces an extractable opinion (Phase 2). Immutable once written. The `member_id` field is backfilled when visitor → member linking occurs. Used by the consent flow to show "here's what I gathered." Used for extraction accuracy analysis.
+**Lifecycle:** Created on every message that produces an extractable opinion (Phase 2). Immutable once written. The `member_id` column is backfilled when visitor → member linking occurs (`UPDATE opinion_signals SET member_id = ? WHERE visitor_id = ?`). Used by the consent flow to show "here's what I gathered." Used for extraction accuracy analysis. A future legislative drafting service can query signals by bill to find voter evidence for specific positions.
 
 ### Record 3: Opinion Vector (per visitor per bill)
 
@@ -1618,24 +1730,41 @@ TTL:    90 days for visitor_id-keyed (refreshed on any update)
         None for member_id-keyed (promoted on account creation)
 ```
 
-**DynamoDB (durable, for members):**
-```
-Table:  DDP_OpinionVectors
-PK:     member_id                       # Only members get durable storage
-SK:     bill_webflow_id
-Item:   Same JSON as Redis
-TTL:    None (permanent for authenticated members)
+**PostgreSQL (durable, for members):**
+```sql
+CREATE TABLE opinion_vectors (
+    id SERIAL PRIMARY KEY,
+    visitor_id TEXT,
+    member_id TEXT,                          -- Set on account creation
+    bill_webflow_id TEXT NOT NULL,
+    landscape_version INT,
+    stances JSONB NOT NULL DEFAULT '{}',     -- {position_id: {stance, confidence, source, ...}}
+    positions_covered INT DEFAULT 0,
+    consent_status TEXT DEFAULT 'none',       -- 'none', 'pending', 'confirmed', 'declined'
+    consent_timestamp TIMESTAMPTZ,
+    polis_submitted BOOLEAN DEFAULT FALSE,
+    polis_last_submitted TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (visitor_id, bill_webflow_id),
+    UNIQUE (member_id, bill_webflow_id)
+);
 
-GSI:    bill_webflow_id-index           # Query all opinions for a bill
-        PK: bill_webflow_id
-        SK: member_id
+CREATE INDEX idx_vectors_bill ON opinion_vectors (bill_webflow_id);
+CREATE INDEX idx_vectors_member ON opinion_vectors (member_id) WHERE member_id IS NOT NULL;
+CREATE INDEX idx_vectors_consent ON opinion_vectors (consent_status) WHERE consent_status = 'confirmed';
 ```
+
+The relational structure enables queries a future drafting service needs:
+- "All confirmed opinions on bill X" → `WHERE bill_webflow_id = ? AND consent_status = 'confirmed'`
+- "All opinions from verified voters in District 7" → JOIN with `verified_voters` table
+- "Consensus stances on bill X Section 3" → query stances JSONB for positions linked to Section 3
 
 **Lifecycle:**
 - **Created** when the first Opinion Signal for this visitor+bill is processed
 - **Updated** when subsequent signals arrive. Conflict resolution: most recent stance wins; `explicit_selection` beats `inferred` at any timestamp
-- **Promoted** from Redis (visitor_id key, 90-day TTL) to DynamoDB (member_id key, permanent) when user creates Memberstack account
-- **Re-keyed** on member linking: Redis key changes from `votebot:opinions:{visitor_id}:*` to `votebot:opinions:{member_id}:*`; DynamoDB record created with member_id PK
+- **Promoted** from Redis (visitor_id key, 90-day TTL) to PostgreSQL (member_id key, permanent) when user creates Memberstack account
+- **Re-keyed** on member linking: Redis key changes from `votebot:opinions:{visitor_id}:*` to `votebot:opinions:{member_id}:*`; PostgreSQL record created/updated with member_id
 - **Polis submission** occurs when `consent_status` flips to `confirmed`: stances discretized (+1/-1/0 at ±0.3 threshold), submitted as votes via Polis API
 
 ### Record 4: Polis Conversation Mapping (per bill)
@@ -1729,7 +1858,7 @@ Value:  JSON ClusteringResult object (simplified for VoteBot consumption):
 TTL:    1 hour (refreshed from Polis/Delphi on access if stale)
 ```
 
-**Lifecycle:** Recomputed daily (05:00 UTC), threshold-triggered (20+ new confirmed opinions), or on-demand. VoteBot reads from Redis cache; cache miss triggers a fetch from Polis `math_main` + Delphi DynamoDB tables, merged into the simplified format above.
+**Lifecycle:** Recomputed daily (05:00 UTC), threshold-triggered (20+ new confirmed opinions), or on-demand. VoteBot reads from Redis cache; cache miss triggers a fetch from Polis `math_main` + Delphi DynamoDB tables, merged into the simplified format above. VoteBot is a **consumer** of Delphi's DynamoDB output — it reads but never writes to Delphi tables.
 
 ### Record 7: Member Verification (per member)
 
@@ -1765,18 +1894,29 @@ Custom fields on member profile:
   state_house_district: str
 ```
 
-**DynamoDB (for DWID-based dedup queries):**
-```
-Table:  DDP_VerifiedVoters
-PK:     catalist_dwid
-SK:     member_id
-Item:   { dwid, member_id, jurisdiction, districts, verified_at }
+**PostgreSQL (for DWID-based dedup queries):**
+```sql
+CREATE TABLE verified_voters (
+    id SERIAL PRIMARY KEY,
+    catalist_dwid TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    jurisdiction TEXT,
+    congressional_district TEXT,
+    state_senate_district TEXT,
+    state_house_district TEXT,
+    registration_status TEXT,
+    verified_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (catalist_dwid),                  -- One DWID = one verified voter
+    UNIQUE (member_id)                       -- One member = one verification
+);
 
-Purpose: If two member_ids resolve to the same DWID, only the most
-recent opinion vector counts. Query by DWID to detect duplicates.
+CREATE INDEX idx_verified_jurisdiction ON verified_voters (jurisdiction);
+CREATE INDEX idx_verified_district ON verified_voters (congressional_district);
 ```
 
-**Lifecycle:** Created on Catalist verification (Step B of conversational onboarding). DWID and districts written to Redis, Memberstack, and DynamoDB simultaneously. Updated if user re-verifies (e.g., after moving).
+Purpose: If two `member_id`s resolve to the same DWID, the unique constraint catches it. Query by district for aggregated opinion reports. A future legislative drafting service can join `verified_voters` with `opinion_vectors` to answer "what do verified voters in District 7 want changed about Section 3?"
+
+**Lifecycle:** Created on Catalist verification (Step B of conversational onboarding). DWID and districts written to Redis, Memberstack, and PostgreSQL simultaneously. Updated if user re-verifies (e.g., after moving).
 
 ### Record 8: Visitor-Member Links
 
@@ -1804,7 +1944,7 @@ Message arrives
 [Analytics event logging]                    → JSONL (90 days, then redacted)
     |
     v
-[Opinion extraction]                         → OpinionSignal → Redis (90d) + DynamoDB (permanent)
+[Opinion extraction]                         → OpinionSignal → Redis (90d) + PostgreSQL (permanent)
     |
     v
 [Opinion vector update]                      → OpinionVector → Redis (90d for visitors)
@@ -1815,11 +1955,11 @@ Message arrives
     ├─ No account → stances stored against visitor_id (Redis, 90d TTL)
     |
     ├─ Account created (Step A) → vector promoted to member_id key
-    |   → Redis (permanent) + DynamoDB (permanent)
+    |   → Redis (permanent) + PostgreSQL (permanent)
     |   → Polis votes submitted
     |
     └─ Voter verified (Step B) → DWID + districts added
-        → Redis + Memberstack + DynamoDB
+        → Redis + Memberstack + PostgreSQL
         → Opinions carry 1.0x weight
 ```
 
@@ -2122,7 +2262,7 @@ Message arrives
 
 3. **Audit trail.** Every opinion map version is immutable and timestamped:
    - `ClusteringResult.version` already exists in the schema
-   - Store historical snapshots (DynamoDB TTL: 1 year)
+   - Store historical snapshots in PostgreSQL (retained for 1 year)
    - If a legislator disputes a claim, you can show exactly what data produced it
    - Log every recomputation trigger (daily schedule, threshold-triggered, admin-initiated)
 
