@@ -34,13 +34,14 @@ Stage B introduces a graduated set of elicitation modes. Each mode is progressiv
 - [ ] Every bot response is analyzed for extractable user stances
 - [ ] No user-visible behavior; extraction happens silently
 
-### Mode 1.5: Lightweight Inline Correction
+### Mode 1.5: Lightweight Confirmation (surgical)
 
-Appended after moderate-confidence passive extractions. First 1-2 per session only; never blocks conversation flow. Confirmation boosts confidence score.
+Fixes high-confidence extraction errors early. First 1-2 per session only; never blocks conversation flow.
 
-- [ ] Trigger: passive extraction with confidence 0.4-0.7
-- [ ] Limit: max 2 inline corrections per session
+- [ ] Trigger: passive extraction with confidence >= 0.65 AND not already confirmed
+- [ ] Limit: max 2 per session, never back-to-back
 - [ ] Never interrupts a multi-turn thread the user is driving
+- [ ] User options: confirm (👍) or correct ("not exactly" → free text)
 - [ ] Confirmation raises confidence to 0.9; correction replaces the stance
 
 **Example dialog:**
@@ -82,6 +83,34 @@ Surface positions when the user shows interest in a topic. The bot presents the 
 >
 > _[Stance: "supports density with local design authority" -- confidence 0.85, source: contextual_prompt]_
 
+### Mode 2.5: Structured Clarification
+
+Resolves ambiguity or accelerates mapping when passive extraction can't confidently place the user. Presents options conversationally with a mandatory "something else" escape.
+
+- [ ] Trigger: passive extraction confidence < 0.6, OR mixed/conflicting signals, OR user is unclear/hesitant
+- [ ] Present 2-4 position options plus "something else" (free text) — **"something else" is mandatory, never omit it**
+- [ ] Frame as exploration, not selection: "People tend to land in a few places on this — does one feel close, or is your view different?"
+- [ ] Never present without conversational context (don't drop options cold)
+
+**Example dialog:**
+
+> **User:** I'm not sure about the enforcement part. It seems like a lot.
+>
+> _[Passive extraction: unclear — confidence 0.45, conflicting signals]_
+>
+> **Bot:** That's a common reaction. People tend to see enforcement a few ways — does one of these feel close, or is your view different?
+>
+> - **Support the new oversight board** — dedicated enforcement catches violations faster
+> - **Use existing agencies** — another board adds bureaucracy without results
+> - **Support enforcement but with sunset clause** — try it for 5 years, then evaluate
+> - **Something else** _(tell me in your own words)_
+>
+> **User:** The sunset clause idea is interesting. I'd go with that.
+>
+> _[Stance: "supports enforcement with sunset clause" — confidence 0.85, source: structured_clarification]_
+
+**Why this works:** Preserves user agency (always includes "something else"), improves mapping accuracy on ambiguous inputs, avoids forcing buckets. If the user picks "something else," their free-text response is treated as a novel claim candidate.
+
 ### Mode 3: Explicit Elicitation
 
 User-initiated. Triggered by phrases like "help me figure out where I stand" or "what are the key issues?" The bot walks the user through topics.
@@ -111,9 +140,9 @@ User-initiated. Triggered by phrases like "help me figure out where I stand" or 
 
 ### "Add Your Voice" Civic Participation Prompt
 
-After 3+ passive stances have been collected in a session, prompt the user to round out their profile to 7+ positions with a civic participation framing.
+After 2+ positions have been collected in a session (via any mode), prompt the user to round out their profile with a civic participation framing. Uses the same structured option format as Mode 2.5.
 
-- [ ] Trigger: 3+ passive stances in the current session
+- [ ] Trigger: 2+ extracted positions AND positive engagement signal AND not already shown
 - [ ] Prompt once per session, max
 - [ ] Frame as civic participation, not data collection
 - [ ] Target: 2+ additional topics to reach 7+ total positions
@@ -158,6 +187,66 @@ After 3+ passive stances have been collected in a session, prompt the user to ro
 
 ---
 
+## 3b. Orchestration Layer
+
+The orchestration layer is what makes the modes work together. It's the decision engine that determines which mode activates at each turn.
+
+### Core Principle
+
+> **Conversation drives → structure assists → never the reverse.**
+
+Structured questions (Modes 2.5 and 3) are tools for fixing ambiguity and increasing density. They never drive the experience.
+
+### Session State Tracking
+
+```json
+{
+  "positions_extracted": 3,
+  "positions_confirmed": 1,
+  "avg_confidence": 0.68,
+  "engagement_score": 0.72,
+  "confirmations_used": 1,
+  "structured_prompts_used": 0,
+  "add_your_voice_shown": false
+}
+```
+
+### Decision Engine (priority order, evaluated every turn)
+
+1. **Always run Mode 1** (passive extraction) — on every user message
+2. **If extraction is high-confidence (>= 0.65) and < 2 confirmations used** → consider Mode 1.5
+3. **If ambiguity or low confidence (< 0.6)** → consider Mode 2.5 (structured clarification)
+4. **If natural expansion possible (user discussing a topic)** → consider Mode 2 (contextual)
+5. **If 2+ positions and positive engagement** → consider Mode 3 / "Add your voice"
+
+### Hard Guardrails
+
+These are non-negotiable. Violating any of these turns the system into a survey.
+
+**Never do:**
+- [ ] 2 structured prompts in a row (Modes 2.5 or 3)
+- [ ] More than 3 total structured prompts per session
+- [ ] Structured prompt without conversational context (don't drop options cold)
+- [ ] Structured prompt at conversation start (wait for natural engagement)
+- [ ] Present options without "something else" / free-text escape
+
+**Always:**
+- [ ] Allow skip on any prompt
+- [ ] Allow free-text override on any structured question
+- [ ] Prioritize answering the user's actual question over elicitation
+- [ ] Stop immediately on signs of friction (short replies, topic changes, "I don't know")
+
+### What to Measure (Orchestration Health)
+
+| Metric | What It Tells You | Alarm Threshold |
+|---|---|---|
+| Structured prompt acceptance rate | Are users engaging with options? | < 20% = prompts are unwelcome |
+| Free-text override rate ("something else") | Are your positions missing nuance? | > 40% = landscape needs improvement |
+| Drop-off after structured prompt | Are you overusing them? | > 15% increase vs. baseline = too aggressive |
+| Completion rate (≥3 positions) | North star metric | < 10% = system isn't working |
+
+---
+
 ## 4. Full LLM-Generated Landscapes
 
 Upgrade from Stage A's simplified landscapes to full LLM-generated versions.
@@ -194,7 +283,7 @@ Incremental opinion vectors keyed by `visitor_id` in Redis.
 | `position_id` | string | References the landscape position |
 | `stance` | float | -1.0 (strongly oppose) to +1.0 (strongly support) |
 | `confidence` | float | 0.0 to 1.0 |
-| `source` | enum | `passive`, `inline_correction`, `contextual_prompt`, `explicit_elicitation`, `add_your_voice` |
+| `source` | enum | `passive`, `inline_confirmation`, `contextual_prompt`, `structured_clarification`, `explicit_elicitation`, `add_your_voice` |
 | `evidence_text` | string | User's exact words that produced this stance |
 | `signal_id` | string | References the conversation signal |
 | `last_updated` | timestamp | ISO 8601 |
@@ -329,9 +418,13 @@ All gates must pass before proceeding to Stage C.
 
 | Metric | Target |
 |--------|--------|
-| Inline correction acceptance (Mode 1.5) | > 50% of corrections accepted or confirmed |
+| Inline confirmation acceptance (Mode 1.5) | > 50% of confirmations accepted or corrected (not ignored) |
 | Contextual prompt acceptance (Mode 2) | > 30% of prompted users provide a stance |
+| Structured clarification acceptance (Mode 2.5) | > 40% of prompted users select an option or provide free text |
+| Free-text override rate ("something else") | < 40% (higher means landscape is missing positions) |
 | "Add your voice" completion | > 20% of prompted users reach 7+ positions |
+| Drop-off after structured prompt | < 15% increase vs. baseline session drop-off |
+| Completion rate (≥3 positions per conversation) | > 10% of bill-page conversations (north star) |
 
 ---
 
