@@ -683,10 +683,12 @@ def vector_confidence(vector: OpinionVector) -> float:
     return (0.4 * coverage) + (0.3 * avg_confidence) + (0.3 * explicit_frac)
 ```
 
-**Usage:**
+**Usage (as a routing heuristic, not a canonical truth metric):**
 - `vector_confidence < 0.2` → excluded from clustering entirely (too sparse/uncertain)
 - `vector_confidence 0.2-0.5` → included in per-position aggregates, not in PCA
 - `vector_confidence > 0.5` → full participant in PCA/clustering
+
+**Important:** The composite score is a routing decision — it determines inclusion level. But the three underlying components (`coverage`, `avg_confidence`, `explicit_frac`) must be stored separately on the opinion vector and visible in logs and admin reports. A user with high coverage but low confidence (many passive extractions, never confirmed) is a very different case from a user with low coverage but high confidence (few stances, all explicitly selected). The composite score hides this distinction. When debugging bad clusters or unexpected results, inspect the components, not just the composite.
 
 This simplifies the weighting problem: instead of 5 weight levels interacting with confidence scores and coverage, there's one composite score per user that determines their inclusion level.
 
@@ -791,6 +793,8 @@ if page_context.type == "bill" and settings.elicitation_enabled:
 
 ## Phase 5: Emergent Position Discovery
 
+> **v1 posture: conservative.** For the initial release, bias toward fewer emergent additions and stricter approval thresholds. A growing position space improves coverage but reduces interpretability over time — if position sets keep expanding bill-by-bill, cross-run comparisons become technically valid but harder for humans to reason about. Expand the approval threshold and automation only after observing real-world emergent claim patterns.
+
 ### What This Phase Does
 
 Captures opinions from chat that don't match any existing policy position, clusters them, and generates new positions to expand the opinion landscape.
@@ -856,21 +860,22 @@ The opinion consent flow is the natural trigger for Memberstack account creation
 
 ```
 Stage 1: Conversational consent          Stage 2: Account creation           Stage 3: Voter verification
-(in-chat, lightweight)                   (Memberstack signup)                (voter file match)
+(in-chat, lightweight)                   (in-chat, server-side)              (in-chat, server-side)
 +-----------------------------------+    +------------------------------+    +------------------------------+
-| VoteBot summarizes extracted      |    | "Create a free account to    |    | "To verify you as a voter,   |
-| opinions, user confirms/edits     |    |  save your views and see     |    |  we'll match your info        |
-|                                   | -> |  how you compare to others"  | -> |  against your state's voter   |
-| No account needed at this stage   |    |                              |    |  registration records"        |
-| Opinions stored against           |    | Memberstack modal (Webflow-  |    |                              |
-| visitor_id temporarily            |    | native, handles email/pass)  |    | Name + DOB + address match   |
-+-----------------------------------+    +------------------------------+    +------------------------------+
-        |                                         |                                   |
-        v                                         v                                   v
-  visitor_id + opinions              member_id linked to visitor_id        verified_voter = true
-  (Redis, 90-day TTL)               (permanent, cross-device)             jurisdiction + district confirmed
-                                    opinions promoted to durable           Polis XID = "votebot_{member_id}"
-                                    storage                                full weight in clustering
+| VoteBot summarizes extracted      |    | VoteBot asks for name +      |    | VoteBot asks for DOB + zip   |
+| opinions, user confirms/edits     |    | email in chat. Server creates |    | Server calls Catalist API    |
+|                                   | -> | Memberstack account via      | -> | to verify against national   |
+| No account needed at this stage   |    | Admin API. No modal, no      |    | voter file.                  |
+| Opinions stored against           |    | redirect, no password yet.   |    |                              |
+| visitor_id temporarily            |    | Password setup via email.    |    | Parsed data confirmed before |
++-----------------------------------+    +------------------------------+    | API call.                    |
+        |                                         |                          +------------------------------+
+        v                                         v                                   |
+  visitor_id + opinions              member_id linked to visitor_id                    v
+  (Redis, 90-day TTL)               (permanent, cross-device)             verified_voter = true
+                                    opinions promoted to durable           jurisdiction + district confirmed
+                                    storage (PostgreSQL)                   Polis XID = "votebot_{member_id}"
+                                                                           full weight in clustering
 ```
 
 ### Stage 1: Conversational Consent (In-Chat)
@@ -1524,7 +1529,7 @@ Progression: **passive → active (anonymous) → active (member) → verified v
 
 18. **When exactly should the consent prompt appear?** Recommendation: after 3+ opinion signals detected and a natural conversation pause. Too early is annoying. Too late and the user has left.
 
-19. **Should the consent prompt be in-chat or a separate UI?** Recommendation: consent summary in-chat (conversational), then hand off to Memberstack modal for account creation. The two-step approach feels natural.
+19. ~~**Should the consent prompt be in-chat or a separate UI?**~~ **Resolved:** Entirely in-chat. Consent summary in chat, then name/email collected in chat, account created server-side via Memberstack Admin API. No modal, no redirect. DOB/zip for verification also collected in chat. Parsed data confirmed before any API call.
 
 20. **Can a user revise after submitting?** Yes — `member_id` enables revision across devices and sessions. Returning members can update stances; Polis votes are resubmitted. Anonymous visitors can revise via `visitor_id` on the same browser.
 
@@ -2329,7 +2334,7 @@ The 5-level weighting system (Polis direct 1.0, confirmed 0.85, explicit 0.85, c
 17. How to handle emergent positions that split existing ones? (Versioning)
 
 ### Ethics & Privacy
-19. In-chat consent or separate UI? → **Resolved**: in-chat consent, then Memberstack modal for account creation
+19. ~~In-chat consent or separate UI?~~ → **Resolved**: entirely in-chat, server-side Memberstack Admin API, no modal
 20. ~~Can users revise after submitting?~~ → **Resolved**: yes, via `member_id` (cross-device) or `visitor_id` (same browser)
 21. Is the passive participation tier ethically acceptable? → Recommendation: aggregate stats only, no individual clustering
 24b. How long to retain raw voter verification data? → Only hashed voter file ID stored; raw data not retained
@@ -2498,6 +2503,8 @@ The 5-level weighting system (Polis direct 1.0, confirmed 0.85, explicit 0.85, c
 
 **The risk:** Catalist requires an agreement, workflow configuration, IP allowlisting, and credentials — all dependent on an external organization's timeline. If setup takes weeks, it blocks voter verification entirely.
 
+**Critical distinction:** Voter verification is NOT on the critical path for proving product-market fit of the elicitation system. The core question — "will users engage with opinion elicitation in chat?" — is answered by Stages A and B, which require no Catalist integration at all. Catalist IS on the critical path for **legitimacy and advanced reporting** (district-level claims, anti-gaming, "legislator accountability" narratives). Don't let Catalist delays block the elicitation validation work.
+
 **Mitigations:**
 
 1. **Start the procurement process immediately — in parallel with Milestone 1.** Contact Catalist now to begin:
@@ -2535,7 +2542,25 @@ The 5-level weighting system (Polis direct 1.0, confirmed 0.85, explicit 0.85, c
    - What clustering means (and doesn't mean)
    - Sample sizes and confidence levels
    - What "63% of verified voters" actually means (63% of the N people who participated, not 63% of all voters in the district)
+   - **Explicit participation level definitions** (see below)
    - Link to this from every opinion map and every VoteBot response that cites cluster data
+
+   **Participation levels — product language must distinguish these clearly:**
+
+   | Level | What It Means | How It's Counted | Shown As |
+   |---|---|---|---|
+   | **Discussions** | Someone chatted about this bill and expressed at least one opinion-like statement | Passive extraction detected a stance, regardless of quality | "312 people have discussed this bill" |
+   | **Confirmed opinions** | Someone reviewed their extracted stances and said "yes, that's right" | Consent flow completed | "187 people confirmed their views" |
+   | **Cluster participants** | Someone with 7+ confirmed stances included in PCA/clustering | Vector confidence > 0.5 AND positions_covered >= 7 | "124 people included in the opinion map" |
+   | **Verified voters** | Cluster participant with Catalist DWID match | Memberstack account + Catalist verification | "89 verified voters in this district" |
+
+   These are nested: every verified voter is a cluster participant, every cluster participant confirmed opinions, everyone who confirmed also discussed. But the counts are very different, and the system must never conflate them. "312 people have weighed in" must not imply 312 people are in the clusters.
+
+   **VoteBot response language rules:**
+   - When citing aggregate per-position stats: "Based on [N] discussions about this bill..."
+   - When citing cluster results: "Among the [N] people who shared detailed views..."
+   - When citing district data: "Of the [N] verified voters in your district who weighed in..."
+   - Never: "312 voters think..." (most aren't verified voters)
 
 2. **Confidence intervals and sample size on every claim.** Never show "63% oppose" without context:
    - "63% oppose (based on 47 verified voters in District 12, margin of error ±12%)"
