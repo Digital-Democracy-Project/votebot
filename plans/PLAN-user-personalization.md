@@ -1,6 +1,16 @@
 # User Personalization Plan: Anonymous-to-Authenticated Identity Pipeline
 
-> **Status note (March 2026):** Phases 0, 1, and 4 of this plan have been largely implemented via the User Analytics & Behavioral Logging system (see `plans/user-analytics-logging.md`, commit `5d1870d`). Phase 2 (Memberstack auth) has been superseded by the conversational onboarding design in `plans/PLAN-votebot-polis-jigsaw.md` Phase 6, which replaces the client-side modal approach with server-side account creation via Memberstack Admin API + Catalist voter verification, all within the chat. Phase 3 (personalization) remains unimplemented and is the primary remaining work in this plan.
+> **SUPERSEDED**: This plan has been absorbed into the Jigsaw staged rollout. See [PLAN-jigsaw-overview.md](PLAN-jigsaw-overview.md) for the master index.
+>
+> | Phase | Status | Where It Went |
+> |---|---|---|
+> | Phase 0 (IP fix) | Not started | Standalone infra task — not part of Jigsaw stages |
+> | Phase 1 (visitor tracking) | **Implemented** | [user-analytics-logging.md](user-analytics-logging.md) (commit `5d1870d`) |
+> | Phase 2 (Memberstack) | **Superseded** | [PLAN-jigsaw-stage-c.md](PLAN-jigsaw-stage-c.md) — conversational onboarding |
+> | Phase 3 (personalization) | **Moved** | [PLAN-jigsaw-stage-a.md](PLAN-jigsaw-stage-a.md) — first thing built |
+> | Phase 4 (analytics) | **Implemented** | [user-analytics-logging.md](user-analytics-logging.md) |
+>
+> This document is retained as reference for the design history. The Phase 0 IP fix (`X-Forwarded-For` propagation through DDP-API) is the only remaining standalone task.
 
 ## Problem Statement
 
