@@ -205,13 +205,36 @@ These gates **must pass** before proceeding to Stage B. Do not skip them.
 - [ ] Human-evaluate each landscape on a 1-5 rubric (dimensions: completeness, accuracy, position clarity, org alignment)
 - [ ] **Go/no-go: average score >= 3.5/5**
 
-### Gate 2: Extraction Accuracy (Precision + Recall)
+### Gate 2: Extraction Accuracy (Precision + Recall + Resolution)
 
 - [ ] Run extraction on **50 real production messages** from bill pages
-- [ ] Two human raters independently judge each extraction for **precision** (was the extraction correct?)
-- [ ] Same raters label **false negatives** — messages where an opinion was present but not extracted (recall)
+- [ ] Two human raters independently judge each extraction on three dimensions:
+  - **Precision**: Was the extraction correct? (correct / partially correct / incorrect)
+  - **Resolution**: Was the extraction at the right level of specificity? (too coarse / correct / overly specific). Example: "supports housing reform" is too coarse; "supports density with local design authority" is correct.
+  - **Recall**: Was there an opinion the system should have extracted but didn't? (should-have-extracted label)
+- [ ] Raters use the **recall labeling rubric** (see below) with canonical examples for consistency
 - [ ] Compute inter-rater agreement using **Cohen's kappa**
-- [ ] **Go/no-go: kappa >= 0.6 on precision AND recall proxy >= 60%** (system catches at least 60% of extractable opinions)
+- [ ] Compute **signal-to-noise ratio**: correct extractions / total extractions
+- [ ] **Go/no-go: kappa >= 0.6 on precision AND recall proxy >= 60% (minimum) / 70-75% (real target)**. Passing at 60% recall means 40% of opinions are missed — acceptable for Stage A but must improve before Stage B.
+
+#### Recall Labeling Rubric
+
+Strict definition of "should-have-extracted" with canonical examples. Both auditors must use this rubric to ensure recall measurement is consistent, not subjective.
+
+| Message | Should Extract? | Mapped Position | Why |
+|---|---|---|---|
+| "I support this bill's funding formula" | Yes | funding_formula: +0.9 | Explicit stance, direct |
+| "The timeline seems too aggressive" | Yes | timeline_3yr: -0.6 | Implicit opposition, clear concern |
+| "I'm worried about enforcement" | Yes | enforcement: -0.4 (low confidence) | Concern implying stance |
+| "I'd rather see a 5-year rollout" | Yes | timeline_5yr: +0.8 | Explicit preference for specific position |
+| "Why didn't they include inflation indexing?" | Maybe | funding_indexing: +0.3 (low confidence) | Question implying stance — extract at low confidence |
+| "What does this bill do?" | No | — | Pure info-seeking |
+| "This bill is interesting" | No | — | Vague sentiment, no extractable position |
+| "I'm not sure how I feel about this" | No | — | Explicit uncertainty, not an opinion |
+| "My neighbor thinks this is terrible" | No | — | Third-party attribution, not user's opinion |
+| "I can see both sides on enforcement" | Maybe | — | Ambivalence — extract as low-confidence mixed signal if at all |
+
+Provide at least **15 labeled examples** covering edge cases before the audit begins. Calibrate raters on the first 10 messages together before independent scoring.
 
 ### Gate 3: Opinion Prevalence
 
@@ -221,17 +244,28 @@ These gates **must pass** before proceeding to Stage B. Do not skip them.
 
 ### Gate 4: Extraction Depth (Tiered KPI)
 
-Track extraction depth at three tiers:
+Track extraction depth at four tiers:
 
 | Tier | Definition | Target | What It Means |
 |---|---|---|---|
 | Entry | >= 1 position extracted | > 25% of bill-page conversations | Users express at least some opinion |
-| Engagement | >= 2 positions extracted | > 15% of bill-page conversations | Users express opinions on multiple topics |
+| **Predictive** | **>= 2 high-confidence positions** | **> 15% of bill-page conversations** | **Most realistic predictor of Stage B success** |
+| Engagement | >= 2 positions extracted (any confidence) | > 15% of bill-page conversations | Users express opinions on multiple topics |
 | **Useful** | **>= 3 positions extracted** | **> 10% of bill-page conversations** | **Enough signal for a partial opinion vector** |
 
 - [ ] **Go/no-go: "Useful" tier > 10%** (minimum survival threshold)
 - [ ] **Internal target: "Useful" tier > 20-30%** for genuine confidence that the system will work at scale. Passing at 10% means "this works for a subset of users" — not "this works."
-- [ ] Report all three tiers segmented by first-time vs. returning visitors
+- [ ] **Primary cohort: first-time users.** If KPIs only pass for returning users (who have personalized experiences), the system may not generalize. Report first-time users as the primary number, returning users as secondary.
+- [ ] Report all four tiers segmented by first-time vs. returning visitors
+
+### Gate 5: Opinion Density (New)
+
+Measures how many opinions were *available* to extract — not just how many were extracted. This distinguishes "extraction failure" from "users don't express enough opinions."
+
+- [ ] For a sample of 50 bill-page conversations, human raters count the total number of extractable opinion signals per conversation (using the recall rubric)
+- [ ] Compute **latent opinion density**: average extractable opinions per conversation
+- [ ] If density is < 2 per conversation, the bottleneck is **user behavior** (they don't express enough opinions), not extraction quality. Stage B's elicitation prompts are the solution.
+- [ ] If density is >= 3 but extracted positions are < 2, the bottleneck is **extraction quality**. Improve extraction before moving to Stage B.
 
 ---
 
@@ -241,12 +275,17 @@ Track extraction depth at three tiers:
 |---|---|---|---|
 | Queries per session | Current avg | **+20% vs baseline** | Analytics: query count per session_id |
 | Bill-page conversations with >= 1 position (entry) | Unknown | **> 25%** | Extraction pipeline |
-| Bill-page conversations with >= 2 positions (engagement) | Unknown | **> 15%** | Extraction pipeline |
+| Bill-page conversations with >= 2 high-confidence positions (predictive) | Unknown | **> 15%** | Extraction pipeline |
 | **Bill-page conversations with >= 3 positions (useful)** | Unknown | **> 10% (survival) / 20-30% (real confidence)** | Extraction pipeline |
-| Extraction recall (should-have-extracted) | Unknown | **> 60%** | Audit loop: human-labeled false negatives |
-| Engagement drop-off after opinion language | Unknown | **No significant increase vs. non-opinion conversations** | Analytics: session continuation rate |
+| Extraction recall (should-have-extracted) | Unknown | **> 60% (minimum) / 70-75% (real target)** | Audit loop with recall rubric |
+| Extraction resolution (correct specificity) | Unknown | **> 70% "correct" resolution** | Audit loop: coarse/correct/overly-specific rating |
+| Signal-to-noise ratio | Unknown | **> 75%** | Correct extractions / total extractions |
+| Latent opinion density | Unknown | **> 2 extractable opinions per conversation** | Human-rated sample of 50 conversations |
+| Engagement drop-off after opinion language | Unknown | **No significant increase vs. non-opinion sessions** | Baseline comparison (see below) |
 
-All metrics segmented by: first-time vs. returning visitors, short vs. long sessions, bill page type.
+**Primary cohort for all metrics: first-time users.** Returning users are secondary — personalization may inflate their engagement.
+
+**Drop-off definition:** Compare session continuation rate (% of users who send another message) for conversations where opinion language was detected vs. conversations where no opinion language was detected. A "significant increase" is > 10 percentage points difference. This requires the baseline comparison — not just absolute drop-off numbers.
 
 ---
 
