@@ -300,6 +300,31 @@ Background extraction:
 
 This runs on every message at zero latency cost. Opinions are stored even if the user never sees the elicitation UI.
 
+#### Mode 1.5: Lightweight Inline Correction
+
+After a passive extraction with moderate-to-high confidence (>0.6), VoteBot can briefly confirm the captured stance without breaking conversational flow:
+
+```
+User: "I think this bill needs way more funding than what they proposed"
+
+VoteBot: [answers the question normally]
+
+VoteBot (appended to response): "By the way — it sounds like you think
+the bill's funding level is too low. Did I get that right?"
+
+User: "Yeah, exactly"  → confirms extraction, confidence boosted
+User: "No, I meant..."  → correction captured, extraction updated
+User: [ignores it]  → no change, extraction stands at original confidence
+```
+
+**Design principles:**
+- Only triggered on the first 1-2 passive extractions per session (not every message)
+- Phrased as a brief aside, not a separate question — it's part of the response, not a modal
+- Never blocks the conversation — if the user ignores it, the extraction stands
+- Confirmation boosts confidence from `inferred` to `contextual` level; correction updates the stance
+
+This addresses the silent error problem: even without the full consent flow, the system gets at least some correction signal early. Users who never reach the consent flow still contribute higher-quality data.
+
 #### Mode 2: Contextual Prompting (Natural Conversation)
 
 When VoteBot detects that a user has expressed interest in or opinions about a topic, it can naturally introduce the range of positions:
@@ -587,9 +612,10 @@ Steps:
   1. Fetch Polis vote matrix for bill's conversation
   2. Fetch confirmed + unconfirmed chat opinion vectors from Redis
   3. Merge into unified matrix
-  4. Handle missing values (impute with 0 or use masking)
-  5. Run PCA (2D projection for visualization)
-  6. Run k-means (k=2-5, selected by silhouette score)
+  4. Handle missing values (see Matrix Handling below)
+  5. Freeze landscape snapshot for this clustering run
+  6. Run PCA (2D projection for visualization)
+  7. Run k-means (k=2-5, selected by silhouette score)
   7. For each cluster:
      - Compute mean stance per position
      - Identify defining positions (highest variance between clusters)
@@ -608,6 +634,87 @@ Steps:
 | Chat opinion (explicit selection in elicitation) | 0.85 | Direct but through LLM intermediary |
 | Chat opinion (contextual prompt response) | 0.7 | High confidence but conversational |
 | Chat opinion (passive inference) | 0.5 | LLM-extracted, no user verification |
+
+### Matrix Handling: Missing Values, Normalization, and Weights
+
+The unified matrix mixes dense Polis voters with sparse chat users. Rigorous handling of missing values and weights is critical for valid PCA and clustering.
+
+**Missing values — masked, not zero-imputed:**
+
+Missing entries (`?`) mean "this user didn't express a view on this position." They are NOT the same as "this user is neutral" (which would be 0). The distinction matters:
+
+| Treatment | Effect on PCA | Risk |
+|---|---|---|
+| Missing = 0 (zero-impute) | Sparse users pulled toward the center on all missing dimensions | **Biases clusters toward dense users.** Chat users who covered 4 positions look artificially neutral on the other 26. |
+| Missing = masked (excluded from computation) | PCA uses only the dimensions each user actually voted on | **Correct but requires PCA implementation that handles partial observations.** Polis's Clojure math handles this via its named matrix. |
+
+**Decision: Use masking.** Polis's existing math service already handles sparse matrices via `named_matrix.clj` — missing entries are excluded from the covariance computation, not imputed. Chat users who voted on 8 positions are represented by their 8 actual stances, not by 8 stances + 22 fake zeros.
+
+**Normalization:**
+1. Per-position mean-centering (standard PCA preprocessing) — computed only over non-missing entries per column
+2. Weights applied to the vote values before matrix construction: `weighted_vote = vote × source_weight`
+3. This means a passive inference vote of +1 at weight 0.5 contributes +0.5, while a Polis direct vote of +1 at weight 1.0 contributes +1.0
+
+**Effect of weights on PCA:** Higher-weighted entries pull the principal components more strongly. This means clusters will be shaped more by confirmed/direct votes than by passive extractions — which is the desired behavior. Dense Polis voters anchor the cluster structure; sparse chat users are placed within that structure based on their partial data.
+
+### Vector Confidence Score
+
+Instead of relying solely on per-stance source weights, each user's overall opinion vector gets a composite confidence score:
+
+```python
+def vector_confidence(vector: OpinionVector) -> float:
+    """Composite confidence for an opinion vector.
+
+    Higher = more trustworthy signal for clustering.
+    """
+    n = vector.positions_covered
+    if n == 0:
+        return 0.0
+
+    # Coverage: what fraction of the landscape has this user addressed?
+    coverage = n / total_positions_in_landscape
+
+    # Average per-stance confidence
+    avg_confidence = mean(s.confidence for s in vector.stances.values())
+
+    # Source quality: fraction of stances from explicit/contextual (vs passive)
+    explicit_frac = count(s for s in stances if s.source in ('explicit_selection', 'contextual')) / n
+
+    return (0.4 * coverage) + (0.3 * avg_confidence) + (0.3 * explicit_frac)
+```
+
+**Usage:**
+- `vector_confidence < 0.2` → excluded from clustering entirely (too sparse/uncertain)
+- `vector_confidence 0.2-0.5` → included in per-position aggregates, not in PCA
+- `vector_confidence > 0.5` → full participant in PCA/clustering
+
+This simplifies the weighting problem: instead of 5 weight levels interacting with confidence scores and coverage, there's one composite score per user that determines their inclusion level.
+
+### Landscape Snapshot Isolation
+
+Each clustering run is tied to a specific landscape version. This prevents coordinate drift.
+
+```
+Clustering run #47 for bill HB-123:
+  landscape_version: 3
+  positions_included: [P1, P2, P3, P4, P5, P6, P7, P8, P9, P10]
+  snapshot stored in: clustering_snapshots table
+```
+
+```sql
+CREATE TABLE clustering_snapshots (
+    id SERIAL PRIMARY KEY,
+    bill_webflow_id TEXT NOT NULL,
+    landscape_version INT NOT NULL,
+    positions_included JSONB NOT NULL,    -- frozen position list for this run
+    participant_count INT,
+    cluster_count INT,
+    results_summary JSONB,                -- cluster sizes, defining positions, etc.
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+If a new position is added between clustering runs, old results remain valid against their snapshot. The next clustering run includes the new position. Historical comparison uses the snapshot's position set, not the current landscape.
 
 ### Cluster Output
 
@@ -815,9 +922,14 @@ compare to others? I'll just need your name and email."
 
 User: "Sure — I'm John Smith, john@example.com"
 
-    ── Step A: server-side ──
+VoteBot: "Got it — John Smith, john@example.com. Is that right?"
+
+User: "Yes" (or corrects: "Actually it's john.smith@example.com")
+
+    ── Step A: server-side (after confirmation) ──
     1. Parse name + email from message (LLM extraction)
-    2. Memberstack Admin API: POST /members
+    2. Confirm with user before proceeding (parsed data shown back)
+    3. Memberstack Admin API: POST /members
        { email: "john@example.com", customFields: { name: "John Smith" } }
        → member_id = "mem_abc123"
     3. Link visitor_id → member_id in Redis (bidirectional, permanent)
@@ -836,9 +948,14 @@ show legislators what their actual constituents think.
 
 User: "March 15, 1990, zip 20008"
 
-    ── Step B: server-side ──
+VoteBot: "March 15, 1990, zip code 20008 — correct?"
+
+User: "Yes"
+
+    ── Step B: server-side (after confirmation) ──
     1. Parse DOB + zip from message (LLM extraction)
-    2. Catalist Fusion Light API: verify_voter(
+    2. Confirm with user before calling Catalist (parsed data shown back)
+    3. Catalist Fusion Light API: verify_voter(
          first_name="John", last_name="Smith",
          dob="1990-03-15", zip="20008")
        → DWID found, FL, CD-7, State Senate 12, State House 38
@@ -1555,6 +1672,8 @@ Success is NOT "we built clustering." It's measurable user outcomes:
 |---|---|---|
 | Users engage more (queries per session) | +20% vs. baseline | Stage A |
 | Users express opinions in chat | >15% of bill-page conversations contain opinion language | Stage A |
+| **Conversations with 3+ positions extracted** | **>10% of bill-page conversations** | **Stage A (most critical early metric)** |
+| Inline correction acceptance | >50% of users respond to "Did I get that right?" prompt | Stage B |
 | Users interact with position prompts | >30% acceptance rate on contextual prompts | Stage B |
 | Users complete "add your voice" flow | >20% of prompted users reach 7+ positions | Stage B |
 | Users create accounts to save opinions | >5% of opinion-expressing visitors | Stage C |
