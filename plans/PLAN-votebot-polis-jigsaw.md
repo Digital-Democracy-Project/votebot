@@ -1591,6 +1591,183 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 
 ---
 
+## Risk Assessment and Mitigations
+
+### Risk 1: Opinion Landscape Quality Is Untested (Critical)
+
+**The risk:** Everything downstream — elicitation, vectors, clustering, reporting — depends on the LLM generating good topics and positions from bill text. If positions are vague, redundant, or miss what people actually care about, the entire system produces noise that looks like signal.
+
+**Mitigations:**
+
+1. **Pre-build validation gate (before any code).** Generate landscapes for 10 real bills across tracked jurisdictions using the prompts from Phase 1. Have 3 people independently evaluate each landscape on a rubric:
+   - Topic coverage: Do these capture what people would actually argue about? (1-5)
+   - Position distinctness: Could a voter distinguish between these options? (1-5)
+   - Position completeness: Are obvious stances missing? (1-5)
+   - Comfort: Would you feel comfortable choosing from these? (1-5)
+
+   **Go/no-go threshold:** Average score >= 3.5 across all dimensions. If below, iterate prompts before building any infrastructure.
+
+2. **Embedding similarity deduplication** (already in plan). Reject any position pair with cosine similarity > 0.85. But also add a **human-in-the-loop review** for the first 20 bills — automated dedup catches semantic duplicates, but not positions that are distinct-sounding yet functionally equivalent ("increase funding" vs. "allocate more resources").
+
+3. **Org position anchoring.** For bills with existing organization support/oppose data in Webflow CMS, generate landscape positions that explicitly include the org-sourced stances. These are real advocacy positions held by real organizations — they anchor the landscape to reality rather than pure LLM generation.
+
+4. **Iterative prompt refinement corpus.** Save every generated landscape (including rejected ones) with human evaluations. After 20 bills, use the good/bad examples as few-shot context in the generation prompt. The prompt improves with data.
+
+5. **Fallback for bad landscapes.** If a bill's landscape scores below threshold and can't be improved, degrade gracefully: show per-position agree/disagree aggregates without clustering. Don't force bad positions into the elicitation flow.
+
+### Risk 2: Passive Opinion Extraction Accuracy Is Unproven (High)
+
+**The risk:** Inferring continuous stance scores (P1=+0.6) from natural language ("I think this bill needs way more funding") is a hard NLP task. Low accuracy means wrong vectors, which means wrong clusters, which means misleading reports.
+
+**Mitigations:**
+
+1. **Early accuracy benchmark (pull forward from Milestone 2).** Before building the extraction pipeline, run a manual test:
+   - Take 50 real production chat messages from the existing query logs that contain opinion-like language
+   - Generate a test landscape for the relevant bills
+   - Have the LLM extract position stances
+   - Have 2 humans independently score the same messages
+   - Measure agreement (Cohen's kappa) between LLM extraction and human judgment
+
+   **Go/no-go threshold:** Kappa >= 0.6 (moderate agreement) on binary stance direction (agree/disagree). If below, the extraction approach needs fundamental rethinking before building the pipeline.
+
+2. **Confidence gating.** Every extraction gets a confidence score. Only stances with confidence >= 0.7 enter the opinion vector. Low-confidence extractions are logged for analysis but not acted on. This reduces noise at the cost of coverage.
+
+3. **Consent flow as error correction.** The conversational consent step ("Here's what I gathered — does this sound right?") is the primary accuracy backstop. Track the **correction rate** — if users change >30% of extracted stances during consent, extraction accuracy is too low for passive mode.
+
+4. **Separate accuracy tracking per elicitation mode.** Passive extraction (always-on) will have lower accuracy than explicit selection. Track and report accuracy by mode:
+   - Explicit selection: expected >95% (user directly chose)
+   - Contextual prompt response: expected >80% (user responded to options)
+   - Passive inference: expected >60% (LLM extracted from unprompted text)
+
+   If passive accuracy is below 60%, disable passive extraction and rely only on prompted modes.
+
+5. **Progressive rollout.** Week 1-2: passive extraction only, no user-facing changes (silent data collection for accuracy measurement). Week 3-4: enable contextual prompting for 10% of sessions. Week 5+: expand based on measured accuracy.
+
+### Risk 3: 7-Vote Minimum Creates a Participation Cliff (High)
+
+**The risk:** Polis requires 7+ votes to include a participant in clustering. Casual chat users covering 2-3 topics are invisible to the analysis. The opinion map may be dominated by power users and Polis direct voters, undermining the "chat as primary input" value proposition.
+
+**Mitigations:**
+
+1. **Cross-session accumulation (already designed).** `visitor_id` and `member_id` persist across sessions. A user who discusses funding today and teacher certification next week accumulates votes. Over 2-3 visits, a moderately engaged user crosses the threshold. The analytics system's conversation tracking provides the infrastructure for this.
+
+2. **Guided elicitation coverage targets.** When a user enters Mode 3 (explicit elicitation: "help me figure out where I stand"), walk them through enough topics to cross the threshold. With 5-10 topics at 3-6 positions each, covering 3 topics produces ~10-15 votes — well above the minimum. Design the elicitation flow to naturally cover at least 3 topics.
+
+3. **Sub-threshold aggregate reporting.** Users below 7 votes are excluded from PCA/clustering but their individual votes still exist in Polis. Create a separate "aggregate only" report that includes all votes regardless of threshold — simple per-position agree/disagree percentages. This ensures casual participants still contribute to the overall picture, even if they don't appear in clusters.
+
+4. **Threshold monitoring dashboard.** Track and report:
+   - % of chat users above the 7-vote threshold
+   - Average votes per chat user (per session and cumulative)
+   - Time-to-threshold for returning users (how many sessions to reach 7)
+
+   If <20% of chat users ever cross the threshold, consider lowering it in the Polis deployment (the value is configurable in `conversation.clj`).
+
+5. **Smart position prompting.** When VoteBot has extracted 4-5 stances passively and the user seems engaged, gently prompt: "You've shared views on funding and timeline — want to weigh in on teacher certification too? Two more topics and your views will be included in the full opinion map." Transparent about the threshold, not manipulative.
+
+### Risk 4: Too Many Unresolved Product Decisions (Medium)
+
+**The risk:** 31 open design questions, several of which are blocking. Building without resolving them means either rework or shipping something that doesn't match the product vision.
+
+**Mitigations:**
+
+1. **Prioritize the five blocking questions now.** These must be answered before implementation starts:
+
+   | # | Question | Recommended Resolution |
+   |---|----------|----------------------|
+   | 5 | How aggressively should VoteBot elicit? | Contextual prompting when user shows interest in a topic; never push unprompted. Passive extraction always on but invisible. |
+   | 13 | Should passive opinions enter clustering? | No — passive opinions contribute to aggregate counts only. Only confirmed stances (Active+) enter the vector space. |
+   | 15 | Should emergent positions require human approval? | Auto-approve + admin notification for v1. Review queue with 48h auto-approve timeout. |
+   | 21 | Is passive tier ethically acceptable? | Yes, if limited to aggregate stats ("312 discussions"). No individual clustering, no district attribution, no Polis submission without consent. |
+   | 5/22 | Should VoteBot proactively ask about uncovered positions? | Only after user has voluntarily expressed 3+ opinions. Frame as "want to weigh in on more?" not "you haven't covered X yet." |
+
+2. **Classify remaining questions by milestone.** Not all questions need answers before Milestone 1. Group them:
+   - **Before Milestone 1:** Questions 1-4 (landscape design parameters)
+   - **Before Milestone 2:** Questions 5, 7, 9 (elicitation behavior)
+   - **Before Milestone 3:** Questions 10, 11 (Polis setup decisions)
+   - **Before Milestone 5:** Questions 18, 19, 21 (consent flow UX)
+   - **Can defer:** Questions 6, 8, 16, 17, 22, 23, 24 (optimization, not blocking)
+
+3. **Decision log.** As each question is resolved, document the decision, the reasoning, and who made it — directly in this plan or in a linked decisions document. This prevents relitigating resolved questions later.
+
+### Risk 5: Catalist Integration Has External Dependency Risk (Medium)
+
+**The risk:** Catalist requires an agreement, workflow configuration, IP allowlisting, and credentials — all dependent on an external organization's timeline. If setup takes weeks, it blocks voter verification entirely.
+
+**Mitigations:**
+
+1. **Start the procurement process immediately — in parallel with Milestone 1.** Contact Catalist now to begin:
+   - [ ] Initial outreach to Catalist account executive
+   - [ ] Data use agreement review and signature
+   - [ ] Workflow specification (input fields, output fields, matching strategy)
+   - [ ] API credentials provisioning
+   - [ ] EC2 Elastic IP assignment and allowlisting
+
+   Target: credentials in hand before Milestone 5 begins (week 11).
+
+2. **Design the verification flow to be Catalist-independent until Step B.** The conversational onboarding is already structured this way: Step A (name + email → Memberstack account) works without Catalist. Step B (DOB + zip → voter verification) requires Catalist. Ship Step A first; add Step B when Catalist access is ready.
+
+3. **Build against a mock.** Create a `CatalistService` interface that can be backed by:
+   - **Production:** Real Catalist Fusion Light API
+   - **Development/testing:** Mock service that returns synthetic DWID + district data for a set of test personas
+
+   This lets you build, test, and demo the full flow without waiting for credentials.
+
+4. **Fallback if Catalist is delayed.** If the agreement stalls, voter verification can still work with a degraded path:
+   - User self-reports state + district (unverified)
+   - VoteBot uses the existing legislative calendar + OpenStates data to validate that the claimed district exists
+   - Opinions carry "self-reported" weight (0.7x) instead of "verified" weight (1.0x)
+   - Upgrade to Catalist-verified when access is available (re-verify, replace self-reported with DWID)
+
+### Risk 6: No Governance for When the System Is Wrong (Medium)
+
+**The risk:** If clustering produces a misleading narrative ("63% of your constituents oppose this"), there's no correction mechanism, no audit trail, and no methodology transparency. For a system that aspires to legislator accountability, this is a credibility gap.
+
+**Mitigations:**
+
+1. **Methodology page on the DDP website.** Publish a clear, non-technical explanation of how opinion maps are computed:
+   - Where opinions come from (chat, Polis direct voting)
+   - How opinions are weighted (verified voter > member > anonymous)
+   - What clustering means (and doesn't mean)
+   - Sample sizes and confidence levels
+   - What "63% of verified voters" actually means (63% of the N people who participated, not 63% of all voters in the district)
+   - Link to this from every opinion map and every VoteBot response that cites cluster data
+
+2. **Confidence intervals and sample size on every claim.** Never show "63% oppose" without context:
+   - "63% oppose (based on 47 verified voters in District 12, margin of error ±12%)"
+   - Below N=30 verified voters: show aggregates only, no percentages
+   - Below N=10: show "too few participants for reliable results"
+
+   Define thresholds:
+   | Verified voters in district | Display |
+   |---|---|
+   | < 10 | "A few voters have weighed in — not enough for a summary yet" |
+   | 10-29 | Per-position aggregates only, no cluster narratives |
+   | 30-99 | Full clusters with margin of error displayed |
+   | 100+ | Full clusters, confident reporting |
+
+3. **Audit trail.** Every opinion map version is immutable and timestamped:
+   - `ClusteringResult.version` already exists in the schema
+   - Store historical snapshots (DynamoDB TTL: 1 year)
+   - If a legislator disputes a claim, you can show exactly what data produced it
+   - Log every recomputation trigger (daily schedule, threshold-triggered, admin-initiated)
+
+4. **Challenge mechanism.** Add a "Report an issue" link on opinion map displays:
+   - Routes to a review queue (could be a simple Slack notification initially)
+   - Admin can re-run clustering, adjust parameters, or add a caveat to the display
+   - Track challenges and resolutions in the audit log
+
+5. **Limitations statement in VoteBot responses.** When VoteBot cites cluster data, include a brief caveat:
+   - "Based on [N] participants who've shared their views — not a scientific survey."
+   - Never claim representativeness of the full electorate
+   - The LLM system prompt should include: "When citing opinion data, always mention the sample size and note this is not a representative survey."
+
+6. **Pre-launch review.** Before publishing any district-level opinion data:
+   - Legal review of claims about "constituent opinion" (especially if used in advocacy)
+   - IRB-equivalent ethics review if partnering with academic institutions
+   - Pilot with 2-3 friendly legislators who can give feedback on how they'd interpret the data
+
+---
+
 ## Recommendation
 
 **Start with Milestone 1** (landscape generation) as a standalone experiment. Generate opinion landscapes for 10 real bills across your tracked jurisdictions. Have 2-3 people evaluate:
@@ -1608,3 +1785,21 @@ If the landscapes are good, **Milestone 2** (guided elicitation) is the product-
 - What % of novel claims represent genuinely new positions?
 
 The opinion landscape is the foundation everything builds on. If the positions are good, the elicitation works naturally, the vectors are meaningful, and the clustering produces real insight. If the positions are bad, nothing downstream can fix it. Invest the most iteration time here.
+
+### Parallel Workstreams
+
+While Milestone 1 is in progress, start these in parallel:
+
+1. **Catalist procurement** — initial outreach, agreement review, workflow specification. Longest lead-time item. Target: credentials in hand by week 8.
+2. **Extraction accuracy benchmark** — take 50 real production messages, test LLM extraction against human judgment. This validates the core assumption of Milestone 2 without building any infrastructure. Go/no-go: kappa >= 0.6.
+3. **Resolve the 5 blocking product questions** (5, 13, 15, 21, 22) — see Risk 4 mitigations for recommended resolutions.
+4. **Methodology page draft** — write the public-facing explanation of how opinion maps work. This forces clarity on what claims the system can and cannot make (see Risk 6).
+
+### Go/No-Go Gates
+
+| Gate | When | Criteria | If Fail |
+|---|---|---|---|
+| **Landscape quality** | After 10 bills evaluated | Average rubric score >= 3.5 | Iterate prompts; do not proceed to Milestone 2 |
+| **Extraction accuracy** | After 50-message benchmark | Cohen's kappa >= 0.6 | Rethink extraction approach; consider explicit-only elicitation |
+| **Chat user coverage** | After 2 weeks of passive extraction | >30% of chat users produce 3+ extractable stances per session | If below, contextual prompting is mandatory, not optional |
+| **Cluster stability** | After 50+ participants on any bill | Clusters are reproducible across recomputation runs | If unstable, increase min participant threshold or simplify to per-position aggregates |
