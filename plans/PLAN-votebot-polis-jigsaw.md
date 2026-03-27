@@ -186,6 +186,12 @@ class OpinionLandscape:
 
 ### Generating the Landscape
 
+> **Constraint principle:** The landscape is semi-structured, not fully generative. Generation is seeded with known dimensions (org positions from Webflow CMS, standard policy dimensions) and the LLM expands within those constraints. This prevents the opinion space from being purely probabilistic — it's anchored to real-world advocacy positions and common policy frameworks.
+
+**Stage A (simplified):** Use org support/oppose positions + bill summary + canonical policy dimensions (funding/scope/timeline/enforcement) to create a minimal landscape. 3-5 topics, 2-3 positions each. This validates the concept without depending on LLM quality.
+
+**Stage B (full):** Expand to LLM-generated topics and positions, deduplicated via embedding similarity, enriched with org positions. 5-10 topics, 3-6 positions each. The Stage A landscape is the seed — the LLM adds to it, not replaces it.
+
 **Step 1: Topic extraction from bill text**
 
 ```
@@ -1671,6 +1677,18 @@ The analytics system (implemented) and the opinion system (this plan) must be ti
 
 The `query_processed` event already captures intent, grounding, and confidence — these signals inform whether extraction should run (e.g., don't extract from out-of-scope queries or low-confidence responses).
 
+**Toward a unified event model:** Currently analytics events (`message_received`, `query_processed`, `conversation_ended`) and opinion events (`OpinionSignal`, vector updates, consent) are parallel systems with shared identifiers (`visitor_id`, `session_id`, `conversation_id`). The long-term goal is a single event stream where opinion extraction is just another event type alongside query processing. Concretely:
+
+| New Event Type | When | What It Contains |
+|---|---|---|
+| `opinion_extracted` | After extraction runs on a message | position_stances, confidence scores, novel_claims, extraction_mode |
+| `opinion_confirmed` | User confirms stances in consent flow | final_stances, corrections_made, consent_timestamp |
+| `opinion_submitted` | Stances submitted to Polis | polis_conversation_id, votes_submitted, weight_applied |
+| `account_created` | Memberstack account created | member_id, visitor_id linked |
+| `voter_verified` | Catalist verification succeeds | catalist_dwid, jurisdiction, districts |
+
+These write to the same JSONL event log as existing analytics events, providing a single audit trail for the complete user journey from first message through opinion extraction to verified voter submission.
+
 ### Position Lifecycle Management
 
 When a landscape is updated (new positions added, positions split/merged, bill text changes), existing opinion vectors must be migrated:
@@ -2060,6 +2078,56 @@ Message arrives
         → Opinions carry 1.0x weight
 ```
 
+### System of Record
+
+Each entity has one authoritative source of truth. All other copies are caches or projections.
+
+| Entity | Source of Truth | Caches / Projections |
+|---|---|---|
+| **Opinion Landscape** (topics, positions) | PostgreSQL `opinion_landscapes` | Redis `votebot:landscape:*` |
+| **Opinion Signals** (extraction events) | PostgreSQL `opinion_signals` | Redis `votebot:signals:*` (90d, for consent flow) |
+| **Opinion Vectors** (accumulated stances) | PostgreSQL `opinion_vectors` (for members) | Redis `votebot:opinions:*` (hot cache; sole store for anonymous visitors with 90d TTL) |
+| **Polis Votes** (discretized, submitted) | Polis PostgreSQL `votes_latest_unique` | None — write-only from VoteBot's perspective |
+| **Clustering Results** | Polis `math_main` + Delphi DynamoDB | Redis `votebot:clusters:*` (1h TTL cache) |
+| **Verified Voters** | PostgreSQL `verified_voters` | Redis `votebot:member:*` + Memberstack metadata |
+| **Visitor-Member Links** | Redis (bidirectional mappings) | — |
+| **Member Profiles** | Memberstack (canonical for auth) | Redis `votebot:member:*` (for VoteBot runtime) |
+
+**Rule:** When systems disagree, the source of truth wins. Caches are rebuilt from the source on conflict or expiry.
+
+### Distributed System Failure Handling
+
+This system spans 6 services (VoteBot, Redis, PostgreSQL, Polis, Delphi, Memberstack). Failures in any component must be handled gracefully.
+
+| Failure | Impact | Handling |
+|---|---|---|
+| **Redis down** | Can't read/write hot cache; visitor profiles unavailable | Degrade: skip personalization, opinion vectors write-through to PostgreSQL only, session falls back to in-memory dict (existing behavior). Log warning. |
+| **PostgreSQL down** | Can't persist opinion signals/vectors durably | Degrade: queue writes in Redis with `votebot:pg_queue:*` keys (TTL 24h). Replay to PostgreSQL on recovery. Chat continues to work — extraction runs but results are buffered. |
+| **Polis API down** | Can't submit votes or read clustering results | Degrade: queue vote submissions in Redis. Return cached clustering results (may be stale). VoteBot responses fall back to per-position aggregates from PostgreSQL instead of Polis clusters. |
+| **Delphi DynamoDB down** | Can't read narrative reports or topic labels | Degrade: use Polis `math_main` data directly (cluster IDs + representativeness without LLM-generated labels). Labels are "Group 1, Group 2" instead of "Pragmatic Supporters." |
+| **Catalist API down** | Can't verify voters | Degrade: "Verification temporarily unavailable." User continues as unverified member. Retry on next session. |
+| **Memberstack API down** | Can't create accounts or validate tokens | Degrade: opinions stored against `visitor_id` only. Conversational onboarding Step A fails gracefully ("We're having trouble creating your account — your views are saved and we'll try again next time"). Returning member detection fails — session treated as anonymous. |
+| **Position → Polis tid mapping inconsistent** | Wrong Polis statement receives the vote | Prevention: mapping is set once on Polis conversation creation and never modified. If a mismatch is detected (position_id not found in mapping), the vote is skipped and logged as an error. Admin alert triggers manual reconciliation. |
+
+**Recovery principle:** No data is lost on transient failures. Redis queues buffer writes. PostgreSQL is the recovery target. Polis votes are idempotent (upsert via `votes_latest_unique` rule), so replaying queued votes is safe.
+
+### Weight Calibration Plan
+
+The 5-level weighting system (Polis direct 1.0, confirmed 0.85, explicit 0.85, contextual 0.7, passive 0.5) requires empirical calibration, not just intuitive assignment.
+
+**Calibration method (run after Stage B has 200+ opinions):**
+1. Collect a set of users who expressed opinions both passively AND then confirmed them explicitly during the consent flow
+2. Compare: passive extraction stance vs. confirmed stance for the same position
+3. If passive extractions agree with confirmed stances >80% of the time, the 0.5 weight is too conservative — raise it
+4. If passive extractions agree <60%, the 0.5 weight is too generous — lower it or exclude passive entirely
+5. Repeat for contextual (0.7) vs confirmed stances
+
+**Monitoring (ongoing):**
+- Track correction rate per elicitation mode during consent flow
+- If any mode's correction rate exceeds 30%, reduce its weight
+- Report weight distribution in clustering: what % of the signal comes from each source type?
+- If passive votes dominate the matrix (>50% of total votes), clustering quality depends on extraction accuracy — verify it's holding up
+
 ### What Is NOT Stored
 
 - **Raw PII from voter verification** (name, DOB, address) — used in transit for Catalist API call, then discarded
@@ -2217,9 +2285,15 @@ Message arrives
 
 5. **Progressive rollout.** Week 1-2: passive extraction only, no user-facing changes (silent data collection for accuracy measurement). Week 3-4: enable contextual prompting for 10% of sessions. Week 5+: expand based on measured accuracy.
 
-### Risk 3: 7-Vote Minimum Creates a Participation Cliff (High)
+### Risk 3: 7-Vote Minimum Creates a Participation Cliff (High) — DECISION MADE
 
 **The risk:** Polis requires 7+ votes to include a participant in clustering. Casual chat users covering 2-3 topics are invisible to the analysis. The opinion map may be dominated by power users and Polis direct voters, undermining the "chat as primary input" value proposition.
+
+**Decision: Enforce minimum elicitation depth via the "add your voice" prompt.** This is the chosen strategy — not hybrid clustering, not threshold lowering, not synthetic completion. The system actively guides engaged users to 7+ positions through conversational prompting. Users who don't reach the threshold contribute to aggregate per-position counts but are excluded from PCA/clustering. This is acceptable because:
+- The "add your voice" prompt makes 7+ positions achievable in ~30 seconds of additional conversation
+- Cross-session accumulation via `visitor_id`/`member_id` means returning users build up over time
+- Aggregate per-position reporting (available to all users) is still valuable without clustering
+- Lowering the Polis threshold risks unstable PCA; synthetic completion risks fabricating opinions
 
 **Mitigations:**
 
