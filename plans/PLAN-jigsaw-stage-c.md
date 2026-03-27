@@ -371,7 +371,153 @@ Start Catalist procurement in parallel with Stages A-B, but do not block product
 
 ---
 
-## 12. What This Stage Does NOT Include
+## 12. Cost Control Architecture
+
+> **Why Stage C:** Identity tiers (anonymous → member → verified) enable tiered budgets. However, basic cost controls (per-session limits, rate limiting) should be introduced in Stage A when extraction adds LLM costs. This section defines the full architecture; Stage A implements layers 1, 3, and 4. Stage C adds layer 2 (per-user budgets) and layer 6 (identity incentives).
+
+### Layer 1: Per-Session Budget (Stage A+)
+
+Prevents a single conversation from burning excessive tokens.
+
+| Tier | Max Turns | Max Tokens/Session |
+|---|---|---|
+| Anonymous | 8-12 | ~8k-12k |
+| Member | 25-40 | ~25k-40k |
+| Verified | 50+ | ~50k+ |
+
+**UX at limit (value framing, not restriction):**
+- At ~80%: "We've covered a lot here — want me to save your progress so you can pick this up later?"
+- At 100%: "I can pause here for now. Your views are saved and you can continue anytime."
+
+**Implementation:** Track in Redis `votebot:session_budget:{session_id}` — `{messages, tokens_used}`.
+
+### Layer 2: Per-User Daily Budget (Stage C)
+
+Prevents repeat usage from draining cost. Requires identity — anonymous users are tracked by `visitor_id`, members by `member_id`.
+
+| Tier | Daily Token Budget |
+|---|---|
+| Anonymous | 15k-25k |
+| Member | 50k-75k |
+| Verified | 100k+ |
+
+**UX:** Soft warning at ~80% → hard stop at 100% with "continue tomorrow" framing.
+
+**Implementation:** Redis `votebot:daily_budget:{visitor_id}` — `{tokens_today, last_reset}`. Reset daily at UTC midnight.
+
+### Layer 3: Rate Limiting + Abuse Detection (Stage A+)
+
+Prevents bots, scripts, and edge-case abuse.
+
+**Rate limits per IP / visitor_id:**
+- Max 5 requests / 10 seconds
+- Max 20 requests / minute
+
+**Behavioral flags:**
+- < 1 second between messages repeatedly
+- Identical prompts repeated
+- High token usage with low engagement (many tokens, few opinion signals)
+
+**Progressive response:** slow responses → temporary throttle → block session.
+
+**Implementation:** Redis `votebot:rate:{visitor_id}`, `votebot:ip_rate:{ip}`.
+
+### Layer 4: Model Routing (Stage A+, biggest cost lever)
+
+Use cheaper models for background tasks, reserve expensive models for user-facing responses.
+
+| Task | Model Tier | Rationale |
+|---|---|---|
+| Intent detection | Cheap (Haiku/4o-mini) | Classification doesn't need reasoning |
+| Opinion extraction | Cheap (Haiku/4o-mini) | Structured output from template prompt |
+| Entity parsing (name/email/DOB) | Cheap (Haiku/4o-mini) | Simple field extraction |
+| Landscape generation | Mid (Sonnet/4o) | Needs understanding of legislation |
+| User-facing response | High (Opus/GPT-4.1) | Quality matters for UX |
+| Summarization | Cheap (Haiku/4o-mini) | Condensation, not reasoning |
+
+**Impact:** Can reduce total LLM cost by 50-80%. Opinion extraction (running on every bill-page message) is the highest-volume call and benefits most from cheap models.
+
+### Layer 5: Token Budget Awareness (Stage B+)
+
+Before generating a response, check remaining budget and adapt:
+
+```python
+if remaining_session_budget < estimated_response_cost:
+    # Downgrade model for this response
+    # Or shorten response (add "concise: true" to system prompt)
+    # Or skip opinion extraction this turn
+```
+
+### Layer 6: Progressive Identity Incentive (Stage C)
+
+Cost limits become a natural onboarding ramp — identity is a benefit unlock, not a restriction.
+
+```
+Anonymous user hits session limit:
+  "I can keep going — want me to save your progress so you don't lose this?"
+  → Triggers conversational onboarding Step A (name + email)
+
+Member hits daily limit:
+  "You've used today's quota. Verified voters get higher limits —
+   want to verify your registration? It takes 30 seconds."
+  → Triggers Step B (DOB + zip → Catalist)
+```
+
+This converts cost control into a conversion funnel. Users don't feel restricted; they feel like they're unlocking access.
+
+### Layer 7: Cost Monitoring Dashboard (Non-negotiable)
+
+Track daily:
+
+| Metric | Why It Matters |
+|---|---|
+| Total tokens/day (by stage) | Are we within budget? |
+| Cost per user (avg + p95) | Who's expensive? |
+| **Cost per meaningful outcome** (cost per user with ≥3 positions) | Is the spend producing value? |
+| Token distribution (short/long/outlier sessions) | Where does cost concentrate? |
+| Abuse signals (high-frequency, high-cost users) | Are we being gamed? |
+
+### Layer 8: Kill Switch (Non-negotiable)
+
+Automatic cost protection when daily spend exceeds threshold:
+
+```python
+if daily_spend > COST_ALERT_THRESHOLD:
+    # Reduce anonymous session limit: 10 → 6 turns
+    # Reduce token caps by 30%
+    # Switch all extraction to cheapest model
+    # Alert admin via Slack
+```
+
+**Config settings (new):**
+
+| Setting | Default | Description |
+|---|---|---|
+| `SESSION_TOKEN_LIMIT_ANONYMOUS` | 10000 | Max tokens per anonymous session |
+| `SESSION_TOKEN_LIMIT_MEMBER` | 30000 | Max tokens per member session |
+| `SESSION_TOKEN_LIMIT_VERIFIED` | 50000 | Max tokens per verified session |
+| `DAILY_TOKEN_LIMIT_ANONYMOUS` | 20000 | Daily token budget for anonymous visitors |
+| `DAILY_TOKEN_LIMIT_MEMBER` | 60000 | Daily token budget for members |
+| `DAILY_TOKEN_LIMIT_VERIFIED` | 100000 | Daily token budget for verified voters |
+| `RATE_LIMIT_PER_10S` | 5 | Max requests per 10 seconds |
+| `RATE_LIMIT_PER_MIN` | 20 | Max requests per minute |
+| `COST_ALERT_THRESHOLD` | 50.00 | Daily USD spend that triggers kill switch |
+| `EXTRACTION_MODEL` | haiku | Model used for opinion extraction |
+| `RESPONSE_MODEL` | gpt-4.1 | Model used for user-facing responses |
+
+### Redis Keys Introduced (Cost Control)
+
+| Key Pattern | Value | TTL |
+|---|---|---|
+| `votebot:session_budget:{session_id}` | `{messages, tokens_used}` | Session TTL (30 min) |
+| `votebot:daily_budget:{visitor_id}` | `{tokens_today, last_reset}` | 24 hours |
+| `votebot:rate:{visitor_id}` | Request timestamps | 60 seconds |
+| `votebot:ip_rate:{ip}` | Request timestamps | 60 seconds |
+| `votebot:daily_spend` | Running USD total | 24 hours |
+
+---
+
+## 13. What This Stage Does NOT Include
 
 - Polis integration or vote submission (Stage D)
 - Clustering or PCA analysis (Stage D)

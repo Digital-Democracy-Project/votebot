@@ -300,7 +300,21 @@ This is the **longest lead-time item** in the Jigsaw roadmap and is NOT on the c
 
 ---
 
-## 8. Risk Mitigations
+## 8. Cost Controls (Stage A Subset)
+
+Stage A introduces LLM extraction calls on every bill-page message — the first new cost surface. The full cost control architecture is defined in [PLAN-jigsaw-stage-c.md](PLAN-jigsaw-stage-c.md) Section 12. Stage A implements:
+
+- [ ] **Per-session token limit** (Layer 1): Cap anonymous sessions at ~10k tokens. Track in Redis `votebot:session_budget:{session_id}`.
+- [ ] **Rate limiting** (Layer 3): Max 5 requests/10s, 20 requests/min per visitor_id/IP. Redis-based.
+- [ ] **Model routing** (Layer 4): Use cheap model (Haiku/4o-mini) for opinion extraction. Keep GPT-4.1 for user-facing responses only. Extraction is the highest-volume new call — routing it cheap reduces cost by 50-80%.
+- [ ] **Kill switch** (Layer 8): If daily spend exceeds threshold, reduce extraction to sampling (every 3rd message) and alert admin.
+- [ ] **Cost tracking**: Log tokens used per extraction call in analytics events. Monitor daily cost per user.
+
+Tiered daily budgets (Layer 2) and identity-based incentives (Layer 6) come in Stage C when Memberstack accounts enable per-user tracking.
+
+---
+
+## 9. Risk Mitigations
 
 | Risk | Mitigation |
 |---|---|
@@ -314,7 +328,7 @@ This is the **longest lead-time item** in the Jigsaw roadmap and is NOT on the c
 
 ---
 
-## 9. Explicitly Deferred (NOT in This Stage)
+## 10. Explicitly Deferred (NOT in This Stage)
 
 The following are deferred to later stages. Do not implement them here:
 
