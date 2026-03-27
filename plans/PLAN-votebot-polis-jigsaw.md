@@ -1,5 +1,7 @@
 # Integration Plan: VoteBot as Guided Opinion Elicitation Tool
 
+> **SUPERSEDED**: This monolithic plan has been split into stage-based documents for implementation. See [PLAN-jigsaw-overview.md](PLAN-jigsaw-overview.md) for the master overview and links to each stage (A through E). This document is retained as a reference for the complete design history and detailed technical specifications that informed the stage documents.
+
 ## Vision
 
 VoteBot becomes a **guided opinion elicitation tool** for legislation. When users chat about a bill, VoteBot doesn't just answer questions — it understands the landscape of policy positions on that bill and helps users articulate where they stand. Users can select from known positions, express nuance, or introduce entirely new perspectives. Their opinions feed a shared opinion space alongside direct Polis voters, producing a living map of public sentiment on every tracked bill.
