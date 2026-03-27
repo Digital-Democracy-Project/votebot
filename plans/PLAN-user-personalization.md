@@ -494,13 +494,13 @@ See `plans/PLAN-votebot-polis-jigsaw.md` Phase 6 for the current design:
 - [ ] Visitor-to-member linking in Redis
 - [ ] Opinion vector promotion (visitor_id → member_id)
 
-### Phase 3: Personalization — NOT STARTED (primary remaining work)
-Requires Redis visitor profiles (Phase 1 remainder) and Memberstack integration (Phase 2):
+### Phase 3: Personalization — MOVED TO JIGSAW STAGE A (highest priority)
+Personalization has been moved to **Stage A (Weeks 1-4)** of the Jigsaw staged rollout (`PLAN-votebot-polis-jigsaw.md`). It's the first user-visible feature — easy, high-impact, and delivers value immediately while opinion extraction is validated silently in the background.
+- [ ] Redis visitor profiles (`votebot:visitor:{visitor_id}`)
 - [ ] Context-aware welcome messages based on visitor history
-- [ ] Jurisdiction inference from visitor behavior + IP geolocation
+- [ ] Jurisdiction inference from visitor behavior
 - [ ] "Since your last visit" bill status diffs
 - [ ] Return visitor continuity in agent.py system prompt
-- [ ] A/B test: personalized vs. generic welcome messages
 
 ### Phase 4: Analytics — LARGELY DONE
 - [x] Enhanced production evaluator with visitor segmentation

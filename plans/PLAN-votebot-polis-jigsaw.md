@@ -1537,68 +1537,165 @@ Design decisions made in Phases 1-7 that enable the drafting pipeline:
 
 ---
 
-## Implementation Roadmap
+## Implementation Roadmap (Staged Rollout)
 
-### Milestone 1: Opinion Landscape Generation (Weeks 1-3)
-- [ ] BillTopic and PolicyPosition extraction from bill text
-- [ ] Position enrichment from org positions (Webflow CMS)
-- [ ] Deduplication via embedding similarity
-- [ ] Storage in Redis (cache) + PostgreSQL (durable)
-- [ ] Integration with bill sync scheduler
-- [ ] **Validation**: Generate landscapes for 10 real bills, human-evaluate quality
+> **Principle:** Don't ship the full loop at once. Each stage delivers user-visible value independently and validates assumptions before the next stage depends on them. Resist the temptation to build clustering before proving that extraction works.
 
-### Milestone 2: Guided Elicitation in VoteBot (Weeks 3-6)
-- [ ] Landscape-aware system prompt injection
-- [ ] Passive opinion extraction (post-response async)
-- [ ] Position-matching: opinion -> PolicyPosition + stance score
+### Success Criteria
+
+Success is NOT "we built clustering." It's measurable user outcomes:
+
+| Metric | Target | When Measurable |
+|---|---|---|
+| Users engage more (queries per session) | +20% vs. baseline | Stage A |
+| Users express opinions in chat | >15% of bill-page conversations contain opinion language | Stage A |
+| Users interact with position prompts | >30% acceptance rate on contextual prompts | Stage B |
+| Users complete "add your voice" flow | >20% of prompted users reach 7+ positions | Stage B |
+| Users create accounts to save opinions | >5% of opinion-expressing visitors | Stage C |
+| Cluster results match human intuition | >70% agreement in qualitative review | Stage D |
+| Users return to check opinion maps | >10% return visitor rate on opinion report pages | Stage D |
+
+### Stage A: Foundation — Personalization + Silent Extraction (Weeks 1-4)
+
+**Goal:** Deliver visible value (personalized responses) while silently collecting opinion data to validate extraction accuracy. No user-facing opinion features yet.
+
+**Personalization (immediate value):**
+- [ ] Redis visitor profiles (`votebot:visitor:{visitor_id}` — pages visited, jurisdictions, session count)
+- [ ] Context-aware welcome messages based on visitor history ("Welcome back! You've been following Florida legislation...")
+- [ ] Jurisdiction inference from visitor behavior
+- [ ] "Since your last visit" bill status diffs for returning visitors
+
+**Silent opinion extraction (data collection, not user-facing):**
+- [ ] Simplified landscape generation: start with **known org positions from Webflow CMS** + **bill summary** + a few canonical dimensions (funding, timeline, scope). NOT full LLM-generated landscapes yet.
+- [ ] Basic opinion extraction on every bill-page message (async, post-response)
+- [ ] OpinionSignal records written to PostgreSQL with evidence text, confidence, source
+- [ ] Feature-flagged, logging-only — no user-facing elicitation, no consent prompts
+- [ ] **Extraction audit dashboard**: simple script or notebook that shows extracted stances alongside the source messages for manual review
+
+**Validation gates:**
+- [ ] Generate simplified landscapes for 10 real bills, human-evaluate quality (go/no-go: avg >= 3.5/5)
+- [ ] Run extraction on 50 real production messages, measure agreement with human judgment (go/no-go: kappa >= 0.6)
+- [ ] Measure: what % of bill-page messages contain extractable opinion language?
+
+**Parallel: Start Catalist procurement process**
+
+### Stage B: Guided Elicitation — Positions in Chat (Weeks 4-8)
+
+**Goal:** Show positions to engaged users, collect explicit selections. Still no Polis integration. This validates whether users will actually interact with the opinion system.
+
+**Prerequisites:** Stage A validation gates passed.
+
+- [ ] Full LLM-generated landscape (upgrade from simplified), with embedding deduplication
+- [ ] Landscape-aware system prompt injection (VoteBot knows about positions for this bill)
+- [ ] Contextual prompting: surface positions when user shows interest in a topic
+- [ ] "Add your voice" civic participation prompt (after 3+ passive stances detected)
+- [ ] Explicit elicitation mode ("help me figure out where I stand")
+- [ ] Incremental opinion vector construction (Redis, keyed by `visitor_id`)
 - [ ] Novel claim detection and storage
-- [ ] Incremental opinion vector construction per session
-- [ ] Feature flag and config
-- [ ] **Validation**: Run on 200 production logs, measure extraction accuracy
+- [ ] Position lifecycle management: landscape version tracking, migration strategy for when positions change
 
-### Milestone 3: Polis Bridge (Weeks 6-8)
-- [ ] Polis client service (create conversations, submit comments/votes)
-- [ ] XID JWT generation
-- [ ] Position -> Polis seed statement mapping
-- [ ] Auto-create conversation on landscape generation
-- [ ] Chat opinion -> Polis vote discretization and submission
+**Extraction auditability:**
+- [ ] Every extracted stance stored with: position_id, stance value, confidence, source type, evidence text (user's exact words), signal_id
+- [ ] Admin inspection endpoint or script: given a visitor_id + bill, show all extraction evidence with the messages that produced them
+- [ ] Extraction accuracy dashboard: automated comparison of passive vs explicit stances (when a user first expresses an opinion passively, then confirms explicitly, measure how close the passive extraction was)
 
-### Milestone 4: Clustering Pipeline (Weeks 8-11)
-- [ ] Unified matrix construction (Polis + chat)
-- [ ] PCA + k-means implementation (or Delphi job type)
-- [ ] Cluster labeling via LLM
-- [ ] Results read from Delphi DynamoDB + cached in Redis
-- [ ] Scheduled recomputation
-- [ ] Minimum participant threshold logic
+**Validation gates:**
+- [ ] >30% acceptance rate on "add your voice" prompts
+- [ ] >20% of prompted users reach 7+ positions
+- [ ] Extraction correction rate in explicit mode: <30% of stances changed by users when reviewing
+- [ ] Position lifecycle: at least one landscape update processed without data corruption
 
-### Milestone 5: Consent Flow + Memberstack + Voter Verification (Weeks 11-16)
-- [ ] Conversational consent prompt in chat (Stage 1)
-- [ ] Edit/correct flow in natural language
-- [ ] `services/memberstack.py` — Admin API client (create member, update metadata, validate token)
-- [ ] Onboarding Step A: LLM tool extracts name + email → server creates Memberstack account via Admin API
-- [ ] Server-side visitor-to-member linking (Redis, bidirectional)
-- [ ] Opinion vector promotion (visitor_id → member_id durable storage)
-- [ ] Onboarding Step B: LLM tool extracts DOB + zip → Catalist verification → update Memberstack profile
-- [ ] Returning member detection (widget sends Memberstack JWT on load if already logged in)
-- [ ] `create_voter_account` LLM tool definition for structured data extraction
-- [ ] Vote submission to Polis on member confirmation
-- [ ] Catalist Fusion Light API client (`services/catalist.py` — token management, verify_voter)
-- [ ] Voter verification API endpoint (`POST /votebot/v1/voter/verify`)
-- [ ] Catalist workflow setup (coordinate with Catalist account rep for field selection)
-- [ ] EC2 Elastic IP + Catalist IP allowlisting
-- [ ] DWID-based deduplication logic
-- [ ] Verified voter badge + weight in clustering
-- [ ] Multi-level district attribution (congressional, state senate, state house)
-- [ ] Cluster summary in VoteBot responses
+### Stage C: Identity + Consent — Accounts and Verification (Weeks 8-12)
+
+**Goal:** Authenticated identity, durable opinion storage, voter verification. This is the bridge to civic legitimacy.
+
+**Prerequisites:** Stage B shows users engage with opinion features.
+
+- [ ] Conversational consent flow (in-chat summary: "Here's what I gathered...")
+- [ ] Conversational onboarding Step A: name + email → Memberstack account via Admin API
+- [ ] Server-side visitor-to-member linking (Redis bidirectional + PostgreSQL)
+- [ ] Opinion vector promotion (visitor_id 90d TTL → member_id permanent in PostgreSQL)
+- [ ] Conversational onboarding Step B: DOB + zip → Catalist verification → DWID + districts
+- [ ] Memberstack profile update with verification data
+- [ ] Returning member detection (Memberstack JWT on widget load)
+- [ ] `create_voter_account` LLM tool for structured data extraction from chat
+- [ ] DWID-based deduplication in PostgreSQL
+
+**Consent flow specifics (addressing underspecification):**
+- [ ] Consent prompt triggers after: 3+ opinion signals detected AND a natural conversation pause (end of a response, not mid-stream)
+- [ ] Consent explanation: "Your responses would be anonymous and help show legislators what voters in your district think about this bill"
+- [ ] User can: confirm all, edit individual stances in natural language, decline entirely
+- [ ] Decline is permanent for this session (don't re-prompt). Can still consent in a future session.
+- [ ] Consent status logged in analytics events for measuring conversion funnel
+
+### Stage D: Clustering + Reporting — The Opinion Map (Weeks 12-16)
+
+**Goal:** Connect to Polis, run clustering, display results on DDP website and in VoteBot responses. This is the "here's what people think" output.
+
+**Prerequisites:** Stage C has confirmed opinions from 50+ users on at least one bill.
+
+- [ ] Polis client service (create conversations, submit votes)
+- [ ] XID JWT generation (`"votebot_{member_id}"`)
+- [ ] Position → Polis seed statement mapping
+- [ ] Chat opinion → Polis vote discretization and submission (on consent confirmation)
+- [ ] Clustering results read from Polis `math_main` + Delphi DynamoDB, cached in Redis
+- [ ] Cluster summary in VoteBot responses ("312 people have weighed in...")
 - [ ] "Where do I stand?" query handling
+- [ ] Opinion report pages on DDP website (per-bill, per-district)
+- [ ] Methodology page (sample sizes, confidence intervals, limitations)
 
-### Milestone 6: Emergent Positions + Full Loop (Weeks 14-18)
+**Validation gates:**
+- [ ] Cluster results reviewed by 3 people: do groups match human intuition? (go/no-go: >70% agreement)
+- [ ] Cluster stability: re-run with 10% of data removed — do the same groups emerge?
+- [ ] Sample size thresholds enforced: no district-level claims below N=30 verified voters
+
+### Stage E: Emergent Positions + Full Loop (Weeks 16-20)
+
 - [ ] Novel claim clustering pipeline
 - [ ] Candidate position generation and quality gate
-- [ ] Auto-injection into landscape + Polis
+- [ ] Auto-injection into landscape + Polis (with admin notification)
 - [ ] Polis embed on DDP bill pages
-- [ ] Cross-modality flow (chat <-> Polis)
+- [ ] Cross-modality flow (chat ↔ Polis)
 - [ ] Production monitoring, A/B testing, iteration
+
+### Integration Points: Analytics ↔ Opinion System
+
+The analytics system (implemented) and the opinion system (this plan) must be tightly coupled. Specifically:
+
+| Analytics Event | Opinion System Action |
+|---|---|
+| `query_processed` with `primary_intent: bill` | Trigger opinion extraction on the message (if on a bill page with a landscape) |
+| `conversation_ended` | Evaluate whether to emit consent prompt (if 3+ stances detected and not yet prompted) |
+| `message_received` with `visitor_id` | Load existing opinion vector for this visitor + bill (if any) to inform extraction context |
+| New `opinion_extracted` event type (future) | Log each extraction as an analytics event for accuracy tracking |
+
+The `query_processed` event already captures intent, grounding, and confidence — these signals inform whether extraction should run (e.g., don't extract from out-of-scope queries or low-confidence responses).
+
+### Position Lifecycle Management
+
+When a landscape is updated (new positions added, positions split/merged, bill text changes), existing opinion vectors must be migrated:
+
+| Change | Migration Strategy |
+|---|---|
+| **New position added** | Existing vectors gain a null entry for the new position. No data loss. |
+| **Position removed** | Existing stances on removed position are preserved in the vector but excluded from new clustering runs. Historical clusters retain the old position for auditability. |
+| **Position split** (e.g., "state formula" → "state formula with indexing" + "state formula without indexing") | Existing stances on the old position are mapped to the closest new position by embedding similarity. Users who are active get prompted to clarify. |
+| **Position merged** | Stances on merged positions are averaged. |
+| **Bill text amended** | Re-run landscape generation. Diff old vs new landscape. Apply migration rules above. Increment `landscape_version`. |
+
+All migrations are logged in a `landscape_migrations` PostgreSQL table for auditability:
+
+```sql
+CREATE TABLE landscape_migrations (
+    id SERIAL PRIMARY KEY,
+    bill_webflow_id TEXT NOT NULL,
+    from_version INT NOT NULL,
+    to_version INT NOT NULL,
+    changes JSONB NOT NULL,     -- [{type: "added"|"removed"|"split"|"merged", position_ids, ...}]
+    vectors_affected INT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
 
 ---
 
