@@ -95,23 +95,55 @@ All opinion extraction in this stage is **feature-flagged and logging-only** —
   - Assign confidence score to each extracted stance
   - Capture evidence text (the user's words that indicate the stance)
 - [ ] Write `OpinionSignal` records to PostgreSQL `opinion_signals` table
-- [ ] Gate on confidence: only persist signals with confidence >= 0.7
+- [ ] Gate on confidence: only persist signals with confidence >= 0.7 to the opinion vector
+- [ ] **Log ALL signals regardless of confidence** — low-confidence signals are written to `opinion_signals` with `persisted: false` for debugging and recall analysis. Only signals >= 0.7 feed into the opinion vector.
 - [ ] Feature flag: `JIGSAW_SILENT_EXTRACTION_ENABLED` (default: false)
 
 ### Extraction Audit Dashboard
 
 - [ ] Build a review script or Jupyter notebook that:
-  - Pulls extracted stances from `opinion_signals`
+  - Pulls extracted stances from `opinion_signals` (including `persisted = false` low-confidence signals)
   - Displays them alongside the source user messages
-  - Allows manual judgment (agree/disagree with extraction)
-  - Computes agreement metrics (Cohen's kappa)
+  - Allows manual judgment: **correct / partially correct / incorrect**
+  - Also labels **false negatives**: messages where a human would have extracted an opinion but the system didn't ("should-have-extracted")
+  - Computes agreement metrics (Cohen's kappa) for precision
+  - Computes **recall proxy**: % of "should-have-extracted" messages that the system actually extracted
 - [ ] Use this for the 50-message validation gate (see below)
+
+### Opinion Taxonomy (what counts as extractable)
+
+For consistent measurement across auditors, define what qualifies as an extractable opinion signal:
+
+| Category | Example | Extractable? |
+|---|---|---|
+| **Explicit stance** | "I support this bill's funding formula" | Yes — high confidence |
+| **Implicit stance** | "The funding formula seems reasonable" | Yes — moderate confidence |
+| **Concern** | "I'm worried about the enforcement timeline" | Yes — maps to opposition on timeline positions |
+| **Preference** | "I'd rather see a 5-year rollout" | Yes — maps to specific position |
+| **Question implying stance** | "Why didn't they include inflation indexing?" | Maybe — depends on context, low confidence |
+| **Pure information-seeking** | "What does this bill do?" | No — no opinion signal |
+| **Vague sentiment** | "This bill is interesting" | No — no extractable position |
+
+This taxonomy ensures the kappa score and recall measurement are consistent across auditors.
+
+### User Intent Classification
+
+- [ ] Classify each bill-page conversation as **opinion-seeking** or **info-seeking** based on the message content
+- [ ] Track extraction rates separately for each intent category
+- [ ] If extraction rate is low, distinguish between "system failure" (opinion expressed but not extracted) and "user intent" (user only wanted information)
+- [ ] Use the existing `sub_intent` field to approximate: `summary`, `explanation`, `navigation` → info-seeking; `support_opposition`, `vote_history` → opinion-seeking
 
 ### Analytics Integration
 
 - [ ] Ensure `query_processed` events with `primary_intent: bill` trigger extraction
 - [ ] Log extraction results as analytics events (signal count, confidence distribution)
 - [ ] Track extraction latency separately from response latency
+- [ ] **Segment all extraction metrics by user type:**
+  - First-time visitors vs. returning visitors (personalization may change behavior)
+  - Short sessions vs. long sessions
+  - Bill page vs. general page
+- [ ] **Track engagement drop-off after opinion language:** if a user expresses an opinion then stops chatting, log it as a signal that something may be wrong
+- [ ] Track opinion prevalence by intent category (opinion-seeking vs info-seeking conversations)
 
 ---
 
@@ -143,6 +175,7 @@ Unique constraint on `(bill_webflow_id, version)`.
 | `jurisdiction` | VARCHAR | State/jurisdiction code |
 | `elicitation_mode` | VARCHAR NOT NULL | Always `'silent'` in this stage |
 | `position_stances` | JSONB NOT NULL | Array of {position_id, stance, confidence} |
+| `persisted` | BOOLEAN DEFAULT TRUE | Whether the signal met the confidence threshold (>= 0.7) and was used in the opinion vector. Low-confidence signals are stored with `persisted = false` for debugging and recall analysis. |
 | `novel_claims` | JSONB | Claims not matching any known position |
 | `user_message` | TEXT NOT NULL | The user's original message |
 | `bot_response` | TEXT | VoteBot's response to the message |
@@ -168,26 +201,37 @@ These gates **must pass** before proceeding to Stage B. Do not skip them.
 
 ### Gate 1: Landscape Quality
 
-- [ ] Generate simplified landscapes for **10 real bills**
+- [ ] Generate simplified landscapes for **10 real bills**, including at least **2 "messy" bills** with broader, more complex position spaces (e.g., omnibus bills, multi-topic legislation). Stage B will expand to full LLM-generated landscapes — the messy bills test whether extraction degrades with more positions.
 - [ ] Human-evaluate each landscape on a 1-5 rubric (dimensions: completeness, accuracy, position clarity, org alignment)
 - [ ] **Go/no-go: average score >= 3.5/5**
 
-### Gate 2: Extraction Accuracy
+### Gate 2: Extraction Accuracy (Precision + Recall)
 
 - [ ] Run extraction on **50 real production messages** from bill pages
-- [ ] Two human raters independently judge each extraction
+- [ ] Two human raters independently judge each extraction for **precision** (was the extraction correct?)
+- [ ] Same raters label **false negatives** — messages where an opinion was present but not extracted (recall)
 - [ ] Compute inter-rater agreement using **Cohen's kappa**
-- [ ] **Go/no-go: kappa >= 0.6**
+- [ ] **Go/no-go: kappa >= 0.6 on precision AND recall proxy >= 60%** (system catches at least 60% of extractable opinions)
 
 ### Gate 3: Opinion Prevalence
 
 - [ ] Measure: what percentage of bill-page messages contain extractable opinion language?
-- [ ] Report the distribution (informational, no hard gate — but informs Stage B design)
+- [ ] Report the distribution, segmented by user intent (opinion-seeking vs info-seeking)
+- [ ] Informational, no hard gate — but informs Stage B design
 
-### Gate 4: Extraction Depth (Hard KPI)
+### Gate 4: Extraction Depth (Tiered KPI)
 
-- [ ] Measure: percentage of bill-page conversations with **>= 3 positions extracted**
-- [ ] **Target: > 10% of bill-page conversations**
+Track extraction depth at three tiers:
+
+| Tier | Definition | Target | What It Means |
+|---|---|---|---|
+| Entry | >= 1 position extracted | > 25% of bill-page conversations | Users express at least some opinion |
+| Engagement | >= 2 positions extracted | > 15% of bill-page conversations | Users express opinions on multiple topics |
+| **Useful** | **>= 3 positions extracted** | **> 10% of bill-page conversations** | **Enough signal for a partial opinion vector** |
+
+- [ ] **Go/no-go: "Useful" tier > 10%** (minimum survival threshold)
+- [ ] **Internal target: "Useful" tier > 20-30%** for genuine confidence that the system will work at scale. Passing at 10% means "this works for a subset of users" — not "this works."
+- [ ] Report all three tiers segmented by first-time vs. returning visitors
 
 ---
 
@@ -196,8 +240,13 @@ These gates **must pass** before proceeding to Stage B. Do not skip them.
 | Metric | Baseline | Target | Measurement |
 |---|---|---|---|
 | Queries per session | Current avg | **+20% vs baseline** | Analytics: query count per session_id |
-| Bill-page conversations with opinion language | Unknown | **> 15%** | Extraction pipeline: % of conversations with >= 1 signal |
-| Conversations with 3+ positions extracted | Unknown | **> 10%** | Extraction pipeline: % of conversations with >= 3 stances |
+| Bill-page conversations with >= 1 position (entry) | Unknown | **> 25%** | Extraction pipeline |
+| Bill-page conversations with >= 2 positions (engagement) | Unknown | **> 15%** | Extraction pipeline |
+| **Bill-page conversations with >= 3 positions (useful)** | Unknown | **> 10% (survival) / 20-30% (real confidence)** | Extraction pipeline |
+| Extraction recall (should-have-extracted) | Unknown | **> 60%** | Audit loop: human-labeled false negatives |
+| Engagement drop-off after opinion language | Unknown | **No significant increase vs. non-opinion conversations** | Analytics: session continuation rate |
+
+All metrics segmented by: first-time vs. returning visitors, short vs. long sessions, bill page type.
 
 ---
 
@@ -216,8 +265,13 @@ This is the **longest lead-time item** in the Jigsaw roadmap and is NOT on the c
 
 | Risk | Mitigation |
 |---|---|
-| Landscape quality too low for useful extraction | Pre-build validation gate with rubric scoring; anchor on org positions from CMS; iterative prompt refinement before gate evaluation |
-| Extraction accuracy insufficient | Early 50-message benchmark; confidence gating at 0.7 filters low-quality signals; audit dashboard enables rapid iteration |
+| Landscape quality too low for useful extraction | Pre-build validation gate with rubric scoring; include 2 messy bills; anchor on org positions from CMS; iterative prompt refinement |
+| Extraction accuracy insufficient | 50-message benchmark with both precision and recall; confidence gating at 0.7 for persistence; ALL signals logged for debugging |
+| Confidence threshold creates hidden bias toward polarized opinions | Log low-confidence signals with `persisted: false`; monitor confidence distribution; compare high-vs-low confidence extractions in audit |
+| False negatives go undetected | "Should-have-extracted" labeling in audit loop; recall proxy computed alongside kappa; false negatives are as important as false positives |
+| Personalization contaminates extraction metrics | Segment all metrics by first-time vs. returning visitors; report both cohorts in validation gates |
+| Passing at 10% gives false confidence | Tiered KPI (entry/engagement/useful); internal target 20-30%; 10% is minimum survival, not success |
+| Low extraction rate is ambiguous (system failure vs. user intent) | Opinion-seeking vs. info-seeking classification; extraction rates reported per intent category |
 
 ---
 
