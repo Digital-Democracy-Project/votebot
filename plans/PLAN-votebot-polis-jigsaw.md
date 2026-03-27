@@ -1649,20 +1649,58 @@ The two modalities are genuinely complementary: Polis provides breadth (every vo
 
 **Mitigations:**
 
-1. **Cross-session accumulation (already designed).** `visitor_id` and `member_id` persist across sessions. A user who discusses funding today and teacher certification next week accumulates votes. Over 2-3 visits, a moderately engaged user crosses the threshold. The analytics system's conversation tracking provides the infrastructure for this.
+1. **"Add your voice" civic participation prompt (primary mitigation).** After VoteBot has passively extracted 3-4 stances, it knows which topics the user hasn't covered. It frames the remaining positions as civic participation — not a survey:
 
-2. **Guided elicitation coverage targets.** When a user enters Mode 3 (explicit elicitation: "help me figure out where I stand"), walk them through enough topics to cross the threshold. With 5-10 topics at 3-6 positions each, covering 3 topics produces ~10-15 votes — well above the minimum. Design the elicitation flow to naturally cover at least 3 topics.
+   ```
+   VoteBot: "You've shared your views on funding and teacher
+   certification. 234 people have weighed in on this bill so far.
 
-3. **Sub-threshold aggregate reporting.** Users below 7 votes are excluded from PCA/clustering but their individual votes still exist in Polis. Create a separate "aggregate only" report that includes all votes regardless of threshold — simple per-position agree/disagree percentages. This ensures casual participants still contribute to the overall picture, even if they don't appear in clusters.
+   Want to quickly add your voice on two more topics? It takes
+   about 30 seconds and helps build a more complete picture of
+   what voters in your district think."
 
-4. **Threshold monitoring dashboard.** Track and report:
-   - % of chat users above the 7-vote threshold
+   User: "Sure"
+
+   VoteBot: "On the implementation timeline — the bill proposes
+   a 3-year rollout. Some people think that's enough, others
+   want 5+ years for districts to adapt. Where do you fall?"
+
+   User: "5 years for sure"
+
+   VoteBot: "Got it. Last one — on enforcement: the bill creates
+   a new oversight board. Some support that, others think existing
+   agencies should handle it. Thoughts?"
+
+   User: "I'd rather use existing agencies"
+
+   VoteBot: "Thanks! Your views on 4 key topics have been recorded.
+   Want to see how you compare to others?"
+   ```
+
+   This takes a user from 4 passively extracted stances to 8+ in two quick exchanges — comfortably above the 7-vote threshold. The design principles:
+
+   - **Civic framing, not extractive.** "Add your voice" and "help build a complete picture" feel like participation, not data collection.
+   - **Only triggers after demonstrated willingness.** 3+ passive stances means the user is already engaged and opinionated.
+   - **Honest about what happens.** The user knows their input goes toward an opinion map.
+   - **Sets time expectations.** "30 seconds" prevents fatigue anxiety.
+   - **Covers uncovered topics specifically.** VoteBot selects positions the user hasn't addressed, maximizing new signal per exchange.
+   - **Minimal exchanges needed.** 4 passive stances + 2 quick topic rounds (2 positions each) = 8 votes. Each topic round is a single question with clear options.
+
+   **Implementation:** The agent tracks which `PolicyPosition` IDs have been matched for the current visitor. When count >= 3 and the user hasn't been prompted yet this session, inject the "add your voice" prompt after the next natural response. The prompt presents the 2-3 uncovered topics with the highest `comment-extremity` (most divisive = most valuable for clustering).
+
+2. **Cross-session accumulation.** `visitor_id` and `member_id` persist across sessions. A user who discusses funding today and teacher certification next week accumulates votes. Over 2-3 visits, a moderately engaged user crosses the threshold without any single session feeling heavy.
+
+3. **Guided elicitation mode (Mode 3) naturally exceeds threshold.** When a user says "help me figure out where I stand," the explicit elicitation walks through 3+ topics at 3-4 positions each — producing 10-15 votes, well above the minimum.
+
+4. **Sub-threshold aggregate reporting.** Users below 7 votes are excluded from PCA/clustering but their individual votes still exist in Polis. A separate "aggregate only" view shows per-position agree/disagree percentages including all votes regardless of threshold. Casual participants still contribute to the overall picture.
+
+5. **Threshold monitoring.** Track and report:
+   - % of chat users above the 7-vote threshold (before and after "add your voice" prompt)
+   - Prompt acceptance rate (what % of users who see "add your voice" say yes)
    - Average votes per chat user (per session and cumulative)
-   - Time-to-threshold for returning users (how many sessions to reach 7)
+   - Time-to-threshold for returning users
 
-   If <20% of chat users ever cross the threshold, consider lowering it in the Polis deployment (the value is configurable in `conversation.clj`).
-
-5. **Smart position prompting.** When VoteBot has extracted 4-5 stances passively and the user seems engaged, gently prompt: "You've shared views on funding and timeline — want to weigh in on teacher certification too? Two more topics and your views will be included in the full opinion map." Transparent about the threshold, not manipulative.
+   If <20% of chat users ever cross the threshold even with prompting, lower it in the Polis deployment (configurable in `conversation.clj`).
 
 ### Risk 4: Too Many Unresolved Product Decisions (Medium)
 
