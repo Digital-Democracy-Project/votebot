@@ -1,5 +1,16 @@
 # Technical Design: Streaming Chat Widget with Slack Human Handoff
 
+> **Status:** Implemented. The WebSocket handler (`api/routes/websocket.py`) and chat widget (`chat-widget/src/`) described in this plan are live in production.
+>
+> **Subsequent changes (March 2026):** The WebSocket handler and chat widget were extended with user analytics and behavioral logging (see [user-analytics-logging.md](user-analytics-logging.md), commit `5d1870d`). Key additions to the architecture described below:
+> - **`visitor_id`** (localStorage) sent in every `user_message` payload for cross-session tracking
+> - **Conversation boundary detection** in the WebSocket handler — tracks `conversation_id`, `session_message_index`, `conversation_message_index`
+> - **Three event types** emitted by the handler: `message_received`, `query_processed`, `conversation_ended`
+> - **Engagement data** (`entry_referrer`, `page_url`, `scroll_depth`, `time_on_page`) sent from the widget
+> - **Intent classification** and **grounding status** computed per query
+>
+> These changes extend the WebSocket handler and widget payload but do not modify the Slack handoff flow or session management described in this document. The Jigsaw opinion elicitation system ([PLAN-jigsaw-overview.md](PLAN-jigsaw-overview.md)) will add further WebSocket message types (`member_auth`) and session-level opinion tracking in future stages.
+
 ## Executive Summary
 
 This document describes a new architecture for VoteBot that enables:
