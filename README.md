@@ -21,6 +21,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
   - Party affiliation enrichment for vote records
 - **Web Search Fallback**: Automatically searches the web (via OpenAI web search + Tavily) when RAG confidence is low
 - **User Analytics & Behavioral Logging**: Event-based logging system with three event types (`message_received`, `query_processed`, `conversation_ended`), three-level identity model (visitor, session, conversation), two-level intent classification, grounding status tracking, fallback detection, and conversation boundary analysis. All events logged to date-partitioned JSONL files for offline evaluation and analytics.
+- **Opinion Elicitation (Jigsaw — planned)**: Guided opinion capture through natural conversation with 5 elicitation modes, multi-position opinion vectors, Polis integration for clustering, Memberstack authentication, and Catalist voter file verification. See [plans/PLAN-jigsaw-overview.md](plans/PLAN-jigsaw-overview.md) for the staged rollout plan.
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
 - **Data Sync**: Content ingestion pipeline (bills, legislators, orgs) with sync handlers and CLI scripts. Scheduled sync jobs run via [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync)
@@ -949,6 +950,22 @@ The report includes:
 - **Visitor metrics**: Unique visitors, queries per visitor
 - **Device distribution**: Desktop vs mobile vs tablet
 - **Confidence and citation analysis**: Low-confidence flagging, citation rates
+
+## Opinion Elicitation (Jigsaw — Planned)
+
+VoteBot is being extended with a guided opinion elicitation system that captures voter opinions on legislation through natural conversation. The system uses multi-position opinion vectors, Polis for clustering, and Catalist for voter verification.
+
+**Staged rollout** — each stage validates assumptions before the next begins:
+
+| Stage | What It Does | Status |
+|---|---|---|
+| A | Personalization + silent opinion extraction | Ready for implementation |
+| B | 5-mode guided elicitation + "add your voice" | Blocked on Stage A |
+| C | Memberstack accounts + Catalist voter verification + cost control | Blocked on Stage B |
+| D | Polis clustering + opinion maps on DDP website | Blocked on Stage C |
+| E | Emergent positions + feedback loop monitoring | Blocked on Stage D |
+
+See [plans/PLAN-jigsaw-overview.md](plans/PLAN-jigsaw-overview.md) for the complete system design, and individual stage documents for implementation details.
 
 ## Performance Targets
 

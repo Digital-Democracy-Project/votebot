@@ -338,3 +338,18 @@ After response delivery, three event types are logged to date-partitioned JSONL 
 | `fastapi` | HTTP + WebSocket API framework |
 | `redis` | Cross-worker session state, pub/sub, sync task state + checkpoints |
 | `bs4` (BeautifulSoup) | HTML-to-text in chunking + ground truth tests |
+
+---
+
+## Planned Extension: Opinion Elicitation (Jigsaw)
+
+The RAG pipeline will be extended with an opinion extraction layer that runs async post-response on bill-page messages (Step 14 analytics events already provide the trigger). Opinion extraction will:
+
+1. Match user language against a **policy position landscape** per bill (PostgreSQL `opinion_landscapes`)
+2. Generate stance scores (agree/disagree, -1 to +1) with confidence levels
+3. Store extraction results as **OpinionSignal** records (PostgreSQL `opinion_signals`)
+4. Feed into multi-position **opinion vectors** that accumulate across sessions
+
+This does not modify the existing RAG retrieval or generation pipeline — it runs alongside it as an async post-processing step using cheap models (Haiku/4o-mini) to minimize cost impact.
+
+See [plans/PLAN-jigsaw-overview.md](../plans/PLAN-jigsaw-overview.md) for the full system design and [plans/PLAN-jigsaw-stage-a.md](../plans/PLAN-jigsaw-stage-a.md) for the initial implementation plan.

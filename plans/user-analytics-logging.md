@@ -575,6 +575,7 @@ These are explicitly deferred but the event schema is designed to accommodate th
 5. **Authenticated user ID** — If Webflow Memberships or another auth system is added, extend with an optional `user_id` field.
 6. **Funnel reconstruction** — Build entry → interaction → outcome funnels from ordered events per session.
 7. **ML-based intent classification** — Replace keyword heuristics with a lightweight classifier trained on logged data.
+8. **Opinion elicitation events (Jigsaw)** — Five new event types planned for the opinion elicitation system: `opinion_extracted`, `opinion_confirmed`, `opinion_submitted`, `account_created`, `voter_verified`. These will write to the same JSONL event log, providing a unified audit trail from first message through opinion extraction to verified voter submission. See [PLAN-jigsaw-overview.md](PLAN-jigsaw-overview.md) and [PLAN-jigsaw-stage-e.md](PLAN-jigsaw-stage-e.md) Section 9 for the unified event model.
 
 ---
 
