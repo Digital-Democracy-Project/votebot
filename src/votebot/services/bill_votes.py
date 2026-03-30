@@ -391,7 +391,7 @@ class BillVotesService:
 
         if result.actions:
             parts.append("\n**Recent Actions:**")
-            for action in result.actions[-5:]:
+            for action in result.actions:
                 parts.append(f"- {action['date']}: {action['description']}")
 
         if result.votes:
