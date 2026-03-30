@@ -1,7 +1,10 @@
 # PLAN: Log Quality & Analytics Fixes
 
 **Date:** 2026-03-29
-**Status:** Deploy 1 COMPLETE (commit `5789b04`, 2026-03-29). Deploy 2 ACTIVE (toggle enabled 2026-03-30 03:46 UTC) — 48hr validation window ends 2026-04-01 ~04:00 UTC. Deploy 3 (frontend page_context) not started.
+**Status:** All three deploys LIVE and validated as of 2026-03-30.
+- Deploy 1 COMPLETE (commit `5789b04`, 2026-03-29) — duplicate events fixed, confidence varies 0.54–0.82, sub-intent unknown rate <20% on real queries.
+- Deploy 2 ACTIVE (toggle enabled 2026-03-30 03:46 UTC) — 48hr validation window ends 2026-04-01 ~04:00 UTC. Initial citation rate 75% (3/4 real queries). Full soak pending.
+- Deploy 3 COMPLETE (commit `5126ffe`, 2026-03-30) — page_context now includes `id` and `jurisdiction` (e.g., `id=HR6984`, `jurisdiction=US`). Required CloudFlare cache purge for widget JS.
 
 **Known observation:** With `--workers 2`, one uvicorn worker may serve stale code briefly after restart. During Deploy 2 validation, "can you make it more concise?" classified as `sub_intent: unknown` despite matching keywords locally — likely served by a worker that loaded before the restart fully propagated. Verify after 48 hours that sub-intent classification is consistent across all queries (no intermittent `unknown` for keywords that should match).
 
@@ -422,9 +425,9 @@ Ship code in Deploy 1 but keep `VOTEBOT_ENHANCED_CITATION_PROMPT=false`. After D
 2. Measure citation rate over 48 hours against Deploy 1 baseline
 3. If citation rate doesn't reach >= 60% or quality degrades, set back to `false` and iterate on prompt wording
 
-### Deploy 3: Frontend (Issue 5)
+### Deploy 3: Frontend (Issue 5) — COMPLETE
 
-Separate chat widget deploy. Lower priority — retrieval works via `slug` which is already being sent. Ship when convenient.
+Shipped in commit `5126ffe` (2026-03-30). Chat widget normalizes Webflow field names (`billId` → `id`, `jurisdictionIso2` → `jurisdiction`, `sessionCode` → `session`). Required CloudFlare cache purge for the updated `ddp-chat.min.js` to take effect. Validated: `id=HR6984`, `jurisdiction=US` now appear in logs.
 
 ### Rollback
 
