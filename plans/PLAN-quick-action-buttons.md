@@ -259,7 +259,11 @@ def _should_use_bill_votes_tool(
 
 This requires passing `page_context` to the method at its two call sites (~lines 381 and 565).
 
-Fix B is a 5-line change that independently solves the HR 7147 problem regardless of whether buttons ship.
+### Fix C: Resolve bill identifier from Webflow slug
+
+`_prefetch_bill_info()` had a gap: when on a bill page without `page_context.id`, it couldn't resolve the bill for OpenStates lookup — even though the slug was always available. Added Method 5: look up the bill in Webflow CMS via slug to get the authoritative identifier and jurisdiction. This uses the existing `get_bill_details(slug=slug)` service. Shipped in commit `ee1227a`.
+
+Fixes B and C together ensure live OpenStates data is fetched for any status query on a bill page, regardless of whether the frontend passes `id`, `jurisdiction`, or just `slug`.
 
 ---
 
@@ -383,7 +387,7 @@ logger.info("Published button cache invalidation", slug=bill_slug, version_note=
 
 ## Implementation Order
 
-1. **Fix B (stale status)** — 5-line change to `_should_use_bill_votes_tool()`. Ship immediately, independently fixes HR 7147.
+1. **Fixes B + C (stale status)** — SHIPPED. Fix B: `_should_use_bill_votes_tool()` fires on bill page status queries (commit `52b8d80`). Fix C: `_prefetch_bill_info()` resolves bill identifier from Webflow slug via `get_bill_details()` (commit `ee1227a`).
 2. **Backend caching + logging + feature flag** — ButtonCache, agent changes, logger fields. Deploy with flag off.
 3. **Frontend buttons** — Widget UI, handlers, accessibility. Deploy with CloudFlare purge.
 4. **Enable feature flag** — Set `VOTEBOT_QUICK_ACTION_BUTTONS=true`, restart.

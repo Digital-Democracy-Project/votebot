@@ -6,6 +6,8 @@
 - Deploy 2 ACTIVE (toggle enabled 2026-03-30 03:46 UTC) — 48hr validation window ends 2026-04-01 ~04:00 UTC. Initial citation rate 75% (3/4 real queries). Full soak pending.
 - Deploy 3 COMPLETE (commit `5126ffe`, 2026-03-30) — page_context now includes `id` and `jurisdiction` (e.g., `id=HR6984`, `jurisdiction=US`). Required CloudFlare cache purge for widget JS.
 
+**Related fix (from PLAN-quick-action-buttons):** Stale bill status bug (HR 7147) fixed in commits `52b8d80` and `ee1227a`. Bill page status queries now trigger live OpenStates lookup, and bill identifier is resolved from Webflow slug when `page_context.id` is unavailable.
+
 **Known observation:** With `--workers 2`, one uvicorn worker may serve stale code briefly after restart. During Deploy 2 validation, "can you make it more concise?" classified as `sub_intent: unknown` despite matching keywords locally — likely served by a worker that loaded before the restart fully propagated. Verify after 48 hours that sub-intent classification is consistent across all queries (no intermittent `unknown` for keywords that should match).
 
 **Motivation:** Analysis of production logs from March 26–29 revealed four systemic issues degrading analytics quality: duplicate event logging, a confidence score floor effect, low citation rates, and poor sub-intent coverage. Together these make the logs unreliable for evaluating VoteBot's real-world performance.
