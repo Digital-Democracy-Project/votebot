@@ -35,6 +35,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Scheduler Stops After Leader Worker Death](#scheduler-stops-after-leader-worker-death)
 - [Bills With Empty Status Field in Webflow CMS](#bills-with-empty-status-field-in-webflow-cms)
 - [Nightly Bill Sync Skips Bills for Certain States](#nightly-bill-sync-skips-bills-for-certain-states)
+- [Stale Bill Status Data (HR 7147 Incident)](#stale-bill-status-data-hr-7147-incident)
 
 ---
 
@@ -3462,6 +3463,67 @@ Arizona uses `57th-2nd-regular` as its session identifier (no 4-digit year). The
 **Symptom:** `pip install -e .` succeeds but `import ddp_sync` fails. Venv created with Homebrew Python 3.13 doesn't process `.pth` files correctly for editable installs.
 
 **Workaround:** Use non-editable install: `pip install .` (requires reinstall after each code change).
+
+---
+
+## Stale Bill Status Data (HR 7147 Incident)
+
+### Symptom
+
+User asks "what was the latest action on this bill?" on a bill page and VoteBot returns outdated status information (e.g., showing a February action when a March 28 action exists in OpenStates). VoteBot may confidently deny recent actions that the user can see on the page.
+
+### Root Cause (Three Issues)
+
+**1. Pinecone `bill-history` retrieval injected stale data into LLM context.**
+The RAG retrieval pipeline had a Phase 3 that fetched `document_type: "bill-history"` chunks from Pinecone. These were ingested at sync time and never updated in real-time, giving the LLM outdated action history that conflicted with live data.
+
+**Fix:** Removed Phase 3 entirely from `src/votebot/core/retrieval.py`. Bill status and action history now comes exclusively from the live OpenStates API. (Commit `b518132`)
+
+**2. OpenStates action parsing took oldest actions instead of newest.**
+`_fetch_bill_info()` in `bill_votes.py` parsed `data.get("actions", [])[-10:]` — the last 10 items. OpenStates returns actions newest-first, so `[-10:]` grabbed the oldest actions (January), not the most recent (March 28). The same bug existed in `format_bill_info_document()` which used `actions[-5:]`.
+
+**Fix:** Removed the action limit entirely — the LLM now receives the full action history from OpenStates. (Commits `d0fed09`, `6f756c7`)
+
+**3. `_should_use_bill_votes_tool()` didn't fire for contextual status queries.**
+When a user asked "what's the latest action on this bill?" on a bill page, the bill_votes tool wasn't triggered because: (a) no vote keywords in the message, (b) no bill identifier in the message ("this bill" not "HR 7147"), and (c) `_prefetch_bill_info()` relied on `page_context.id` which was often null.
+
+**Fix:** Two changes:
+- `_should_use_bill_votes_tool()` now fires when user is on a bill page and message contains status keywords ("status", "action", "latest", "passed", "failed"). (Commit `52b8d80`)
+- `_prefetch_bill_info()` now resolves the bill identifier from the Webflow slug via `get_bill_details(slug=slug)` when `page_context.id` is unavailable. (Commit `ee1227a`)
+
+### Architecture (Post-Fix)
+
+Bill status data now has a single source of truth:
+
+```
+User asks about bill status on bill page
+    ↓
+_should_use_bill_votes_tool() detects status keywords → enables tool
+    ↓
+_prefetch_bill_info() resolves bill via: message regex → page_context.id → Webflow slug lookup
+    ↓
+get_bill_info() calls OpenStates API live (full action history, all votes)
+    ↓
+format_bill_info_document() formats complete history for LLM context
+    ↓
+LLM generates response from live data only (no Pinecone bill-history)
+```
+
+### Verification
+
+After deploying all fixes, "were there any actions on march 28?" on the HR 7147 page correctly returns:
+- "The House agreed to the Senate amendment with an amendment pursuant to H. Res. 1142"
+- "The Senate amendment to H.R. 7147 was considered as agreed to with an amendment consisting of the text of Rules Committee Print 119-21"
+
+### Related Commits
+
+| Commit | Description |
+|--------|-------------|
+| `52b8d80` | `_should_use_bill_votes_tool()` fires on bill page status queries |
+| `ee1227a` | `_prefetch_bill_info()` resolves bill from Webflow slug |
+| `d0fed09` | Pass full OpenStates action history to LLM |
+| `b518132` | Remove bill-history from Pinecone retrieval |
+| `6f756c7` | Remove action limit in format_bill_info_document |
 
 ---
 

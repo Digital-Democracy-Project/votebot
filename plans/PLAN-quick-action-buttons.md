@@ -263,7 +263,15 @@ This requires passing `page_context` to the method at its two call sites (~lines
 
 `_prefetch_bill_info()` had a gap: when on a bill page without `page_context.id`, it couldn't resolve the bill for OpenStates lookup — even though the slug was always available. Added Method 5: look up the bill in Webflow CMS via slug to get the authoritative identifier and jurisdiction. This uses the existing `get_bill_details(slug=slug)` service. Shipped in commit `ee1227a`.
 
-Fixes B and C together ensure live OpenStates data is fetched for any status query on a bill page, regardless of whether the frontend passes `id`, `jurisdiction`, or just `slug`.
+### Fix D: Remove bill-history from Pinecone retrieval
+
+Stale `bill-history` chunks from Pinecone were being injected into the LLM context alongside live OpenStates data, causing conflicting information. Removed Phase 3 (`document_type: "bill-history"`) from the retrieval pipeline entirely. Bill status now has a single source of truth: live OpenStates. (Commit `b518132`)
+
+### Fix E: Pass full action history to LLM
+
+Two instances of reverse-order action slicing were sending the oldest actions to the LLM instead of the newest. `_fetch_bill_info()` used `actions[-10:]` and `format_bill_info_document()` used `actions[-5:]` — both grabbing from the wrong end since OpenStates returns newest-first. Removed all action limits; the LLM now receives the complete history. (Commits `d0fed09`, `6f756c7`)
+
+Fixes B through E together ensure live, complete, and uncontaminated OpenStates data is used for any status query on a bill page.
 
 ---
 
@@ -387,7 +395,7 @@ logger.info("Published button cache invalidation", slug=bill_slug, version_note=
 
 ## Implementation Order
 
-1. **Fixes B + C (stale status)** — SHIPPED. Fix B: `_should_use_bill_votes_tool()` fires on bill page status queries (commit `52b8d80`). Fix C: `_prefetch_bill_info()` resolves bill identifier from Webflow slug via `get_bill_details()` (commit `ee1227a`).
+1. **Fixes B–E (stale status)** — ALL SHIPPED. Fix B: bill page status queries trigger tool (commit `52b8d80`). Fix C: resolve bill from Webflow slug (commit `ee1227a`). Fix D: remove stale bill-history from Pinecone retrieval (commit `b518132`). Fix E: pass full action history to LLM (commits `d0fed09`, `6f756c7`). See `docs/TROUBLESHOOTING.md` for full details.
 2. **Backend caching + logging + feature flag** — ButtonCache, agent changes, logger fields. Deploy with flag off.
 3. **Frontend buttons** — Widget UI, handlers, accessibility. Deploy with CloudFlare purge.
 4. **Enable feature flag** — Set `VOTEBOT_QUICK_ACTION_BUTTONS=true`, restart.
