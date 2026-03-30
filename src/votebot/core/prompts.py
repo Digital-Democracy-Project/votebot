@@ -156,6 +156,20 @@ For example:
 If no Source URL is provided for a source, fall back to: [Source: source_name]
 """
 
+# Enhanced citation instruction — gated behind VOTEBOT_ENHANCED_CITATION_PROMPT setting
+ENHANCED_CITATION_INSTRUCTION = """When citing sources, use markdown links to make them clickable. Use the Source URL provided in each source's header.
+
+Format: [Source: source_name](source_url)
+
+For example:
+- "According to the bill text [Source: Congress.gov](https://www.congress.gov/bill/...), this provision would..."
+- "The vote passed 215-214 [Source: US Congress](https://v3.openstates.org/bills/...)."
+
+If no Source URL is provided for a source, fall back to: [Source: source_name]
+
+IMPORTANT: Always include source citations when your response contains information from the provided context documents. This applies to ALL responses, including follow-up responses where you rephrase, condense, or expand earlier information. If you are reformulating a previous answer, retain the original source citations. Every factual claim about a bill, legislator, or organization should have a source citation.
+"""
+
 # Human handoff detection prompt
 HUMAN_HANDOFF_PROMPT = """## Human Handoff Detection
 
@@ -222,7 +236,13 @@ def build_system_prompt(
         prompt_parts.append(RAG_CONTEXT_TEMPLATE.format(retrieved_context=retrieved_context))
 
     # Add citation and handoff instructions
-    prompt_parts.append(CITATION_INSTRUCTION)
+    from votebot.config import get_settings
+
+    settings = get_settings()
+    if settings.enhanced_citation_prompt:
+        prompt_parts.append(ENHANCED_CITATION_INSTRUCTION)
+    else:
+        prompt_parts.append(CITATION_INSTRUCTION)
     prompt_parts.append(HUMAN_HANDOFF_PROMPT)
 
     return "\n\n".join(prompt_parts)

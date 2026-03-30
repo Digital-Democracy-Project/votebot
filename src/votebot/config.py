@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     query_log_enabled: bool = True
     query_log_dir: str = "logs/queries"
 
+    # Prompt tuning toggles
+    enhanced_citation_prompt: bool = False  # env: VOTEBOT_ENHANCED_CITATION_PROMPT
+
     # Slack Integration (for human handoff)
     slack_bot_token: SecretStr = Field(default=SecretStr(""))
     slack_app_token: SecretStr = Field(default=SecretStr(""))

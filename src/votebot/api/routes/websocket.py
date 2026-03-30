@@ -532,12 +532,28 @@ async def websocket_chat_endpoint(
             else:
                 terminal = "abandoned"
             await _emit_conversation_ended_with_state(session_id, session_copy, terminal)
+            # Reset conversation state to prevent duplicate events on reconnect
+            session["conversation_message_counter"] = 0
+            session["conversation_has_response"] = False
+            session["conversation_start_time"] = None
+            session["conversation_intents"] = []
+            session["conversation_had_handoff"] = False
+            session["conversation_had_fallback"] = False
+            session["conversation_had_retrieval_miss"] = False
         manager.disconnect(session_id)
     except Exception as e:
         logger.exception("WebSocket error", session_id=session_id, error=str(e))
         session = manager.get_session(session_id)
         if session and session.get("conversation_message_counter", 0) > 0:
             await _emit_conversation_ended_with_state(session_id, dict(session), "abandoned")
+            # Reset conversation state to prevent duplicate events on reconnect
+            session["conversation_message_counter"] = 0
+            session["conversation_has_response"] = False
+            session["conversation_start_time"] = None
+            session["conversation_intents"] = []
+            session["conversation_had_handoff"] = False
+            session["conversation_had_fallback"] = False
+            session["conversation_had_retrieval_miss"] = False
         manager.disconnect(session_id)
 
 

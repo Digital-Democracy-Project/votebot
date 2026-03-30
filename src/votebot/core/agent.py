@@ -437,6 +437,7 @@ class VoteBotAgent:
             retrieval_count=retrieval_result.total_retrieved,
             citations=citations,
             web_search_used=llm_response.web_search_used,
+            retrieval_result=retrieval_result,
         )
 
         # Step 13: Check for human handoff
@@ -679,6 +680,7 @@ class VoteBotAgent:
                     response=full_response,
                     retrieval_count=retrieval_result.total_retrieved,
                     citations=citations,
+                    retrieval_result=retrieval_result,
                 )
 
                 yield StreamChunkData(
@@ -875,6 +877,7 @@ class VoteBotAgent:
         retrieval_count: int,
         citations: list[Citation],
         web_search_used: bool = False,
+        retrieval_result=None,
     ) -> float:
         """
         Calculate confidence score for the response.
@@ -884,15 +887,22 @@ class VoteBotAgent:
             retrieval_count: Number of documents retrieved
             citations: Extracted citations
             web_search_used: Whether web search was used
+            retrieval_result: The retrieval result with chunk scores
 
         Returns:
             Confidence score from 0.0 to 1.0
         """
         confidence = 0.5  # Base confidence
 
-        # Boost for having retrieved documents
-        if retrieval_count > 0:
-            confidence += 0.2
+        # Graduated retrieval boost based on actual chunk scores
+        if retrieval_result and retrieval_result.chunks:
+            top_scores = [c.score for c in retrieval_result.chunks[:3] if c.score]
+            if top_scores:
+                avg_top = sum(top_scores) / len(top_scores)
+                confidence += min(avg_top * 0.33, 0.3)
+        elif retrieval_count > 0:
+            # Fallback if retrieval_result not available
+            confidence += 0.15
 
         # Boost for having citations
         if citations:

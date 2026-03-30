@@ -63,6 +63,8 @@ class SubIntent(StrEnum):
     GREETING = "greeting"
     OFF_TOPIC = "off_topic"
     META = "meta"
+    # bill — civic engagement
+    CIVIC_ACTION = "civic_action"
     # fallback
     UNKNOWN = "unknown"
 
@@ -108,15 +110,42 @@ _OUT_OF_SCOPE_KEYWORDS = [
 
 # Sub-intent keyword maps per primary intent
 _BILL_SUB_KEYWORDS: dict[str, list[str]] = {
-    "vote_history": ["vote", "voted", "voting", "yea", "nay", "roll call", "tally"],
+    "vote_history": [
+        "vote", "voted", "voting", "yea", "nay", "roll call", "tally",
+        "passed the house", "passed the senate",
+    ],
     "support_opposition": [
         "support", "oppose", "position", "stance", "for or against",
         "who supports", "who opposes", "backed", "endorses",
+        "pros and cons", "pros", "cons", "benefits", "drawbacks",
+        "arguments for", "arguments against", "advantages", "disadvantages",
     ],
-    "status": ["status", "passed", "failed", "committee", "signed", "vetoed", "introduced", "referred"],
-    "explanation": ["explain", "what does", "what is", "mean", "means", "rephrase", "simpler", "plain language"],
+    "status": [
+        "status", "passed", "failed", "committee", "signed", "vetoed",
+        "introduced", "referred", "latest action", "latest status",
+        "what happened", "current status", "where is this bill",
+        "sponsor", "sponsoring", "cosponsor", "cosponsoring",
+        "amended", "amendment",
+    ],
+    "explanation": [
+        "explain", "what does", "what is", "mean", "means",
+        "rephrase", "simpler", "plain language",
+        "help me understand", "break down", "what are these",
+        "referenced in", "specific sections",
+        "check your sources", "recheck", "bill text",
+        "acronym",
+    ],
     "comparison": ["compare", "difference", "vs", "versus", "similar"],
-    "summary": ["summary", "summarize", "overview", "about", "what is this bill"],
+    "summary": [
+        "summary", "summarize", "overview", "about", "what is this bill",
+        "tell me about", "expand", "concise", "trim", "shorten",
+        "paragraph", "more detail", "less detail", "rewrite",
+        "make it", "add back", "slightly more",
+    ],
+    "civic_action": [
+        "email", "letter", "contact", "write to", "call my",
+        "tell my representative", "tell my senator",
+    ],
 }
 
 _LEGISLATOR_SUB_KEYWORDS: dict[str, list[str]] = {
@@ -137,13 +166,22 @@ _GENERAL_SUB_KEYWORDS: dict[str, list[str]] = {
     "navigation": ["where", "find", "navigate", "page", "link", "go to"],
     "how_to_vote": ["vote", "register", "ballot", "how do i vote", "cast"],
     "about_ddp": ["ddp", "digital democracy", "votebot", "this site", "this platform"],
-    "issue_area": ["issue", "topic", "policy", "immigration", "healthcare", "education", "environment"],
+    "issue_area": [
+        "issue", "topic", "policy", "immigration", "healthcare",
+        "education", "environment",
+        "concise", "expand", "trim", "shorten", "more detail",
+        "less detail", "make it", "add back", "slightly more",
+        "paragraph", "rewrite",
+    ],
 }
 
 _OUT_OF_SCOPE_SUB_KEYWORDS: dict[str, list[str]] = {
     "greeting": ["hello", "hi ", "hey ", "good morning", "good afternoon"],
     "off_topic": ["weather", "recipe", "joke", "sports", "movie"],
-    "meta": ["thanks", "thank you", "bye", "goodbye", "ok", "great"],
+    "meta": [
+        "thanks", "thank you", "bye", "goodbye", "ok", "great",
+        "check your sources", "recheck",
+    ],
 }
 
 
