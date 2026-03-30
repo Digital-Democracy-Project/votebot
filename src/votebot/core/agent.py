@@ -1202,6 +1202,27 @@ class VoteBotAgent:
                 bill_identifier=bill_identifier,
             )
 
+        # Method 5: Look up bill identifier from Webflow CMS via slug
+        # When page_context.id is not set but slug is available, fetch bill details
+        # from Webflow to get the authoritative identifier and jurisdiction
+        if not bill_identifier and page_context and page_context.type == "bill":
+            slug = getattr(page_context, "slug", None)
+            if slug:
+                try:
+                    bill_details = await self.webflow_lookup.get_bill_details(slug=slug)
+                    if bill_details.found and bill_details.identifier:
+                        bill_identifier = bill_details.identifier.replace(" ", "")
+                        if bill_details.jurisdiction:
+                            jurisdiction = bill_details.jurisdiction
+                        logger.info(
+                            "Resolved bill identifier from Webflow slug for pre-fetch",
+                            bill_identifier=bill_identifier,
+                            jurisdiction=jurisdiction,
+                            slug=slug,
+                        )
+                except Exception as e:
+                    logger.warning("Error resolving bill from slug", slug=slug, error=str(e))
+
         if not bill_identifier:
             return ""
 
