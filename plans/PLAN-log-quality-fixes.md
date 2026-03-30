@@ -1,7 +1,9 @@
 # PLAN: Log Quality & Analytics Fixes
 
 **Date:** 2026-03-29
-**Status:** Deploy 1 COMPLETE (commit `5789b04`, 2026-03-29) — Issues 1, 2, 4 shipped. Deploy 2 (citation prompt toggle) pending validation. Deploy 3 (frontend page_context) not started.
+**Status:** Deploy 1 COMPLETE (commit `5789b04`, 2026-03-29). Deploy 2 ACTIVE (toggle enabled 2026-03-30 03:46 UTC) — 48hr validation window ends 2026-04-01 ~04:00 UTC. Deploy 3 (frontend page_context) not started.
+
+**Known observation:** With `--workers 2`, one uvicorn worker may serve stale code briefly after restart. During Deploy 2 validation, "can you make it more concise?" classified as `sub_intent: unknown` despite matching keywords locally — likely served by a worker that loaded before the restart fully propagated. Verify after 48 hours that sub-intent classification is consistent across all queries (no intermittent `unknown` for keywords that should match).
 
 **Motivation:** Analysis of production logs from March 26–29 revealed four systemic issues degrading analytics quality: duplicate event logging, a confidence score floor effect, low citation rates, and poor sub-intent coverage. Together these make the logs unreliable for evaluating VoteBot's real-world performance.
 
