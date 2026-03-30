@@ -378,7 +378,7 @@ class VoteBotAgent:
         enable_web_search = self._should_use_web_search(rag_confidence, page_context.type, message)
 
         # Step 9b: Determine if bill info tool should be enabled
-        enable_bill_votes = self._should_use_bill_votes_tool(rag_confidence, message)
+        enable_bill_votes = self._should_use_bill_votes_tool(rag_confidence, message, page_context)
 
         # Step 9c: Enable web search as fallback when bill info tool is enabled
         # This allows hybrid lookup: OpenStates first, then web search if not found
@@ -562,7 +562,7 @@ class VoteBotAgent:
         # (This is done before streaming since tool calls can't interrupt streams)
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
         bill_info_context = ""
-        if self._should_use_bill_votes_tool(rag_confidence, message):
+        if self._should_use_bill_votes_tool(rag_confidence, message, page_context):
             bill_info_context = await self._prefetch_bill_info(message, page_context, conversation_history)
             if bill_info_context:
                 logger.info("Pre-fetched bill info for streaming", has_info=bool(bill_info_context))
@@ -993,6 +993,7 @@ class VoteBotAgent:
         self,
         rag_confidence: float,
         message: str,
+        page_context=None,
     ) -> bool:
         """
         Determine if the bill votes lookup tool should be enabled.
@@ -1001,10 +1002,12 @@ class VoteBotAgent:
         1. Bill votes tool is enabled in settings
         2. The message appears to be asking about votes/voting
         3. RAG confidence is below threshold (vote info may not be in context)
+        4. User is on a bill page and asking about status/actions
 
         Args:
             rag_confidence: Confidence score from RAG retrieval
             message: The user's message
+            page_context: The current page context (optional)
 
         Returns:
             True if bill votes tool should be enabled
@@ -1038,16 +1041,25 @@ class VoteBotAgent:
         ]
         is_bill_inquiry = has_bill_identifier and any(kw in message_lower for kw in bill_inquiry_keywords)
 
+        # On bill pages, status/action queries should always use live data
+        # even without a bill identifier in the message (e.g., "what's the latest action on this bill?")
+        is_bill_page_status_query = False
+        if page_context and page_context.type == "bill":
+            status_keywords = ["status", "action", "latest", "passed", "failed", "where is", "what happened"]
+            is_bill_page_status_query = any(kw in message_lower for kw in status_keywords)
+
         # Enable tool if:
         # 1. It's a vote query (always enable for vote questions)
         # 2. Query mentions a specific bill identifier (HB 2724, etc.) - these often aren't in RAG
-        # 3. RAG confidence is very low AND it's a bill inquiry
+        # 3. User is on a bill page asking about status/actions
+        # 4. RAG confidence is very low AND it's a bill inquiry
         threshold = self.settings.bill_votes_rag_confidence_threshold
         very_low_threshold = 0.5  # Higher threshold for specific bill lookups
 
         should_enable = (
             is_vote_query or  # Always for vote queries
             has_bill_identifier or  # Always when a specific bill number is mentioned
+            is_bill_page_status_query or  # Always for status queries on bill pages
             (rag_confidence < very_low_threshold and is_bill_inquiry)  # Low confidence + bill inquiry
         )
 
@@ -1058,6 +1070,7 @@ class VoteBotAgent:
                 threshold=threshold,
                 is_vote_query=is_vote_query,
                 has_bill_identifier=has_bill_identifier,
+                is_bill_page_status_query=is_bill_page_status_query,
                 is_bill_inquiry=is_bill_inquiry,
             )
         else:
