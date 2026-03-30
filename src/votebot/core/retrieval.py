@@ -294,40 +294,11 @@ class RetrievalService:
                 summary_chunks_found=len(summary_results),
             )
 
-        # Phase 3: Get legislative history
-        # Filter by webflow_id if available to ensure we get the right bill's history
-        remaining_slots = max_chunks - len(text_results) - len(summary_results)
+        # Phase 3: Legislative history — REMOVED
+        # Bill status and action history now comes exclusively from live OpenStates
+        # API via the bill_votes tool. Stale bill-history chunks from Pinecone were
+        # causing the LLM to report outdated status information (e.g., HR 7147 incident).
         history_results = []
-
-        if remaining_slots > 0:
-            # Build enhanced query with bill identifiers for better matching
-            history_query = query
-            if page_context:
-                bill_id = page_context.id or ""
-                bill_title = page_context.title or ""
-                if bill_id or bill_title:
-                    history_query = f"{bill_id} {bill_title} {query}".strip()
-
-            history_filters = {"document_type": "bill-history"}
-            # Apply webflow_id filter if available to get the correct bill's history
-            if filters.get("webflow_id"):
-                history_filters["webflow_id"] = filters["webflow_id"]
-            elif filters.get("slug"):
-                history_filters["slug"] = filters["slug"]
-            history_results = await self.vector_store.query(
-                query=history_query,
-                top_k=remaining_slots * 2,
-                filter=history_filters,
-            )
-            history_results = [
-                r for r in history_results if r.score >= self.config.similarity_threshold
-            ]
-
-            logger.info(
-                "Bill text retrieval phase 3",
-                history_chunks_found=len(history_results),
-                history_query_preview=history_query[:50],
-            )
 
         # Phase 4a: Get organization positions if query is about org support/opposition
         org_keywords = [
