@@ -1,7 +1,7 @@
 # PLAN: Quick-Action Buttons with Response Caching
 
 **Date:** 2026-03-30
-**Status:** Draft v3 — revised after PM review and owner input
+**Status:** Draft v5 — final
 
 **Motivation:** Analysis of 1,927 production queries shows 3 dominant question patterns that account for ~63% of first messages on bill pages. Adding quick-action buttons improves UX (one-tap access to common answers) and, with caching, reduces AI token usage and latency for summary and pros/cons responses. This also directly fixes the stale bill status problem (HR 7147 incident) by ensuring status queries trigger the live OpenStates lookup.
 
@@ -47,23 +47,44 @@ Three buttons shown below the chat input on bill pages:
 
 ### Architecture
 
+**Two separate responsibilities across two services:**
+
+- **ddp-sync** — Detects bill amendments and publishes cache invalidation events. Does NOT generate or populate cached responses. ddp-sync has no LLM access.
+- **VoteBot** — Listens for invalidation events, manages the Redis cache, generates cached responses lazily on first button tap after invalidation.
+
 ```
+=== Cache Invalidation (ddp-sync) ===
+
+ddp-sync detects bill amendment
+    ↓
+Re-ingests updated bill text to Pinecone
+    ↓
+Publishes {"slug": "...", "reason": "bill_version_change"} on Redis channel votebot:cache:invalidate
+    ↓
+VoteBot receives event → deletes cached button responses for that slug
+    ↓
+Done. Cache is now empty for that bill. Next button tap will regenerate.
+
+=== Cache Population (VoteBot — lazy, on button tap) ===
+
 User taps "Summarize" or "Pros and cons" button
     ↓
 Widget sends: { message: "...", button: "summary", page_context: { slug: "...", ... } }
     ↓
-Backend checks Redis cache:
+VoteBot checks Redis cache:
   key = "votebot:button:{slug}:{button_type}"
     ↓
   HIT  → Return cached response (skip LLM), log as cache_hit=true
-  MISS → Normal RAG + LLM pipeline → cache response → return
+  MISS → Normal RAG + LLM pipeline → cache response in Redis → return
 
 User taps "Latest status & votes" button
     ↓
 Widget sends: { message: "What is the latest status and vote history for {bill_id}?", button: "status_votes", ... }
     ↓
-Backend: NO cache check. Always runs full pipeline with bill_votes tool enabled.
+VoteBot: NO cache check. Always runs full pipeline with bill_votes tool enabled.
 ```
+
+**Why lazy population (not eager warming):** ddp-sync has no LLM access and shouldn't need it — it's a data pipeline, not a chat service. Eager warming would require ddp-sync to call a VoteBot API endpoint to trigger response generation, adding coupling and complexity. At current traffic levels, the first user after a cache miss waits the normal 8–13s, then all subsequent users get instant responses. Worth revisiting if a bill goes viral and hundreds of users hit it simultaneously.
 
 ### Cache Keys
 
@@ -92,7 +113,15 @@ Slug is the unique identifier — it comes from Webflow and is already unique ac
 
 Bills that are no longer in session and not being amended will keep their cached responses indefinitely — this is correct behavior since their content is stable.
 
-**Safety net TTL:** 30-day max TTL on all cache keys, in case a bill is removed from Webflow entirely. This prevents orphaned cache entries.
+**Safety net TTL:** 7-day max TTL on all cache keys. This is a safety net only — the primary invalidation mechanism is the ddp-sync amendment event. The TTL catches edge cases like a bill being removed from Webflow entirely, where ddp-sync would never publish an invalidation.
+
+**Startup reconciliation:** Redis pub/sub is fire-and-forget — if VoteBot is down when ddp-sync publishes an invalidation, the event is lost. To handle this, on VoteBot startup, run a reconciliation check:
+
+1. Scan all `votebot:button:*` keys in Redis
+2. For each cached entry, compare its `cached_at` timestamp against the bill's `last_checked` timestamp in the `ddp:bill_version:{webflow_id}` key that ddp-sync already maintains
+3. If the bill was re-ingested after the cache was generated, delete the cached entry
+
+This runs once on startup — no new infrastructure, no polling. Combined with the 7-day TTL, this guarantees eventual consistency even through deploys and restarts.
 
 **Manual:** Admin endpoint `DELETE /votebot/v1/cache/button/{slug}` to force-clear a specific bill's cache.
 
@@ -250,7 +279,7 @@ class ButtonCache:
     """Redis-backed cache for quick-action button responses."""
 
     CACHEABLE_TYPES = ("summary", "pros_cons")  # status_votes is NEVER cached
-    SAFETY_TTL = 604800  # 7-day safety net
+    SAFETY_TTL = 604800  # 7-day safety net TTL
 
     def __init__(self, redis_store):
         self.redis = redis_store
@@ -318,7 +347,9 @@ await redis_store.publish(
 logger.info("Published button cache invalidation", slug=bill_slug, version_note=version_note)
 ```
 
-**File:** `src/votebot/main.py` — Subscribe to `votebot:cache:invalidate` on startup (leader worker only). On message, call `button_cache.invalidate_bill(slug)` and log the invalidation.
+**File:** `src/votebot/main.py` — On startup:
+1. Run startup reconciliation: scan `votebot:button:*` keys, compare `cached_at` against `ddp:bill_version:*` `last_checked` timestamps, invalidate stale entries
+2. Subscribe to `votebot:cache:invalidate` channel (leader worker only). On message, call `button_cache.invalidate_bill(slug)` and log the invalidation.
 
 ---
 
@@ -331,7 +362,8 @@ logger.info("Published button cache invalidation", slug=bill_slug, version_note=
 4. Unit test: cache invalidation clears all keys for a bill slug
 5. Unit test: `_should_use_bill_votes_tool()` fires for "what's the latest action?" on bill pages (the HR 7147 regression test)
 6. Unit test: feature flag disabled → button metadata ignored, cache not read/written
-7. Integration test: bill page status query triggers live OpenStates
+7. Unit test: startup reconciliation detects stale cache entries (cached_at < bill last_checked) and invalidates them
+8. Integration test: bill page status query triggers live OpenStates
 
 ### Frontend
 1. Buttons appear only on bill pages
@@ -370,8 +402,10 @@ Steps 1–2 can deploy without frontend changes. Step 3 is a separate widget dep
 ## Resolved Questions
 
 - **Slug uniqueness** — Confirmed: Webflow slugs are unique and immutable. No composite keys needed.
-- **Cache staleness** — Cache persists until ddp-sync detects a bill amendment. Bills no longer in session keep cached responses (correct — content is stable).
+- **Cache staleness** — Cache persists until ddp-sync detects a bill amendment. Bills no longer in session keep cached responses (correct — content is stable). 7-day TTL as safety net. Startup reconciliation catches missed pub/sub events.
+- **OpenStates rate limits** — 30,000 API calls/day licensed. Current status query volume (~30/day) is well within limits, even with significant traffic growth.
 - **OpenStates fallback** — Existing web search fallback in VoteBot handles OpenStates degradation. No additional SLO work needed.
+- **Live data badge** — Rejected. Users care about accuracy, not whether a response is cached or live. Adding a "live" indicator on status responses adds UI complexity with no user value.
 
 ## Open Questions
 
