@@ -1,5 +1,7 @@
 # Phase 1: Create ddp-sync Repo with VoteBot Sync Code
 
+**Status: COMPLETE** — Implemented March 10, 2026 (commit `a0f2c5f` in ddp-sync repo). 42 files created (~13,000 lines). All sync/ingestion/services code extracted from VoteBot with `votebot.*` → `ddp_sync.*` import rewrites. VoteBot cleanup in commit `df25db5` (Phase 4).
+
 *Part of: DDP-Sync Migration (see PLAN-move-sync-to-own-service.md for overview)*
 
 ## Goal

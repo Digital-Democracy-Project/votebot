@@ -1,5 +1,7 @@
 # Phase 2: Move DDP-API Scheduled Jobs into ddp-sync
 
+**Status: COMPLETE** — Implemented March 10, 2026 (commit `ab94101` in ddp-sync repo). 1,216 lines added across 5 files. All 8 DDP-API scheduled jobs (2 Voatz/Brevo + 6 Webflow CMS batch) moved to ddp-sync. Total scheduler now runs 11 jobs (3 VoteBot + 8 DDP-API).
+
 *Part of: DDP-Sync Migration (see PLAN-move-sync-to-own-service.md for overview)*
 *Depends on: Phase 1 complete and running*
 

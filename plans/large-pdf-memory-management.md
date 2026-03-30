@@ -1,5 +1,7 @@
 # Plan: Large PDF Handling & Sync Auto-Resume (v2)
 
+**Status: COMPLETE** — Implemented February 27–28, 2026 across multiple commits. Fix 1 (OOM prevention): commits `e743792`, `2065d5a`, `809f964`, `3bbc427`. Fix 2 (zombie watchdog + auto-resume): commits `6cf319d`, `3bbc427`, `a0e06e8`. All fixes were later migrated to the ddp-sync service as part of Phase 4 (commit `df25db5`, March 10, 2026). `pdf_max_pages` setting remains in VoteBot config.py.
+
 ## Problem Statement
 
 Worker PID 61904 was OOM-killed on Feb 27 at 06:55:05 UTC during a batch bill sync (task `e3ebabae-5394-4bc7-9b9a-64676a2bc443`). It processed **130 of 993 bills** (13.1%) before dying. The trigger was **HR 7148** (Consolidated Appropriations Act 2026) — a 1,540-page, 2.3MB PDF that generated **816 chunks**. The worker died 6 seconds after completing the bill following HR 7148, with no exception or shutdown log — the signature of a kernel OOM kill.

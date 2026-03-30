@@ -1,5 +1,7 @@
 # Member Organizations Integration Plan
 
+**Status: COMPLETE** — Implemented January 25, 2026 (commit `e8dbbf6`). 1,311 organizations ingested with 1,317 chunks to Pinecone. Batch ingestion code moved to ddp-sync service (March 2026, commit `df25db5`); runtime lookups via `WebflowLookupService` remain active in VoteBot for org positions, bill alignment, and org details.
+
 ## Overview
 Add member organization support to VoteBot by ingesting data from Webflow CMS, enabling organization-specific queries and bill position lookups.
 

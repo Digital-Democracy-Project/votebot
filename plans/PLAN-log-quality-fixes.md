@@ -1,6 +1,8 @@
 # PLAN: Log Quality & Analytics Fixes
 
 **Date:** 2026-03-29
+**Status:** Deploy 1 COMPLETE (commit `5789b04`, 2026-03-29) — Issues 1, 2, 4 shipped. Deploy 2 (citation prompt toggle) pending validation. Deploy 3 (frontend page_context) not started.
+
 **Motivation:** Analysis of production logs from March 26–29 revealed four systemic issues degrading analytics quality: duplicate event logging, a confidence score floor effect, low citation rates, and poor sub-intent coverage. Together these make the logs unreliable for evaluating VoteBot's real-world performance.
 
 **Data basis:** 807 log entries across 4 days (64 actual queries, 60 message_received, 683 conversation_ended — of which ~660 are duplicates).

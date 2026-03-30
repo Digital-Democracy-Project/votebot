@@ -1,5 +1,7 @@
 # Bill Document Enrichment Plan
 
+**Status: COMPLETE** — Implemented January 25, 2026 (commit `8b36df6`). 839 bills enriched with org positions (272 supporting, 119 opposing). RAG confidence improved 0.61 → 0.88, citation accuracy 36% → 97%. Original ingestion code moved to ddp-sync service (March 2026); runtime lookups via `WebflowLookupService` remain active in VoteBot.
+
 ## Overview
 Enrich bill documents in VoteBot by:
 1. Adding organization positions (support/oppose) for bidirectional relationship
