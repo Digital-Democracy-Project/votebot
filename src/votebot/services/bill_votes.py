@@ -244,9 +244,9 @@ class BillVotesService:
                         else:
                             sponsors.append(name)
 
-                # Parse recent actions (last 10)
+                # Parse all actions (OpenStates returns newest first)
                 actions = []
-                for action in data.get("actions", [])[-10:]:
+                for action in data.get("actions", []):
                     actions.append({
                         "date": action.get("date", ""),
                         "description": action.get("description", ""),
