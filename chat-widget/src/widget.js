@@ -337,10 +337,20 @@
             return urlContext;
         }
 
-        // 2. If explicit pageContext provided, use it (mobile app mode)
+        // 2. If explicit pageContext provided, use it (mobile app / Webflow embed mode)
         if (config.pageContext && config.pageContext.type) {
-            console.log('[DDPChat] Using explicit pageContext:', config.pageContext);
-            return config.pageContext;
+            var ctx = config.pageContext;
+            // Normalize Webflow field names to backend schema
+            var normalized = {
+                type: ctx.type,
+                title: ctx.title || null,
+                slug: ctx.slug || null,
+                id: ctx.id || ctx.billId || null,
+                jurisdiction: ctx.jurisdiction || ctx.jurisdictionIso2 || null,
+                session: ctx.session || ctx.sessionCode || null
+            };
+            console.log('[DDPChat] Using explicit pageContext:', normalized);
+            return normalized;
         }
 
         // 3. If autoDetect enabled, detect from page
