@@ -27,7 +27,11 @@ class Settings(BaseSettings):
     # API
     api_prefix: str = "/votebot/v1"
     api_key: SecretStr = Field(default=SecretStr("dev-api-key"))
-    allowed_origins: list[str] = ["*"]
+    allowed_origins: list[str] = [
+        "https://digitaldemocracyproject.org",
+        "https://votebot.digitaldemocracyproject.org",
+        "https://digital-democracy-project.webflow.io",
+    ]
 
     # OpenAI
     openai_api_key: SecretStr = Field(default=SecretStr(""))
