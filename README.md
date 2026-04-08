@@ -1,6 +1,8 @@
 # VoteBot 2.0
 
-High-performance, context-aware chat API for the Digital Democracy Project.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+An open-source, high-performance, context-aware chat API for the Digital Democracy Project.
 
 ## Overview
 
@@ -1009,4 +1011,4 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 
 ## License
 
-MIT License - see LICENSE file for details.
+This project is open source and available under the [MIT License](LICENSE).
