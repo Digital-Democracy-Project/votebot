@@ -462,6 +462,31 @@ def _print_analytics_report(entries: list[dict], verbose: bool = False) -> None:
         for device, count in sorted(device_counts.items(), key=lambda x: -x[1]):
             print(f"  {device}: {count} ({count/total*100:.1f}%)")
 
+    # --- Bill-history leak canary (Fix F2 in PLAN-quick-action-buttons) ---
+    # Permanent regression check: any non-zero count means stale bill-history
+    # chunks are being retrieved despite the data-layer removal. Investigate
+    # immediately if this surfaces — likely indicates ddp-sync regenerated
+    # the docs (Fix F1 regressed) or a new code path is producing them.
+    leak_count = sum(
+        1 for e in query_events
+        if "bill-history" in (e.get("retrieval_sources") or [])
+    )
+    print(f"\n--- Bill-history leak canary ---")
+    if leak_count == 0:
+        print(f"  bill_history_leak_count: 0  (clean)")
+    else:
+        print(f"  bill_history_leak_count: {leak_count}  *** REGRESSION — investigate ***")
+        # Surface a few examples so the operator has something to grep on
+        examples = [
+            e for e in query_events
+            if "bill-history" in (e.get("retrieval_sources") or [])
+        ][:3]
+        for ex in examples:
+            ts = ex.get("timestamp", "")[:19]
+            pc_type = (ex.get("page_context") or {}).get("type") or "none"
+            msg = (ex.get("message") or "")[:60]
+            print(f"    {ts} [{pc_type}] {msg!r}")
+
 
 async def evaluate(
     log_dir: str,

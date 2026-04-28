@@ -3477,7 +3477,16 @@ User asks "what was the latest action on this bill?" on a bill page and VoteBot 
 **1. Pinecone `bill-history` retrieval injected stale data into LLM context.**
 The RAG retrieval pipeline had a Phase 3 that fetched `document_type: "bill-history"` chunks from Pinecone. These were ingested at sync time and never updated in real-time, giving the LLM outdated action history that conflicted with live data.
 
-**Fix:** Removed Phase 3 entirely from `src/votebot/core/retrieval.py`. Bill status and action history now comes exclusively from the live OpenStates API. (Commit `b518132`)
+**Fix (initial — partial):** Removed Phase 3 entirely from `src/votebot/core/retrieval.py`. Bill status and action history now comes exclusively from the live OpenStates API. (Commit `b518132`)
+
+**Fix (completion — Fix F, 2026-04-28):** A 2026-04-28 production log audit found the Phase 3 removal was scoped to bill-page retrieval only. The general-page retrieval path (`retrieval.py:206-211`) does an unfiltered semantic query that still surfaced bill-history chunks via similarity match — 71 of 71 post-deploy leaks across 30 days occurred on general pages. Additionally, ddp-sync was still actively producing bill-history docs on every bill sync, so any Pinecone flush would be reverted by the next sync.
+
+Three coordinated changes ("Fix F") closed the data layer entirely:
+- **F1 (ddp-sync):** removed `format_bill_history_chunk()` and the bill-history production block in `pipelines/bill_sync.py`. `sync_bill()` now only produces `bill-votes` docs from OpenStates data.
+- **F2 (votebot):** one-shot `scripts/flush_bill_history.py` deletes existing bill-history vectors via `vector_store.delete(filter={"document_type": "bill-history"})`. Idempotent; persists pre/post counts to `logs/eval/flush_bill_history.json`.
+- **F3 (votebot):** extended `_should_use_bill_votes_tool()` to scan user messages in conversation history for bill identifiers when the current message lacks one. Mirrors the same user-only filter into `_prefetch_bill_info()` Method 3 to keep the firing decision and bill resolution in agreement. Closes the UX gap for conversational follow-ups ("is it still active?" after discussing HR 7147).
+
+A permanent `bill_history_leak_count` canary metric in `scripts/evaluate_production.py` flags any future regression (non-zero count = stale bill-history chunks reachable somewhere). See `plans/PLAN-quick-action-buttons.md` Fix F for full details.
 
 **2. OpenStates action parsing took oldest actions instead of newest.**
 `_fetch_bill_info()` in `bill_votes.py` parsed `data.get("actions", [])[-10:]` — the last 10 items. OpenStates returns actions newest-first, so `[-10:]` grabbed the oldest actions (January), not the most recent (March 28). The same bug existed in `format_bill_info_document()` which used `actions[-5:]`.
@@ -3517,13 +3526,25 @@ After deploying all fixes, "were there any actions on march 28?" on the HR 7147 
 
 ### Related Commits
 
+Initial fix (Fixes B–E, 2026-03-30):
+
 | Commit | Description |
 |--------|-------------|
 | `52b8d80` | `_should_use_bill_votes_tool()` fires on bill page status queries |
 | `ee1227a` | `_prefetch_bill_info()` resolves bill from Webflow slug |
 | `d0fed09` | Pass full OpenStates action history to LLM |
-| `b518132` | Remove bill-history from Pinecone retrieval |
+| `b518132` | Remove bill-history from Pinecone retrieval (bill-page path only — completed by Fix F) |
 | `6f756c7` | Remove action limit in format_bill_info_document |
+
+Completion (Fix F, 2026-04-28):
+
+| Commit | Repo | Description |
+|--------|------|-------------|
+| (TBD) | ddp-sync | F1: stop producing bill-history docs in `bill_sync.py`/`sync_bill()` |
+| (TBD) | votebot | F2: `scripts/flush_bill_history.py` one-shot Pinecone flush + persisted record |
+| (TBD) | votebot | F3: conversation-history scan in `_should_use_bill_votes_tool()` + mirror change in `_prefetch_bill_info()` Method 3 |
+| (TBD) | votebot | Permanent leak canary metric in `scripts/evaluate_production.py` |
+| (TBD) | votebot | Release sequencing guardrail `scripts/deploy_fix_f.sh` |
 
 ---
 

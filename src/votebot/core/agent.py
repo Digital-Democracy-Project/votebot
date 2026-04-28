@@ -378,7 +378,7 @@ class VoteBotAgent:
         enable_web_search = self._should_use_web_search(rag_confidence, page_context.type, message)
 
         # Step 9b: Determine if bill info tool should be enabled
-        enable_bill_votes = self._should_use_bill_votes_tool(rag_confidence, message, page_context)
+        enable_bill_votes = self._should_use_bill_votes_tool(rag_confidence, message, page_context, conversation_history)
 
         # Step 9c: Enable web search as fallback when bill info tool is enabled
         # This allows hybrid lookup: OpenStates first, then web search if not found
@@ -562,7 +562,7 @@ class VoteBotAgent:
         # (This is done before streaming since tool calls can't interrupt streams)
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
         bill_info_context = ""
-        if self._should_use_bill_votes_tool(rag_confidence, message, page_context):
+        if self._should_use_bill_votes_tool(rag_confidence, message, page_context, conversation_history):
             bill_info_context = await self._prefetch_bill_info(message, page_context, conversation_history)
             if bill_info_context:
                 logger.info("Pre-fetched bill info for streaming", has_info=bool(bill_info_context))
@@ -994,6 +994,7 @@ class VoteBotAgent:
         rag_confidence: float,
         message: str,
         page_context=None,
+        conversation_history: list[dict] | None = None,
     ) -> bool:
         """
         Determine if the bill votes lookup tool should be enabled.
@@ -1048,11 +1049,27 @@ class VoteBotAgent:
             status_keywords = ["status", "action", "latest", "passed", "failed", "where is", "what happened"]
             is_bill_page_status_query = any(kw in message_lower for kw in status_keywords)
 
+        # Conversational follow-up: when current message lacks a bill identifier,
+        # scan USER messages in conversation history. Bot messages are excluded —
+        # bot answers can list tangentially-mentioned bills which would otherwise
+        # trigger the live tool for a bill the user never asked about.
+        has_bill_in_history = False
+        if not has_bill_identifier and conversation_history:
+            for msg in reversed(conversation_history[-6:]):
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content", "") or ""
+                extracted_id, _ = self._extract_bill_from_text(content)
+                if extracted_id:
+                    has_bill_in_history = True
+                    break
+
         # Enable tool if:
         # 1. It's a vote query (always enable for vote questions)
         # 2. Query mentions a specific bill identifier (HB 2724, etc.) - these often aren't in RAG
         # 3. User is on a bill page asking about status/actions
-        # 4. RAG confidence is very low AND it's a bill inquiry
+        # 4. Prior user message in this conversation referenced a bill
+        # 5. RAG confidence is very low AND it's a bill inquiry
         threshold = self.settings.bill_votes_rag_confidence_threshold
         very_low_threshold = 0.5  # Higher threshold for specific bill lookups
 
@@ -1060,6 +1077,7 @@ class VoteBotAgent:
             is_vote_query or  # Always for vote queries
             has_bill_identifier or  # Always when a specific bill number is mentioned
             is_bill_page_status_query or  # Always for status queries on bill pages
+            has_bill_in_history or  # Conversational follow-up referencing earlier user-mentioned bill
             (rag_confidence < very_low_threshold and is_bill_inquiry)  # Low confidence + bill inquiry
         )
 
@@ -1071,6 +1089,7 @@ class VoteBotAgent:
                 is_vote_query=is_vote_query,
                 has_bill_identifier=has_bill_identifier,
                 is_bill_page_status_query=is_bill_page_status_query,
+                has_bill_in_history=has_bill_in_history,
                 is_bill_inquiry=is_bill_inquiry,
             )
         else:
@@ -1178,9 +1197,14 @@ class VoteBotAgent:
         if not bill_identifier:
             bill_identifier, jurisdiction = await self._resolve_bill_from_title(message)
 
-        # Method 3: Search conversation history for bill identifiers
+        # Method 3: Search USER messages in conversation history for bill identifiers.
+        # Bot messages are excluded to avoid resolving to a tangentially-mentioned bill
+        # the user never actually asked about (mirrors the same filter applied to
+        # _should_use_bill_votes_tool so the firing decision and the resolution agree).
         if not bill_identifier and conversation_history:
             for msg in reversed(conversation_history[-6:]):
+                if msg.get("role") != "user":
+                    continue
                 content = msg.get("content", "")
                 extracted_id, extracted_jurisdiction = self._extract_bill_from_text(content)
                 if extracted_id:

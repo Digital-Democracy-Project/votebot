@@ -1,7 +1,7 @@
 # PLAN: Quick-Action Buttons with Response Caching
 
-**Date:** 2026-03-30
-**Status:** Draft v5 — final
+**Date:** 2026-03-30 (rev 2026-04-28: Fix D scope correction + Fix F added; rev 2026-04-28b: PM review feedback incorporated; rev 2026-04-28c: second-pass PM feedback — user-mention dominance, release script, deleted-count logging)
+**Status:** Draft v6.2 — final
 
 **Motivation:** Analysis of 1,927 production queries shows 3 dominant question patterns that account for ~63% of first messages on bill pages. Adding quick-action buttons improves UX (one-tap access to common answers) and, with caching, reduces AI token usage and latency for summary and pros/cons responses. This also directly fixes the stale bill status problem (HR 7147 incident) by ensuring status queries trigger the live OpenStates lookup.
 
@@ -263,15 +263,233 @@ This requires passing `page_context` to the method at its two call sites (~lines
 
 `_prefetch_bill_info()` had a gap: when on a bill page without `page_context.id`, it couldn't resolve the bill for OpenStates lookup — even though the slug was always available. Added Method 5: look up the bill in Webflow CMS via slug to get the authoritative identifier and jurisdiction. This uses the existing `get_bill_details(slug=slug)` service. Shipped in commit `ee1227a`.
 
-### Fix D: Remove bill-history from Pinecone retrieval
+### Fix D: Remove bill-history from Pinecone retrieval (PARTIAL — completed by Fix F)
 
-Stale `bill-history` chunks from Pinecone were being injected into the LLM context alongside live OpenStates data, causing conflicting information. Removed Phase 3 (`document_type: "bill-history"`) from the retrieval pipeline entirely. Bill status now has a single source of truth: live OpenStates. (Commit `b518132`)
+Stale `bill-history` chunks from Pinecone were being injected into the LLM context alongside live OpenStates data, causing conflicting information. Removed Phase 3 (`document_type: "bill-history"`) from the retrieval pipeline entirely. (Commit `b518132`)
+
+**What this fix did NOT cover** — discovered during 2026-04-28 production log audit:
+
+- The fix only patched `_retrieve_bill_with_text_priority()` (the bill-page retrieval path). The general-page retrieval path at `retrieval.py:206-211` does an unfiltered semantic query (`filter=None`) that still surfaces bill-history chunks via similarity match.
+- The unfiltered fallback at `retrieval.py:572-583` (runs when all typed phases return empty) is also still capable of leaking bill-history on bill pages, though logs show it has not yet triggered in production.
+- ddp-sync (`pipelines/bill_sync.py:982-1011`) **still actively produces** bill-history docs on every bill sync. Even after a full Pinecone flush, the next sync would repopulate.
+
+Production log analysis (Mar 31 – Apr 28): 71 of 71 post-deploy bill-history retrievals occurred on `general` pages, confirming the read-path leak is exclusively in the unfiltered general-query path. Fix F closes the data layer entirely so no read path can surface bill-history regardless of filter coverage.
 
 ### Fix E: Pass full action history to LLM
 
 Two instances of reverse-order action slicing were sending the oldest actions to the LLM instead of the newest. `_fetch_bill_info()` used `actions[-10:]` and `format_bill_info_document()` used `actions[-5:]` — both grabbing from the wrong end since OpenStates returns newest-first. Removed all action limits; the LLM now receives the complete history. (Commits `d0fed09`, `6f756c7`)
 
-Fixes B through E together ensure live, complete, and uncontaminated OpenStates data is used for any status query on a bill page.
+### Fix F: Complete bill-history removal at the data layer (NEW — 2026-04-28)
+
+Closes the gap left by Fix D. Three coordinated changes across both repos.
+
+**F1. ddp-sync — stop producing bill-history docs**
+
+**File:** `ddp-sync/src/ddp_sync/pipelines/bill_sync.py`
+
+- Delete `format_bill_history_chunk()` method (lines 541-683). Only caller is `sync_bill()`, which is also being modified.
+- In `sync_bill()`, delete the bill-history production block: lines 981-1011 (the `history_chunk` initialization, the `DocumentMetadata` for bill-history, and the first `ingest_document()` call inside the `try` block).
+- Keep `extract_metadata_from_openstates()` call (line 985) and the `extra_metadata["slug"] = bill_slug` assignment — both are still needed by the bill-votes branch (line 1026).
+- Keep the bill-votes branch (lines 1013-1041) untouched. `bill-votes` docs remain the data source for the `legislator-votes` reverse index built by `build_legislator_votes.py`.
+
+**File:** `ddp-sync/src/ddp_sync/sync/handlers/bill.py`
+
+- Delete line 164: `document_ids.append(f"bill-history-{item_id}")`. This list is purely for accounting; harmless if left, but cleaner to remove.
+
+**Operational baseline shift:** After this change, `sync_bill()` only produces `bill-votes` docs from OpenStates data per bill. `chunks_created` per bill will roughly halve. This is the new baseline — not a regression. Document in:
+- The deploy commit message
+- The DDP-Sync README (under sync metrics section)
+- Any internal Slack/Notion sync-status notes Ramon checks during sync runs
+
+If sync-status alerting is configured anywhere on `chunks_created` thresholds, adjust the threshold or temporarily mute during the deploy window.
+
+**Deploy verification before proceeding to F2:**
+
+ddp-sync runs as a separate service (port 8001 per README). Before running F2, verify the new code is live and old workers are drained:
+
+1. After `git pull && systemctl restart ddp-sync` (or equivalent), confirm the running process is on the new commit (e.g., `systemctl status ddp-sync` or check process start time).
+2. Trigger a single-bill on-demand sync via the unified API and confirm the response does NOT include any `bill-history-*` document IDs.
+3. Only then proceed to F2. If old workers are still serving requests due to systemd lingering, repeat step 2 until consistently clean.
+
+**F2. Pinecone flush — delete existing bill-history chunks**
+
+**File (new):** `votebot/scripts/flush_bill_history.py`
+
+One-shot script that calls `vector_store.delete(filter={"document_type": "bill-history"})`. The existing `VectorStore.delete()` method (`src/votebot/services/vector_store.py:255-286`) already supports filter-based deletion via Pinecone's metadata-filter delete API. Doc IDs are uniquely prefixed (`bill-history-{webflow_id}`); zero risk to other document types.
+
+**Scale:** ~1,170 bills currently in Pinecone (per Webflow CMS count). Bill-history docs are short single-page text blocks, typically chunked into 1–3 vectors each. Estimated total deletion: ~1,500–3,500 vectors. Well within Pinecone's filter-delete capacity for a single call. Script should still wrap the call in a tenacity retry decorator (3 attempts, exponential backoff) matching the pattern used elsewhere in `vector_store.py`.
+
+**Pre-flight check (before delete):**
+```python
+# Count what we're about to delete
+results = await vector_store.query(
+    query="legislative history",  # broad semantic query
+    top_k=10000,
+    filter={"document_type": "bill-history"},
+)
+pre_count = len(results)
+print(f"About to delete {pre_count} bill-history vectors")
+# Prompt for confirmation before proceeding
+```
+
+**Post-delete verification and persisted count:**
+```python
+# After delete, re-query to confirm zero remaining
+post_results = await vector_store.query(
+    query="legislative history",
+    top_k=10000,
+    filter={"document_type": "bill-history"},
+)
+post_count = len(post_results)
+deleted = pre_count - post_count
+
+# Log to stdout AND append to a persistent record for the eval pipeline
+print(f"Deleted {deleted} bill-history vectors. Remaining: {post_count}")
+# Write to logs/eval/flush_bill_history.json so evaluate_production.py
+# can include it in subsequent reports
+record = {
+    "timestamp": datetime.utcnow().isoformat(),
+    "pre_count": pre_count,
+    "post_count": post_count,
+    "deleted": deleted,
+}
+Path("logs/eval/flush_bill_history.json").write_text(json.dumps(record, indent=2))
+```
+
+If `post_count > 0`, that's a partial-delete signal. Re-running the script with the same filter is idempotent (Pinecone metadata-filter delete is a set operation, not a sequence of individual deletes), so a second run is safe and should drive the count to zero. If a second run still leaves vectors, escalate — likely a Pinecone API issue requiring support contact.
+
+**Reversibility:** Bill-history docs are fully reconstructable from OpenStates. If a rollback is ever needed:
+1. Revert the F1 commit in ddp-sync (`format_bill_history_chunk` and the production block).
+2. Run `python scripts/sync.py bill --batch --jurisdiction <code>` (or backload all) — the restored producer regenerates the chunks from current OpenStates data.
+
+This means F2 is recoverable in ~1 batch sync run, not a permanent data loss event. Worth keeping the deletion script and the F1 diff easily revertible (single commit each, not bundled with other changes).
+
+**Optional defensive backup** (can skip if Ramon is comfortable with reconstruct-from-OpenStates as the rollback path):
+- Before deletion, dump bill-history doc IDs and metadata to a local JSON file via `vector_store.list()` for manual inspection if needed later.
+- This is belt-and-suspenders; the OpenStates regeneration path makes it strictly optional.
+
+Run after F1 is deployed and verified per the deploy verification step above. Running before would leave a window where the next ddp-sync run repopulates the chunks.
+
+**F3. votebot — extend live-tool trigger to read conversation history**
+
+**File:** `votebot/src/votebot/core/agent.py`
+
+Closes the only remaining UX gap exposed by F1+F2: a user mid-conversation about HR 7147 asking "is it still active?" without re-naming the bill. The current `_should_use_bill_votes_tool()` only inspects the current message, so this kind of follow-up doesn't trigger the live tool. With bill-history gone from Pinecone, these queries would otherwise get a vague summary-based answer instead of fresh OpenStates data.
+
+Modify `_should_use_bill_votes_tool()` (line 992) to accept `conversation_history`:
+
+```python
+def _should_use_bill_votes_tool(
+    self,
+    rag_confidence: float,
+    message: str,
+    page_context=None,
+    conversation_history: list[dict] | None = None,  # NEW
+) -> bool:
+    # ... existing logic ...
+
+    # NEW: When current message lacks a bill identifier, scan USER messages
+    # in conversation history. Bot messages are excluded — bot answers can list
+    # tangentially-mentioned bills (e.g., "...similar bills like HB 12 and SB 34...")
+    # which would otherwise trigger the live tool for a bill the user never asked about.
+    has_bill_in_history = False
+    if not has_bill_identifier and conversation_history:
+        for msg in reversed(conversation_history[-6:]):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "") or ""
+            extracted_id, _ = self._extract_bill_from_text(content)
+            if extracted_id:
+                has_bill_in_history = True
+                break
+
+    should_enable = (
+        is_vote_query or
+        has_bill_identifier or
+        has_bill_in_history or  # NEW
+        is_bill_page_status_query or
+        (rag_confidence < very_low_threshold and is_bill_inquiry)
+    )
+```
+
+Update both call sites to pass `conversation_history`:
+
+- Line 381 (`process_message`): `enable_bill_votes = self._should_use_bill_votes_tool(rag_confidence, message, page_context, conversation_history)`
+- Line 565 (`process_message_stream`): same, both already have `conversation_history` in scope.
+
+**Backwards compatibility:** The new `conversation_history` parameter has `= None` default, so any existing or future caller that doesn't pass it continues to behave as before (no history scan, just current-message inspection). No breaking change.
+
+**Codebase audit step before merging F3:** Run `grep -rn "_should_use_bill_votes_tool" src/` to confirm only the two known call sites at lines 381 and 565 exist. If any test fixture or other internal caller is found, update it to pass `conversation_history` explicitly (or leave it relying on the default).
+
+Reuses the existing `_extract_bill_from_text()` helper at line 1882 — same regex patterns used by `_prefetch_bill_info` Method 3 and `_verify_legislator_vote`. No new extraction logic.
+
+**Mirror change in `_prefetch_bill_info` Method 3 (line 1182):**
+
+Method 3 has the same false-positive risk — it currently scans all roles and would resolve to a bot-mentioned bill that the user never asked about. To preserve the "F3 and Method 3 agree by construction" guarantee, apply the same user-only filter to Method 3:
+
+```python
+# Method 3: Search USER messages in conversation history for bill identifiers
+if not bill_identifier and conversation_history:
+    for msg in reversed(conversation_history[-6:]):
+        if msg.get("role") != "user":  # NEW: skip bot messages
+            continue
+        content = msg.get("content", "")
+        extracted_id, extracted_jurisdiction = self._extract_bill_from_text(content)
+        if extracted_id:
+            bill_identifier = extracted_id
+            ...
+```
+
+Without this mirror change, F3 might decide "fire the tool" (no bill found in user history → tool doesn't fire) while Method 3 still resolves a bot-mentioned bill (or vice versa). With both filtering to user-only, the agreement holds.
+
+**Multi-bill conversation handling:**
+
+The reverse iteration (`for msg in reversed(conversation_history[-6:])`) returns the **most recently mentioned** bill identifier first. Same iteration order as `_prefetch_bill_info` Method 3 (line 1182), which is the function that actually does the bill resolution after F3 decides to fire the tool.
+
+Because F3 and `_prefetch_bill_info` use **identical extraction logic on the same input**, they are guaranteed to agree on which bill to use. F3's job is binary (fire the tool or not); `_prefetch_bill_info` does the resolution. There is no possibility of F3 firing the tool for one bill while `_prefetch_bill_info` fetches a different one.
+
+Edge cases and behavior:
+- **Single bill in history** → tool fires with that bill. ✓
+- **Multiple bills in history** → tool fires with the most recent (last-mentioned by turn order). ✓
+- **No bill in history, no bill in current message** → tool does NOT fire, falls through to existing low-confidence + bill_inquiry heuristic. Same as today.
+- **Conversation history beyond 6 turns** → ignored. Matches the existing convention used by `_prefetch_bill_info` Method 3 — kept consistent intentionally so users don't see different behavior between the firing decision and the resolution.
+
+**Performance:**
+The scan adds up to 6 regex evaluations per message in the worst case (when current message has no bill ID). Each regex runs against a single message string (typically <1KB). Negligible vs. the existing retrieval and LLM-call overhead. No load test added — would be over-engineered for this scope.
+
+**Why F1 + F2 + F3 together:** F1 stops the producer, F2 cleans the existing leak, F3 preserves UX for the rare conversational-followup case where the user has lost their explicit bill identifier. F1 alone would let stale chunks linger; F2 alone would be reverted by the next sync; F3 alone doesn't solve the leak.
+
+**Tests:**
+
+*F1:*
+- After deploy, run a single-bill on-demand sync (`/votebot/v1/sync/unified` with `mode=single`) and confirm no `bill-history-*` doc IDs appear in the response.
+- Query Pinecone directly: `vector_store.query(filter={"document_type": "bill-history"}, top_k=10)` should return only pre-existing chunks (will be cleaned up by F2). Critically, the count should NOT increase across multiple test syncs.
+
+*F2:*
+- After flush, query Pinecone: `vector_store.query(filter={"document_type": "bill-history"}, top_k=10)` should return zero matches.
+- Run a single-bill sync after the flush and re-query — count should stay at zero (verifies F1 is holding).
+
+*F3 — expanded test matrix:*
+1. **Happy path**: turn 1 user "Tell me about HR 7147" → bot responds → turn 2 user "is it still active?" — confirm `bill_votes_tool_used: true` on turn 2.
+2. **Multi-bill history**: turn 1 mentions HR 7147, turn 3 mentions HB 1234, turn 5 user "what's the status?" — confirm tool fires with the most recently mentioned bill (HB 1234) by checking the response references HB 1234, not HR 7147.
+3. **No bill in conversation**: empty or non-bill conversation, current message "what's the status?" — confirm tool does NOT fire (falls through to existing low-confidence path).
+4. **Bill mentioned ONLY in bot response, not in any user message**: turn 1 user "tell me about immigration bills", turn 2 bot mentions HR 7147 in its answer, turn 3 user "is it active?" — confirm tool does NOT fire (user-only filter rejects bot mentions). This is the false-positive case the user-mention dominance guard prevents.
+4b. **Bill mentioned in user message AND bot response**: turn 1 user "tell me about HR 7147", turn 2 bot mentions HR 7147 + tangential HB 1234, turn 3 user "is it active?" — confirm tool fires for HR 7147 (the user mention) and not HB 1234 (bot-only).
+5. **Bill mentioned beyond 6-turn window**: turn 1 mentions HR 7147, turns 2–7 unrelated, turn 8 "what's the status?" — confirm tool does NOT fire (consistent with `_prefetch_bill_info` Method 3 depth limit).
+6. **Ambiguous/malformed reference**: turn 1 user "I'm interested in resolution 7147" (no bill prefix) → turn 2 "is it active?" — confirm tool does NOT fire (regex doesn't match, no false positive).
+7. **Backward-compat**: call `_should_use_bill_votes_tool(rag_confidence, message, page_context)` without `conversation_history` argument — confirm function still works (default `None` path).
+
+*Production validation:*
+
+- Pull 7 days of logs after deploy and re-run the leak check (`'bill-history' in retrieval_sources`). Should be 0.
+- **Add automated check to `scripts/evaluate_production.py`**: when generating the analytics report, surface a `bill_history_leak_count` metric. Any non-zero value flags a regression. This becomes a permanent canary on every future eval run, not a one-shot post-deploy check.
+- Run the eval at days 7, 14, and 30 post-deploy as a sustained validation window. Bills sync runs spread across days; any latent producer path missed by F1 (e.g., a code path called only on backload mode) would surface within this window.
+
+**Why not also patch the general-path retrieval directly?**
+
+We considered adding `document_type: {"$ne": "bill-history"}` to the unfiltered queries at `retrieval.py:206-211` and `retrieval.py:572-583`. Decided against it: that's a band-aid that only addresses one document type. Removing the data at its source is permanent and self-enforcing — no future read path can ever surface bill-history because it doesn't exist.
+
+Fixes B through F together ensure live, complete, and uncontaminated OpenStates data is used for any status query, regardless of page type or whether the bill identifier appears in the current message.
 
 ---
 
@@ -395,13 +613,49 @@ logger.info("Published button cache invalidation", slug=bill_slug, version_note=
 
 ## Implementation Order
 
-1. **Fixes B–E (stale status)** — ALL SHIPPED. Fix B: bill page status queries trigger tool (commit `52b8d80`). Fix C: resolve bill from Webflow slug (commit `ee1227a`). Fix D: remove stale bill-history from Pinecone retrieval (commit `b518132`). Fix E: pass full action history to LLM (commits `d0fed09`, `6f756c7`). See `docs/TROUBLESHOOTING.md` for full details.
-2. **Backend caching + logging + feature flag** — ButtonCache, agent changes, logger fields. Deploy with flag off.
-3. **Frontend buttons** — Widget UI, handlers, accessibility. Deploy with CloudFlare purge.
-4. **Enable feature flag** — Set `VOTEBOT_QUICK_ACTION_BUTTONS=true`, restart.
-5. **Cache invalidation from ddp-sync** — Publish on bill update, subscribe in VoteBot.
+1. **Fixes B–E (stale status, partial)** — SHIPPED. Fix B: bill page status queries trigger tool (commit `52b8d80`). Fix C: resolve bill from Webflow slug (commit `ee1227a`). Fix D (PARTIAL — completed by Fix F): bill-page bill-history removal from retrieval (commit `b518132`). Fix E: pass full action history to LLM (commits `d0fed09`, `6f756c7`). See `docs/TROUBLESHOOTING.md` for full details.
+2. **Fix F — Complete bill-history removal** — Ships before Phase 2. Order:
+   - F3 first: ship `_should_use_bill_votes_tool()` conversation-history extension to votebot, plus the mirror change to `_prefetch_bill_info` Method 3 (purely additive, safe to deploy ahead of data changes).
+   - F1: ship ddp-sync producer removal. Deploy. Verify next on-demand sync creates no new bill-history docs.
+   - F2: run Pinecone flush script once. Verify count is 0.
+   - Validation: pull 7 days of post-deploy logs, re-run the leak check. Expect 0 bill-history retrievals.
 
-Steps 1–2 can deploy without frontend changes. Step 3 is a separate widget deploy. Step 4 is an env var change. Step 5 is a ddp-sync change.
+   **Release sequencing — `scripts/deploy_fix_f.sh`** (or equivalent runbook).
+   The F1 → F2 sequence is the highest-risk part of the rollout (window where a missed verification step would either leave stale chunks regenerating or delete before the producer is shut down). Codify the sequence in a single fail-fast script:
+   ```bash
+   #!/bin/bash
+   set -euo pipefail
+   # Step 1: Verify ddp-sync is on the new commit (no bill-history production)
+   echo "Probing ddp-sync for bill-history production..."
+   PROBE_RESPONSE=$(curl -sf -X POST "$DDP_SYNC_URL/votebot/v1/sync/unified" \
+     -H "Authorization: Bearer $API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"content_type":"bill","mode":"single","slug":"<known-test-bill-slug>"}')
+   if echo "$PROBE_RESPONSE" | grep -q "bill-history-"; then
+     echo "FAIL: ddp-sync still producing bill-history docs. F1 not yet deployed?"
+     exit 1
+   fi
+   echo "OK: ddp-sync probe clean."
+
+   # Step 2: Run the flush
+   echo "Running Pinecone flush..."
+   PYTHONPATH=src .venv/bin/python scripts/flush_bill_history.py --confirm
+
+   # Step 3: Post-flush sanity check
+   POST_COUNT=$(jq -r '.post_count' logs/eval/flush_bill_history.json)
+   if [ "$POST_COUNT" != "0" ]; then
+     echo "FAIL: $POST_COUNT bill-history vectors remain after flush."
+     exit 1
+   fi
+   echo "OK: Pinecone bill-history count is 0."
+   ```
+   Manual sequencing remains possible (Ramon's preferred ops style is SSH + manual command). The script is just a guardrail that turns "did I remember to verify ddp-sync first?" into a fail-fast exit code.
+3. **Backend caching + logging + feature flag** — ButtonCache, agent changes, logger fields. Deploy with flag off.
+4. **Frontend buttons** — Widget UI, handlers, accessibility. Deploy with CloudFlare purge.
+5. **Enable feature flag** — Set `VOTEBOT_QUICK_ACTION_BUTTONS=true`, restart.
+6. **Cache invalidation from ddp-sync** — Publish on bill update, subscribe in VoteBot.
+
+Step 2 is independent of the buttons feature and can deploy on its own. Steps 1–3 can deploy without frontend changes. Step 4 is a separate widget deploy. Step 5 is an env var change. Step 6 is a ddp-sync change.
 
 ### Rollback
 

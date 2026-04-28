@@ -50,7 +50,7 @@ Each source implements an async generator `fetch(**config)` that yields `Documen
 `MetadataExtractor` normalizes raw API data into a `DocumentMetadata` dataclass with standardized fields:
 
 - `document_id` — unique ID like `"bill-openstates-HB363"` or `"legislator-ocd-person/abc123"`
-- `document_type` — one of: `bill`, `bill-text`, `bill-history`, `bill-votes`, `legislator`, `legislator-votes`, `organization`, `training`
+- `document_type` — one of: `bill`, `bill-text`, `bill-votes`, `legislator`, `legislator-votes`, `organization`, `training` (note: `bill-history` was removed in Fix F — bill status/actions now served exclusively by live OpenStates API)
 - `source`, `title`, `jurisdiction`, `bill_id`, `legislator_id`, `url`
 - `extra` dict — additional filterable fields (`webflow_id`, `slug`, `party`, `chamber`, `bill_prefix`, `bill_number`, etc.)
 
@@ -119,7 +119,7 @@ The entry point for actual sync operations. The `UnifiedSyncService` dispatches 
 
 | Handler | What it does |
 |---------|-------------|
-| `BillHandler` | Fetches bills from Webflow CMS, enriches with OpenStates data (legislative history, vote records, PDF text), creates multiple document types per bill (`bill`, `bill-text`, `bill-history`, `bill-votes`). Batch mode chains `BillVersionSyncService` after OpenStates history sync to check for newer bill text versions and update Webflow CMS `status`/`status-date` |
+| `BillHandler` | Fetches bills from Webflow CMS, enriches with OpenStates data (vote records, PDF text), creates document types per bill (`bill`, `bill-text`, `bill-votes`). Bill status/action history is NOT ingested — served live via OpenStates API at query time (Fix F). Batch mode chains `BillVersionSyncService` to check for newer bill text versions and update Webflow CMS `status`/`status-date` |
 | `LegislatorHandler` | Fetches legislators from Webflow CMS + OpenStates, creates `legislator` and `legislator-votes` documents |
 | `OrganizationHandler` | Fetches orgs from Webflow CMS with their bill positions, creates `organization` documents |
 | `TrainingHandler` | Ingests static training docs (DDP FAQ, etc.) |
@@ -240,13 +240,13 @@ All the pre-fetched data is layered in priority order (most authoritative first)
 - Legislator pages: filter by `legislator_id` -> `webflow_id` -> `slug` (fallback chain)
 - Organization pages: filter by `webflow_id` or `slug`
 
-**Bill Retrieval** (`_retrieve_bill_with_text_priority()`): 6-phase pipeline:
+**Bill Retrieval** (`_retrieve_bill_with_text_priority()`): multi-phase pipeline:
 
 | Phase | document_type filter | Purpose |
 |-------|---------------------|---------|
 | 1 | `bill-text` | Actual legislative PDF text (highest priority) |
 | 2 | `bill` | CMS summary/description |
-| 3 | `bill-history` | Legislative action timeline |
+| 3 | (removed) | Was `bill-history` — removed in Fix F. Bill status/actions now served live via OpenStates `bill_votes` tool |
 | 4a-i | `bill` (targeted query) | Bill's own chunks containing org position sections |
 | 4a-ii | `organization` | Standalone org docs that reference this bill |
 | 4b | `bill-votes` | Vote records |
