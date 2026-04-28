@@ -599,8 +599,8 @@ class GroundTruthFetcher:
         jurisdiction_name = STATE_NAMES.get(jurisdiction, jurisdiction)
 
         # Resolve organization references
-        support_org_ids = fields.get("member-organizations", [])
-        oppose_org_ids = fields.get("organizations-oppose", [])
+        support_org_ids = fields.get("member-organizations") or []
+        oppose_org_ids = fields.get("organizations-oppose") or []
 
         support_org_names = [
             self._organization_cache.get(org_id, {}).get("name", "")
@@ -672,8 +672,8 @@ class GroundTruthFetcher:
             return None
 
         # Resolve bill references
-        bills_support_ids = fields.get("bills-support", [])
-        bills_oppose_ids = fields.get("bills-oppose", [])
+        bills_support_ids = fields.get("bills-support") or []
+        bills_oppose_ids = fields.get("bills-oppose") or []
 
         bills_support_names = [
             self._bill_cache.get(bill_id, {}).get("identifier", "")
