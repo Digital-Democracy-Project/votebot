@@ -3580,6 +3580,56 @@ Any non-zero value flags a regression — investigate immediately. Suggested cad
 
 ---
 
+## Quick-Action Buttons / Button Cache
+
+Feature shipped 2026-04-29 (v8 of `plans/PLAN-quick-action-buttons.md`). Gated on `VOTEBOT_QUICK_ACTION_BUTTONS=false` by default — entire feature is inert until the flag is flipped.
+
+### Buttons not appearing on bill pages
+
+Verify each layer:
+
+1. **Server-side flag**: `curl https://api.digitaldemocracyproject.org/votebot/v1/features` should return `{"quick_action_buttons_enabled": true}`. If false, set `VOTEBOT_QUICK_ACTION_BUTTONS=true` in `~/votebot/.env` and restart `votebot.service`.
+2. **Widget version**: open browser dev tools, check the loaded `ddp-chat.min.js` matches the latest in `chat-widget/dist/`. If not, purge CloudFlare cache for that file.
+3. **Page context type**: buttons render only when `page_context.type === 'bill'`. Check `window.DDPChatConfig.pageContext` or the URL query (`?ddp_url=...`) resolves to a bill.
+4. **Browser console**: look for `[DDPChat] Features fetch failed` warnings — features endpoint is required for buttons to render.
+
+### Cache hit rate is lower than expected
+
+Buttons on bill pages should show `cache_hit: true` in `query_processed` events on the second tap of "Summarize" or "Pros and cons" for the same bill (within 7 days, and assuming no bill version change in between).
+
+If cache_hit stays `false` across runs:
+
+1. **Verify Redis is up**: `redis-cli -u $REDIS_URL ping` — should return `PONG`. ButtonCache fails open (returns None) when Redis is down, so misses everything.
+2. **Inspect cache contents**: `redis-cli -u $REDIS_URL --scan --pattern 'votebot:button:*'` — should show entries for recently-summarized bills. If empty, `set()` calls are failing — check votebot logs for "ButtonCache: set failed".
+3. **Slug mismatch**: cache is keyed on `page_context.slug`. If the widget passes a different slug between visits (rare but possible if Webflow sends slug variations), each visit creates a new cache entry. Compare `page_context.slug` in two consecutive `query_processed` events.
+
+### Cached responses are stale (showing old bill text after an amendment)
+
+Cache invalidation should happen automatically when DDP-Sync detects a bill version change and re-ingests the new text:
+
+1. **Check the publisher**: `grep "Published button cache invalidation" ~/ddp-sync/logs/*` for recent activity. Should fire any time a bill text version changes (engrossed, enrolled, substitute, etc.).
+2. **Check the subscriber**: `grep "ButtonCache: invalidation event handled\|ButtonCache subscriber" ~/votebot/logs/*`. Should show subscriber-connected at startup, plus one log line per processed event.
+3. **Force-clear**: `curl -X DELETE -H "Authorization: Bearer $API_KEY" https://api.digitaldemocracyproject.org/votebot/cache/button/{slug}` — admin endpoint, returns the deleted-count.
+4. **Worst case fallback**: every cache entry has a 7-day safety TTL, so any orphaned stale entry self-cleans within a week even if pub/sub fails entirely.
+
+### Subscriber stops processing events after a Redis blip
+
+The subscriber is wrapped in a supervisor loop with exponential backoff (1s → 60s cap). It should auto-reconnect within ~1 minute of Redis recovery. Look for:
+
+- `ButtonCache subscriber connection error; will reconnect` (during the outage)
+- `ButtonCache subscriber connected` (after recovery)
+
+If the supervisor itself crashed (logs show `ButtonCache: subscriber listener crashed` followed by no reconnect attempts), restart `votebot.service`. The `start_invalidate_subscriber()` call in the FastAPI lifespan will rebuild the supervisor task fresh.
+
+### Reconciliation didn't catch a stale entry
+
+Startup reconciliation iterates `ddp:bill_version:*` records (one per actively-synced bill, ~1000) and invalidates cached entries whose `cached_at` precedes the bill's `last_checked`. If a stale entry persists across a votebot restart:
+
+1. **Check that ddp-sync stores `bill_slug`**: `redis-cli -u $REDIS_URL HGET ddp:bill_version:{webflow_id} bill_slug` (the slug is needed for the lookup). Bills synced before 2026-04-29 might lack the field — those rely on the 7-day TTL only.
+2. **Check timestamps**: compare cached_at on the cache entry vs last_checked on the bill_version record. Reconciliation only invalidates when cached_at < last_checked.
+
+---
+
 ## Getting Help
 
 If these troubleshooting steps don't resolve your issue:

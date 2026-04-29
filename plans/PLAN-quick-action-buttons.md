@@ -1,7 +1,7 @@
 # PLAN: Quick-Action Buttons with Response Caching
 
-**Date:** 2026-03-30 (rev 2026-04-28: Fix D scope correction + Fix F added; rev 2026-04-28b: PM review feedback incorporated; rev 2026-04-28c: second-pass PM feedback — user-mention dominance, release script, deleted-count logging; rev 2026-04-29: Fix F shipped and verified in production)
-**Status:** v7 — Fix F shipped 2026-04-29; Phases 2–5 still outstanding
+**Date:** 2026-03-30 (rev 2026-04-28a/b/c: Fix D scope correction + Fix F + PM review iterations; rev 2026-04-29a: Fix F shipped + verified; rev 2026-04-29b: Phases 2/3/5 implemented + PM-review polish)
+**Status:** v8 — All phases (1–5) implemented; Phase 4 (flag enable) is the only remaining manual step
 
 **Motivation:** Analysis of 1,927 production queries shows 3 dominant question patterns that account for ~63% of first messages on bill pages. Adding quick-action buttons improves UX (one-tap access to common answers) and, with caching, reduces AI token usage and latency for summary and pros/cons responses. This also directly fixes the stale bill status problem (HR 7147 incident) by ensuring status queries trigger the live OpenStates lookup.
 
@@ -688,12 +688,24 @@ logger.info("Published button cache invalidation", slug=bill_slug, version_note=
    echo "OK: Pinecone bill-history count is 0."
    ```
    Manual sequencing remains possible (Ramon's preferred ops style is SSH + manual command). The script is just a guardrail that turns "did I remember to verify ddp-sync first?" into a fail-fast exit code.
-3. **Backend caching + logging + feature flag** — ButtonCache, agent changes, logger fields. Deploy with flag off.
-4. **Frontend buttons** — Widget UI, handlers, accessibility. Deploy with CloudFlare purge.
-5. **Enable feature flag** — Set `VOTEBOT_QUICK_ACTION_BUTTONS=true`, restart.
-6. **Cache invalidation from ddp-sync** — Publish on bill update, subscribe in VoteBot.
+3. **Backend caching + logging + feature flag** — ✅ SHIPPED 2026-04-29 (votebot `e8cb33c` + `b000c03`). ButtonCache service (Redis-backed), agent button-aware processing, query_logger fields (`button_type`, `cache_hit`), `quick_action_buttons_enabled` flag, `/votebot/v1/features` discovery endpoint, `DELETE /votebot/v1/cache/button/{slug}` admin endpoint. Deployed with flag off — entire feature inert until Step 5.
+4. **Frontend buttons** — ✅ SHIPPED 2026-04-29 (votebot `8fc9b53` + `b000c03`). Three buttons render below input on bill pages, fetch `/features` at init, hide-on-send + re-show on bill navigation, WCAG 2.1 AA (native `<button>`, aria-labels, focus indicators, focus-shift on hide). Minified bundle rebuilt. CloudFlare cache purge required at enablement.
+5. **Cache invalidation from ddp-sync** — ✅ SHIPPED 2026-04-29 (ddp-sync `58956ba` + votebot `e8cb33c` / `b000c03`). DDP-Sync publishes `{slug, reason, version_note}` on `votebot:cache:invalidate` after successful bill text re-ingestion (`chunks_created > 0`). VoteBot subscribes on startup with auto-reconnect supervisor (exponential backoff 1s→60s). Startup reconciliation iterates `ddp:bill_version:*` records (using new `bill_slug` field) and invalidates entries with `cached_at` < `last_checked`. Subscriber runs on all workers — invalidation is idempotent, leader election was deemed over-engineered at 2-worker scale.
+6. **Enable feature flag** — Manual step. Add `VOTEBOT_QUICK_ACTION_BUTTONS=true` to `~/votebot/.env`, restart `votebot.service`, purge CloudFlare cache for `ddp-chat.min.js`. Watch the eval canary at days 7/14/30 for `cache_hit` distribution and `bill_history_leak_count` (still must be 0 from Fix F).
 
-Step 2 is independent of the buttons feature and can deploy on its own. Steps 1–3 can deploy without frontend changes. Step 4 is a separate widget deploy. Step 5 is an env var change. Step 6 is a ddp-sync change.
+Step 2 was independent of the buttons feature and shipped first; Step 5 was previously the cache-invalidation rollout, now bundled with Steps 3–4.
+
+### Phase 2/3/5 production verification plan
+
+To run after Step 6 (enabling the flag):
+
+1. Open the chat widget on a known-good bill page (e.g., `/bills/one-big-beautiful-bill-act-hr1-2025`). Three buttons should render below the input.
+2. Tap "Summarize this bill" — verify response appears, `query_processed` event in JSONL has `button_type: "summary"` and `cache_hit: false`.
+3. Refresh the page, open the widget again, tap "Summarize this bill" — should now serve from cache. Event has `button_type: "summary"` and `cache_hit: true`. Total `duration_ms` should be near-instant (<100ms vs 8–13s for the cache-miss path).
+4. Tap "Latest status & votes" twice in a row — both should fire the live tool (`bill_votes_tool_used: true`, `cache_hit` not applicable since status_votes is never cached).
+5. Tap "Pros and cons" — repeats step 2/3 on a different cached key.
+6. Trigger a real bill version change via DDP-Sync (or wait for the daily 04:00 UTC scheduler to find one). Verify the cache for that bill is cleared by tapping "Summarize" again — should fire a fresh LLM call (`cache_hit: false`).
+7. Manual cache clear: `curl -X DELETE -H "Authorization: Bearer $API_KEY" https://api.digitaldemocracyproject.org/votebot/cache/button/{slug}` — should return `{"slug": ..., "deleted": 0..2}`. Steps 1–3 can deploy without frontend changes. Step 4 is a separate widget deploy. Step 5 is an env var change. Step 6 is a ddp-sync change.
 
 ### Rollback
 

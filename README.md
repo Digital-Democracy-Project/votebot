@@ -23,6 +23,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
   - Party affiliation enrichment for vote records
 - **Web Search Fallback**: Automatically searches the web (via OpenAI web search + Tavily) when RAG confidence is low
 - **User Analytics & Behavioral Logging**: Event-based logging system with three event types (`message_received`, `query_processed`, `conversation_ended`), three-level identity model (visitor, session, conversation), two-level intent classification, grounding status tracking, fallback detection, and conversation boundary analysis. All events logged to date-partitioned JSONL files for offline evaluation and analytics.
+- **Quick-Action Buttons (feature-flagged)**: Three preset buttons on bill pages — "Summarize this bill", "Pros and cons", "Latest status & votes". Summary + pros/cons responses are cached in Redis (slug-keyed, amendment-triggered invalidation via pub/sub from DDP-Sync, 7-day safety TTL). Status/votes button is never cached — always hits live OpenStates. Gated on `VOTEBOT_QUICK_ACTION_BUTTONS` (default `false`). See [plans/PLAN-quick-action-buttons.md](plans/PLAN-quick-action-buttons.md).
 - **Opinion Elicitation (Jigsaw — planned)**: Guided opinion capture through natural conversation with 5 elicitation modes, multi-position opinion vectors, Polis integration for clustering, Memberstack authentication, and Catalist voter file verification. See [plans/PLAN-jigsaw-overview.md](plans/PLAN-jigsaw-overview.md) for the staged rollout plan.
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
@@ -106,6 +107,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `QUERY_LOG_DIR` | Directory for JSONL query logs (default: logs/queries) | No |
 | `SCHEDULER_ENABLED` | *Deprecated* — sync scheduling has moved to [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) | No |
 | `SIMILARITY_THRESHOLD` | RAG similarity threshold (default: 0.1) | No |
+| `VOTEBOT_QUICK_ACTION_BUTTONS` | Enable quick-action buttons on bill pages + Redis response cache (default: false) | No |
 
 ## API Endpoints
 
@@ -192,6 +194,37 @@ curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=htt
   "status": "",
   "url": "https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025",
   "slug": "one-big-beautiful-bill-act-hr1-2025"
+}
+```
+
+### Feature Flags
+
+```
+GET /votebot/v1/features
+```
+
+Returns the set of feature flags relevant to the chat widget. Public (unauthenticated) — only exposes booleans, no secrets. Used by the embeddable widget to discover whether to render quick-action buttons on bill pages.
+
+**Response:**
+```json
+{
+  "quick_action_buttons_enabled": false
+}
+```
+
+### Button Cache Admin
+
+```
+DELETE /votebot/v1/cache/button/{slug}
+```
+
+Force-clear all cached button responses (`summary`, `pros_cons`) for a bill slug. Authenticated via Bearer token. Idempotent — returns the count of cache entries deleted (0–2). Useful when a manual content edit bypasses DDP-Sync's amendment detection. Normal cache invalidation is automatic via Redis pub/sub on bill version changes.
+
+**Response:**
+```json
+{
+  "slug": "hr-1234-2025",
+  "deleted": 2
 }
 ```
 
