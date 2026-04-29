@@ -633,7 +633,9 @@
                 console.warn('[DDPChat] Unknown quick-action button:', buttonType);
                 return;
         }
-        DDPUI.hideQuickActions();
+        // Buttons stay visible — disableQuickActions() is invoked via the
+        // shared disableInput() lifecycle, preventing double-fires while
+        // a request is in flight. Re-enabled when streaming completes.
         DDPChat.sendMessage(message, buttonType);
     }
 
@@ -656,11 +658,12 @@
             DDPWebSocket.storageSet('popup_open', '0');
         });
 
-        // Send button click
+        // Send button click. Quick-action buttons stay visible across the
+        // session — they're disabled mid-request via the input lifecycle in
+        // ui.js (disableInput/enableInput) and re-enabled when streaming ends.
         elements.sendButton.addEventListener('click', function() {
             var message = DDPUI.getInputValue();
             if (message.trim()) {
-                DDPUI.hideQuickActions();
                 DDPChat.sendMessage(message);
             }
         });
@@ -671,7 +674,6 @@
                 e.preventDefault();
                 var message = DDPUI.getInputValue();
                 if (message.trim()) {
-                    DDPUI.hideQuickActions();
                     DDPChat.sendMessage(message);
                 }
             }

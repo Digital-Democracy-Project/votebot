@@ -356,6 +356,11 @@ const DDPUI = (function() {
     function enableInput() {
         elements.chatInput.disabled = false;
         elements.sendButton.disabled = false;
+        // Quick-action buttons follow the same lifecycle — re-enable them whenever
+        // the input is re-enabled (i.e., when a streaming response completes).
+        // The buttons may not be visible on this page (general pages); enableQuickActions
+        // is a no-op in that case since it only touches the cached button list.
+        enableQuickActions();
         if (elements.chatPopup.classList.contains('open')) {
             elements.chatInput.focus();
         }
@@ -367,6 +372,9 @@ const DDPUI = (function() {
     function disableInput() {
         elements.chatInput.disabled = true;
         elements.sendButton.disabled = true;
+        // Disable quick-action buttons while a request is in-flight to prevent
+        // double-fires. Re-enabled when streaming completes (see enableInput above).
+        disableQuickActions();
     }
 
     /**
