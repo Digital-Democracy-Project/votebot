@@ -124,6 +124,14 @@ class ChatRequest(BaseModel):
         None,
         description="Optional previous messages in the conversation",
     )
+    button: str | None = Field(
+        None,
+        description=(
+            "Quick-action button identifier. One of 'summary', 'pros_cons', "
+            "or 'status_votes' when the user clicks a button; null for free-typed "
+            "messages. See plans/PLAN-quick-action-buttons.md."
+        ),
+    )
 
 
 class Citation(BaseModel):

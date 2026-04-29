@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # Webflow CMS runtime lookup for org positions
     webflow_org_lookup_enabled: bool = True
 
+    # Quick-action buttons (Summarize / Pros and cons / Latest status & votes).
+    # When False, button metadata in chat requests is ignored and cache is bypassed.
+    # See plans/PLAN-quick-action-buttons.md.
+    quick_action_buttons_enabled: bool = False
+
     # Pinecone
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))
     pinecone_environment: str = "us-east-1"

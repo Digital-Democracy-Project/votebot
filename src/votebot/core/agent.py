@@ -92,6 +92,94 @@ class VoteBotAgent:
         self.bill_votes = BillVotesService(self.settings)
         self.webflow_lookup = WebflowLookupService(self.settings)
 
+    def _normalize_button(self, button: str | None) -> str | None:
+        """Apply the feature flag and validate the button type.
+
+        Returns None if the feature is disabled or the button type isn't recognized.
+        Returns the canonical type string otherwise (one of summary / pros_cons / status_votes).
+        """
+        if not button:
+            return None
+        if not getattr(self.settings, "quick_action_buttons_enabled", False):
+            return None
+        from votebot.services.button_cache import ALL_BUTTON_TYPES
+        return button if button in ALL_BUTTON_TYPES else None
+
+    async def _maybe_serve_from_button_cache(
+        self,
+        *,
+        page_context: PageContext,
+        button: str | None,
+    ) -> tuple[str, list[Citation]] | None:
+        """Return (response, citations) on cache hit, or None on miss / non-cacheable / no slug."""
+        if not button:
+            return None
+        slug = getattr(page_context, "slug", None)
+        if not slug:
+            return None
+        from votebot.services.button_cache import CACHEABLE_TYPES, get_button_cache
+        if button not in CACHEABLE_TYPES:
+            return None
+        cached = await get_button_cache().get(slug, button)
+        if not cached:
+            return None
+        # Reconstruct Citation objects from the stored dicts so the streaming
+        # caller's citation pipeline doesn't have to know about the cache shape.
+        cit_objs = [
+            Citation(
+                source=c.get("source", ""),
+                document_id=c.get("document_id", ""),
+                excerpt=c.get("excerpt", ""),
+                url=c.get("url", ""),
+                relevance_score=c.get("relevance_score", 0.0),
+            )
+            for c in cached.get("citations", [])
+        ]
+        logger.info(
+            "ButtonCache: hit",
+            slug=slug,
+            button_type=button,
+            cached_at=cached.get("cached_at"),
+        )
+        return cached.get("response", ""), cit_objs
+
+    async def _populate_button_cache(
+        self,
+        *,
+        page_context: PageContext,
+        button: str | None,
+        response_text: str,
+        citations: list[Citation],
+        confidence: float,
+    ) -> None:
+        """Store a freshly-generated response in the button cache (cacheable types only)."""
+        if not button:
+            return
+        slug = getattr(page_context, "slug", None)
+        if not slug:
+            return
+        from votebot.services.button_cache import CACHEABLE_TYPES, get_button_cache
+        if button not in CACHEABLE_TYPES:
+            return
+        await get_button_cache().set(
+            slug,
+            button,
+            {
+                "response": response_text,
+                "citations": [
+                    {
+                        "source": c.source,
+                        "document_id": c.document_id,
+                        "excerpt": c.excerpt,
+                        "url": c.url,
+                        "relevance_score": c.relevance_score,
+                    }
+                    for c in citations
+                ],
+                "confidence": confidence,
+            },
+        )
+
     def _log_query(
         self,
         *,
@@ -116,6 +204,8 @@ class VoteBotAgent:
         retrieval_result: "RetrievalResult | None" = None,
         error: bool = False,
         error_type: str | None = None,
+        button_type: str | None = None,
+        cache_hit: bool | None = None,
     ) -> None:
         """Fire-and-forget log of a completed query to JSONL.
 
@@ -213,6 +303,8 @@ class VoteBotAgent:
                     fallback_reason=fallback_reason,
                     bill_votes_tool_used=result.bill_votes_tool_used,
                     bill_votes_tool_duration_ms=result.bill_votes_tool_duration_ms,
+                    button_type=button_type,
+                    cache_hit=cache_hit,
                     handoff_triggered=result.requires_human,
                     error=error,
                     error_type=error_type,
@@ -243,6 +335,7 @@ class VoteBotAgent:
         human_active: bool = False,
         client_ip: str | None = None,
         user_agent: str | None = None,
+        button: str | None = None,
         # Analytics fields
         visitor_id: str | None = None,
         conversation_id: str | None = None,
@@ -270,12 +363,56 @@ class VoteBotAgent:
         """
         _start_time = time.perf_counter()
 
+        # Normalize button — feature flag off OR unknown type means "no button"
+        effective_button = self._normalize_button(button)
+
         logger.info(
             "Processing message",
             session_id=session_id,
             page_type=page_context.type,
             message_preview=message[:100],
+            button=effective_button,
         )
+
+        # Step 0: Try button cache for cacheable button types
+        cache_hit_result = await self._maybe_serve_from_button_cache(
+            page_context=page_context,
+            button=effective_button,
+        )
+        if cache_hit_result is not None:
+            cached_response, cached_citations = cache_hit_result
+            cached_result = AgentResult(
+                response=cached_response,
+                citations=cached_citations,
+                confidence=0.9,  # cached responses are by definition high-confidence
+                requires_human=False,
+                tokens_used=0,
+                retrieval_count=0,
+                cached=True,
+            )
+            self._log_query(
+                session_id=session_id,
+                message=message,
+                result=cached_result,
+                page_context=page_context,
+                channel=channel,
+                start_time=_start_time,
+                human_active=human_active,
+                client_ip=client_ip,
+                user_agent=user_agent,
+                visitor_id=visitor_id,
+                conversation_id=conversation_id,
+                session_message_index=session_message_index,
+                conversation_message_index=conversation_message_index,
+                entry_referrer=entry_referrer,
+                page_url=page_url,
+                scroll_depth=scroll_depth,
+                time_on_page=time_on_page,
+                retrieval_result=None,
+                button_type=effective_button,
+                cache_hit=True,
+            )
+            return cached_result
 
         # Step 1: Retrieve relevant context
         retrieval_result = await self.retrieval.retrieve(
@@ -474,6 +611,16 @@ class VoteBotAgent:
             bill_votes_result=llm_response.bill_votes_result,
         )
 
+        # Populate the button cache for cacheable types (miss path).
+        if effective_button:
+            await self._populate_button_cache(
+                page_context=page_context,
+                button=effective_button,
+                response_text=result.response,
+                citations=result.citations,
+                confidence=result.confidence,
+            )
+
         # Fire-and-forget query logging
         self._log_query(
             session_id=session_id,
@@ -494,6 +641,8 @@ class VoteBotAgent:
             scroll_depth=scroll_depth,
             time_on_page=time_on_page,
             retrieval_result=retrieval_result,
+            button_type=effective_button,
+            cache_hit=False if effective_button else None,
         )
 
         return result
@@ -509,6 +658,7 @@ class VoteBotAgent:
         client_ip: str | None = None,
         user_agent: str | None = None,
         human_active: bool = False,
+        button: str | None = None,
         # Analytics fields
         visitor_id: str | None = None,
         conversation_id: str | None = None,
@@ -536,11 +686,69 @@ class VoteBotAgent:
         """
         _start_time = time.perf_counter()
 
+        # Normalize button — feature flag off OR unknown type means "no button"
+        effective_button = self._normalize_button(button)
+
         logger.info(
             "Processing message (streaming)",
             session_id=session_id,
             page_type=page_context.type,
+            button=effective_button,
         )
+
+        # Step 0: Try button cache for cacheable button types (summary / pros_cons).
+        # status_votes and free-typed messages skip this and run the full pipeline.
+        cache_hit_result = await self._maybe_serve_from_button_cache(
+            page_context=page_context,
+            button=effective_button,
+        )
+        if cache_hit_result is not None:
+            cached_response, cached_citations = cache_hit_result
+            yield StreamChunkData(
+                text=cached_response,
+                done=True,
+                citations=cached_citations,
+                metadata=ResponseMetadata(
+                    model="cached",
+                    tokens_used=0,
+                    retrieval_count=0,
+                    latency_ms=int((time.perf_counter() - _start_time) * 1000),
+                    cached=True,
+                ),
+            )
+            # Log the cache hit so analytics can measure hit rate + latency
+            stream_result = AgentResult(
+                response=cached_response,
+                citations=cached_citations,
+                confidence=0.9,  # cached responses are by definition high-confidence
+                requires_human=False,
+                tokens_used=0,
+                retrieval_count=0,
+                cached=True,
+            )
+            self._log_query(
+                session_id=session_id,
+                message=message,
+                result=stream_result,
+                page_context=page_context,
+                channel=channel,
+                start_time=_start_time,
+                human_active=human_active,
+                client_ip=client_ip,
+                user_agent=user_agent,
+                visitor_id=visitor_id,
+                conversation_id=conversation_id,
+                session_message_index=session_message_index,
+                conversation_message_index=conversation_message_index,
+                entry_referrer=entry_referrer,
+                page_url=page_url,
+                scroll_depth=scroll_depth,
+                time_on_page=time_on_page,
+                retrieval_result=None,
+                button_type=effective_button,
+                cache_hit=True,
+            )
+            return
 
         # Step 1: Retrieve relevant context
         retrieval_result = await self.retrieval.retrieve(
@@ -709,6 +917,17 @@ class VoteBotAgent:
                     ),
                 )
 
+                # Populate the button cache for cacheable types — only on miss path
+                # (cache hit path returned early at the top of this method).
+                if effective_button:
+                    await self._populate_button_cache(
+                        page_context=page_context,
+                        button=effective_button,
+                        response_text=full_response,
+                        citations=citations,
+                        confidence=confidence,
+                    )
+
                 # Log the completed streaming interaction
                 stream_result = AgentResult(
                     response=full_response,
@@ -739,6 +958,8 @@ class VoteBotAgent:
                     scroll_depth=scroll_depth,
                     time_on_page=time_on_page,
                     retrieval_result=retrieval_result,
+                    button_type=effective_button,
+                    cache_hit=False if effective_button else None,
                 )
             else:
                 yield StreamChunkData(text=chunk.text, done=False)

@@ -653,6 +653,9 @@ async def handle_user_message(
     page_url = payload.get("page_url")
     scroll_depth = payload.get("scroll_depth")
     time_on_page = payload.get("time_on_page")
+    # Quick-action button identifier (one of summary / pros_cons / status_votes,
+    # or null for free-typed messages). Agent applies the feature flag itself.
+    button = payload.get("button")
 
     # Store user message
     manager.add_message(session_id, "user", message)
@@ -801,6 +804,7 @@ async def handle_user_message(
             conversation_history=conversation_history,
             client_ip=client_ip,
             user_agent=user_agent,
+            button=button,
             visitor_id=session.get("visitor_id") if session else None,
             conversation_id=conversation_id,
             session_message_index=session_message_index,

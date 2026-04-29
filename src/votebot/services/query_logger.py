@@ -94,6 +94,8 @@ class QueryLogger:
         fallback_reason: str | None = None,
         bill_votes_tool_used: bool = False,
         bill_votes_tool_duration_ms: int | None = None,
+        button_type: str | None = None,
+        cache_hit: bool | None = None,
         handoff_triggered: bool = False,
         error: bool = False,
         error_type: str | None = None,
@@ -153,6 +155,8 @@ class QueryLogger:
             # "tool not used" from "field absent" — important for the OpenStates fire-rate metric.
             "bill_votes_tool_used": bill_votes_tool_used,
             "bill_votes_tool_duration_ms": bill_votes_tool_duration_ms,
+            "button_type": button_type,
+            "cache_hit": cache_hit,
             "handoff_triggered": handoff_triggered if handoff_triggered else None,
             "error": error if error else None,
             "error_type": error_type,

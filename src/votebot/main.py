@@ -14,6 +14,7 @@ from votebot.api.middleware.logging import LoggingMiddleware
 from votebot.api.routes import (
     chat_router,
     content_router,
+    features_router,
     health_router,
     websocket_router,
 )
@@ -29,22 +30,47 @@ logger = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: connect Redis. Shutdown: disconnect."""
+    """Startup: connect Redis + start button-cache subscriber. Shutdown: reverse."""
     setup_logging(settings.log_level)
 
-    # Connect Redis (still needed for Slack thread mapping + pub/sub)
+    # Connect Redis (used for Slack thread mapping, pub/sub, button cache)
     from votebot.services.redis_store import get_redis_store
     redis_store = get_redis_store()
     await redis_store.connect()
+
+    # Button cache: reconcile any cache entries that became stale while the
+    # service was down (covers missed pub/sub events), then start the live
+    # invalidation subscriber. Both are no-ops when Redis is unavailable
+    # or when quick_action_buttons_enabled is False — but we keep them
+    # running regardless of the flag so flipping the flag at runtime via
+    # env var + restart doesn't leave stale entries.
+    from votebot.services.button_cache import (
+        reconcile_on_startup,
+        start_invalidate_subscriber,
+    )
+    try:
+        await reconcile_on_startup(redis_store)
+    except Exception:
+        logger.warning("Button cache startup reconciliation failed", exc_info=True)
+    try:
+        await start_invalidate_subscriber(redis_store)
+    except Exception:
+        logger.warning("Button cache subscriber startup failed", exc_info=True)
 
     logger.info(
         "VoteBot started (chat-only mode)",
         version=settings.app_version,
         environment=settings.environment,
+        quick_action_buttons_enabled=settings.quick_action_buttons_enabled,
     )
 
     yield
 
+    from votebot.services.button_cache import stop_invalidate_subscriber
+    try:
+        await stop_invalidate_subscriber()
+    except Exception:
+        pass
     await redis_store.disconnect()
     logger.info("VoteBot shutdown complete")
 
@@ -77,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix=settings.api_prefix)
     app.include_router(chat_router, prefix=settings.api_prefix)
     app.include_router(content_router, prefix=settings.api_prefix)
+    app.include_router(features_router, prefix=settings.api_prefix)
     app.include_router(websocket_router)  # WebSocket at root level
 
     # Global exception handlers
