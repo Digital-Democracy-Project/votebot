@@ -12,8 +12,14 @@
 #   - Required env vars: DDP_SYNC_URL, API_KEY, TEST_BILL_SLUG.
 #
 # Usage:
+#   # From EC2 (preferred — DDP-Sync is a sibling service):
+#   export DDP_SYNC_URL=http://localhost:8001
+#   export API_KEY=<DDP-Sync internal API key>
+#
+#   # OR via the public proxy (requires DDP-API auth, not VoteBot's chat API_KEY):
 #   export DDP_SYNC_URL=https://api.digitaldemocracyproject.org
-#   export API_KEY=<your votebot api key>
+#   export API_KEY=<DDP-API proxy auth token>
+#
 #   export TEST_BILL_SLUG=<a known-good bill slug, e.g. one-big-beautiful-bill-act-hr1-2025>
 #   bash scripts/deploy_fix_f.sh
 
@@ -32,10 +38,18 @@ echo "DDP-Sync URL: $DDP_SYNC_URL"
 echo "Test bill:    $TEST_BILL_SLUG"
 echo
 
-# --- Step 1: Probe ddp-sync for bill-history-free response ---
-echo "Step 1: Probing ddp-sync /votebot/v1/sync/unified to confirm F1 is live..."
+# --- Step 1: Probe ddp-sync to confirm F1 is live ---
+# Path differs by access mode:
+#   - localhost:8001 (EC2 internal): /sync/unified  (DDP-Sync's own routes)
+#   - https://api.digitaldemocracyproject.org (public): /votebot/sync/unified  (DDP-API proxy)
+case "$DDP_SYNC_URL" in
+  *localhost*|*127.0.0.1*) PROBE_PATH="/sync/unified" ;;
+  *) PROBE_PATH="/votebot/sync/unified" ;;
+esac
+
+echo "Step 1: Probing ${DDP_SYNC_URL}${PROBE_PATH} to confirm F1 is live..."
 PROBE_RESPONSE=$(curl -sS --fail \
-  -X POST "$DDP_SYNC_URL/votebot/v1/sync/unified" \
+  -X POST "${DDP_SYNC_URL}${PROBE_PATH}" \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d "{\"content_type\":\"bill\",\"mode\":\"single\",\"slug\":\"$TEST_BILL_SLUG\",\"include_openstates\":true}")
