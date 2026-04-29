@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -61,7 +61,16 @@ class Settings(BaseSettings):
     # Quick-action buttons (Summarize / Pros and cons / Latest status & votes).
     # When False, button metadata in chat requests is ignored and cache is bypassed.
     # See plans/PLAN-quick-action-buttons.md.
-    quick_action_buttons_enabled: bool = False
+    # AliasChoices lets either env var name resolve this field — VOTEBOT_QUICK_ACTION_BUTTONS
+    # is the documented name (matches the convention in plans + README), and the
+    # auto-derived QUICK_ACTION_BUTTONS_ENABLED keeps backwards compatibility.
+    quick_action_buttons_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "VOTEBOT_QUICK_ACTION_BUTTONS",
+            "QUICK_ACTION_BUTTONS_ENABLED",
+        ),
+    )
 
     # Pinecone
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))
