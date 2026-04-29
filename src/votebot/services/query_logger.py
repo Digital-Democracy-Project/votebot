@@ -93,6 +93,7 @@ class QueryLogger:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         bill_votes_tool_used: bool = False,
+        bill_votes_tool_duration_ms: int | None = None,
         handoff_triggered: bool = False,
         error: bool = False,
         error_type: str | None = None,
@@ -148,7 +149,10 @@ class QueryLogger:
             "web_search_used": web_search_used if web_search_used else None,
             "fallback_used": fallback_used if fallback_used else None,
             "fallback_reason": fallback_reason,
-            "bill_votes_tool_used": bill_votes_tool_used if bill_votes_tool_used else None,
+            # Always log as bool (not None when False) so analytics can distinguish
+            # "tool not used" from "field absent" — important for the OpenStates fire-rate metric.
+            "bill_votes_tool_used": bill_votes_tool_used,
+            "bill_votes_tool_duration_ms": bill_votes_tool_duration_ms,
             "handoff_triggered": handoff_triggered if handoff_triggered else None,
             "error": error if error else None,
             "error_type": error_type,

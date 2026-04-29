@@ -52,6 +52,7 @@ class AgentResult:
     web_citations: list[WebSearchCitation] | None = None
     response_id: str | None = None  # For stateful conversations
     bill_votes_tool_used: bool = False
+    bill_votes_tool_duration_ms: int | None = None
     bill_votes_result: BillVotesToolResult | None = None
 
 
@@ -211,6 +212,7 @@ class VoteBotAgent:
                     fallback_used=fallback_used,
                     fallback_reason=fallback_reason,
                     bill_votes_tool_used=result.bill_votes_tool_used,
+                    bill_votes_tool_duration_ms=result.bill_votes_tool_duration_ms,
                     handoff_triggered=result.requires_human,
                     error=error,
                     error_type=error_type,
@@ -562,10 +564,21 @@ class VoteBotAgent:
         # (This is done before streaming since tool calls can't interrupt streams)
         rag_confidence = self._calculate_rag_confidence(retrieval_result)
         bill_info_context = ""
+        bill_votes_tool_used_in_stream = False
+        bill_votes_tool_duration_ms: int | None = None
         if self._should_use_bill_votes_tool(rag_confidence, message, page_context, conversation_history):
+            _bv_start = time.perf_counter()
             bill_info_context = await self._prefetch_bill_info(message, page_context, conversation_history)
+            bill_votes_tool_duration_ms = int((time.perf_counter() - _bv_start) * 1000)
+            # Tool counts as "used" only if prefetch actually returned live data —
+            # an empty result means the resolution didn't find a bill or OpenStates had nothing.
+            bill_votes_tool_used_in_stream = bool(bill_info_context)
             if bill_info_context:
-                logger.info("Pre-fetched bill info for streaming", has_info=bool(bill_info_context))
+                logger.info(
+                    "Pre-fetched bill info for streaming",
+                    has_info=True,
+                    duration_ms=bill_votes_tool_duration_ms,
+                )
 
         # Step 2c: Pre-fetch legislator info if query mentions a person on a bill page
         legislator_info_context = ""
@@ -704,6 +717,8 @@ class VoteBotAgent:
                     requires_human=False,
                     tokens_used=0,
                     retrieval_count=retrieval_result.total_retrieved,
+                    bill_votes_tool_used=bill_votes_tool_used_in_stream,
+                    bill_votes_tool_duration_ms=bill_votes_tool_duration_ms,
                 )
                 self._log_query(
                     session_id=session_id,
