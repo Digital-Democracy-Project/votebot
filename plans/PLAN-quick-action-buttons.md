@@ -1,7 +1,7 @@
 # PLAN: Quick-Action Buttons with Response Caching
 
-**Date:** 2026-03-30 (rev 2026-04-28: Fix D scope correction + Fix F added; rev 2026-04-28b: PM review feedback incorporated; rev 2026-04-28c: second-pass PM feedback — user-mention dominance, release script, deleted-count logging)
-**Status:** Draft v6.2 — final
+**Date:** 2026-03-30 (rev 2026-04-28: Fix D scope correction + Fix F added; rev 2026-04-28b: PM review feedback incorporated; rev 2026-04-28c: second-pass PM feedback — user-mention dominance, release script, deleted-count logging; rev 2026-04-29: Fix F shipped and verified in production)
+**Status:** v7 — Fix F shipped 2026-04-29; Phases 2–5 still outstanding
 
 **Motivation:** Analysis of 1,927 production queries shows 3 dominant question patterns that account for ~63% of first messages on bill pages. Adding quick-action buttons improves UX (one-tap access to common answers) and, with caching, reduces AI token usage and latency for summary and pros/cons responses. This also directly fixes the stale bill status problem (HR 7147 incident) by ensuring status queries trigger the live OpenStates lookup.
 
@@ -491,6 +491,48 @@ We considered adding `document_type: {"$ne": "bill-history"}` to the unfiltered 
 
 Fixes B through F together ensure live, complete, and uncontaminated OpenStates data is used for any status query, regardless of page type or whether the bill identifier appears in the current message.
 
+### Fix F production verification (2026-04-29)
+
+Shipped in commits: votebot `698958e` + `c0c6c11` + `32150a6` + `a792808`; ddp-sync `3ea053f`. Deploy completed and validated 2026-04-29 ~02:47 UTC.
+
+**Probe results** (single-bill sync via `/ddp-sync/v1/sync/unified`):
+- `document_ids`: only `bill-webflow-...` returned. **No `bill-history-*` entries** ✓
+- `chunks_created`: dropped from 57 → 45 per bill (the missing 12 chunks were the bill-history doc that's no longer produced)
+
+**Pinecone flush results**:
+- 1,103 stale bill-history vectors deleted via metadata filter
+- Eventual-consistency retry caught 100 stragglers on first poll, count clean by second poll (3s later)
+- Post-flush sync verified count stays at 0 — F1 producer is fully removed
+
+**F3 / live-tool firing verified end-to-end**:
+- A status query "what's the latest status?" on a bill page (HB 1D) fired the live OpenStates tool (`bill_votes_tool_used: true` in the logged event) and pulled actions dated 2026-04-28 — same-day data the live path provides
+- The `_should_use_bill_votes_tool()` user-only conversation-history scan was exercised on multiple turns; no bot-only false positives observed
+
+**Performance baseline** (from post-deploy logs):
+- OpenStates round-trip is **~308ms** for a typical bill (per the new `bill_votes_tool_duration_ms` field). Not the latency bottleneck — a 21s outlier observed earlier in the day was attributable to LLM streaming variability, not the live tool.
+
+### Deploy-day learnings (worth documenting for future rollouts)
+
+1. **Non-editable install on ddp-sync.** First restart appeared to succeed (git pull was clean) but the running code was a cached `pip install .` snapshot from the original deploy, not the new source. Symptom: response `document_ids` still contained `bill-history-...` despite the source on disk being clean (`format_bill_history_chunk` already deleted). Fix during deploy: `.venv/bin/pip install -e .` then restart. Now editable; future deploys propagate without reinstall.
+
+2. **VoteBot uses `PYTHONPATH=/home/ubuntu/votebot/src` in its systemd unit.** Source changes load on restart even though the install is non-editable, because PYTHONPATH wins over site-packages in module resolution. Less surprising than ddp-sync.
+
+3. **DDP-Sync routes mount under `API_PREFIX = "/ddp-sync/v1"`** (see `src/ddp_sync/app.py:15`). The localhost URL is `http://localhost:8001/ddp-sync/v1/sync/unified`, not `/sync/unified` despite the README's path table implying otherwise (the table values are relative to the prefix). Public access via DDP-API proxy is `https://api.digitaldemocracyproject.org/votebot/sync/unified` (proxy strips its own prefix). The deploy script (`scripts/deploy_fix_f.sh`) now branches on the URL to pick the right path.
+
+4. **Venv path conventions differ:** ddp-sync uses `~/ddp-sync/.venv/`; votebot uses `~/votebot/venv/` (no leading dot). Easy to trip on when copy-pasting one-liners.
+
+### Observability follow-ups (2026-04-29, post-deploy)
+
+Two small instrumentation gaps surfaced during validation:
+
+1. `bill_votes_tool_used` was logged via "X if X else None" pattern in `query_logger.py`, which dropped False values during JSON serialization. The field was missing entirely from `query_processed` events, making the OpenStates fire-rate metric unmeasurable. Fixed in commit `3e3574b`: now logged as bool always (False/True).
+
+2. Added new `bill_votes_tool_duration_ms` field. Without per-call timing, slow responses couldn't be diagnosed (a 21.3s status query in the first test was either OpenStates being slow or LLM streaming being slow — no way to tell). Now: streaming-path `_prefetch_bill_info` is wrapped with `time.perf_counter()` and the duration flows through `AgentResult` → `_log_query` → `query_logger`.
+
+   Other "X if X else None" log fields (`web_search_used`, `fallback_used`, `handoff_triggered`, etc.) follow the same drop-when-False pattern but were left untouched in this fix to avoid disturbing existing log analysis tooling. Worth flipping in a future cleanup if Ramon decides to standardize.
+
+   The non-streaming `process_message` path doesn't get instrumented in this commit because the tool fires inside the LLM's function-calling dispatch (in `services/llm.py`), not as a separate prefetch step. WebSocket traffic is the dominant production path so this covers the main visibility need.
+
 ---
 
 ## Implementation
@@ -614,11 +656,7 @@ logger.info("Published button cache invalidation", slug=bill_slug, version_note=
 ## Implementation Order
 
 1. **Fixes B–E (stale status, partial)** — SHIPPED. Fix B: bill page status queries trigger tool (commit `52b8d80`). Fix C: resolve bill from Webflow slug (commit `ee1227a`). Fix D (PARTIAL — completed by Fix F): bill-page bill-history removal from retrieval (commit `b518132`). Fix E: pass full action history to LLM (commits `d0fed09`, `6f756c7`). See `docs/TROUBLESHOOTING.md` for full details.
-2. **Fix F — Complete bill-history removal** — Ships before Phase 2. Order:
-   - F3 first: ship `_should_use_bill_votes_tool()` conversation-history extension to votebot, plus the mirror change to `_prefetch_bill_info` Method 3 (purely additive, safe to deploy ahead of data changes).
-   - F1: ship ddp-sync producer removal. Deploy. Verify next on-demand sync creates no new bill-history docs.
-   - F2: run Pinecone flush script once. Verify count is 0.
-   - Validation: pull 7 days of post-deploy logs, re-run the leak check. Expect 0 bill-history retrievals.
+2. **Fix F — Complete bill-history removal** — ✅ SHIPPED 2026-04-29. F3 + F1 + F2 all live and verified. See "Fix F production verification (2026-04-29)" subsection above for results. Validation cadence: re-run `evaluate_production.py` at days 7/14/30 from 2026-04-29 to confirm `bill_history_leak_count: 0` holds across fresh traffic.
 
    **Release sequencing — `scripts/deploy_fix_f.sh`** (or equivalent runbook).
    The F1 → F2 sequence is the highest-risk part of the rollout (window where a missed verification step would either leave stale chunks regenerating or delete before the producer is shut down). Codify the sequence in a single fail-fast script:
