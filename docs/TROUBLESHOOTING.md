@@ -869,7 +869,7 @@ VoteBot fails to answer questions about organization positions on bills, or retu
 ### Root Causes
 
 #### Bill→Org: Retrieval pipeline filters out org data
-When a bill identifier is detected in a query, the retrieval pipeline activates bill-priority mode, which searches only for `document_type="bill"`, `"bill-text"`, `"bill-history"`, and `"bill-votes"`. Organization documents are excluded by these filters.
+When a bill identifier is detected in a query, the retrieval pipeline activates bill-priority mode, which searches only for `document_type="bill"`, `"bill-text"`, and `"bill-votes"`. Organization documents are excluded by these filters. (Note: `"bill-history"` was previously also retrieved here but was removed in Fix F — bill status/actions now served exclusively by live OpenStates.)
 
 **Fix history:**
 
@@ -1345,10 +1345,13 @@ async def health_check():
     print(f'Total vectors: {stats.total_vector_count}')
 
     # Count by document type
+    # Note: 'bill-history-' should always be 0 post-Fix-F (2026-04-29).
+    # Kept here as a regression check — non-zero count means F1 producer
+    # regressed somewhere or a backload re-ingested old chunks.
     prefixes = {
         'bill-webflow-': 'Bill (Webflow)',
         'bill-pdf-': 'Bill (PDF)',
-        'bill-history-': 'Bill (History)',
+        'bill-history-': 'Bill (History) — should be 0',
         'bill-votes-': 'Bill (Votes)',
         'legislator-ocd-person/': 'Legislator (Profile)',
         'legislator-bills-': 'Legislator (Bills)',
@@ -3536,15 +3539,44 @@ Initial fix (Fixes B–E, 2026-03-30):
 | `b518132` | Remove bill-history from Pinecone retrieval (bill-page path only — completed by Fix F) |
 | `6f756c7` | Remove action limit in format_bill_info_document |
 
-Completion (Fix F, 2026-04-28):
+Completion (Fix F, deployed 2026-04-29):
 
 | Commit | Repo | Description |
 |--------|------|-------------|
-| (TBD) | ddp-sync | F1: stop producing bill-history docs in `bill_sync.py`/`sync_bill()` |
-| (TBD) | votebot | F2: `scripts/flush_bill_history.py` one-shot Pinecone flush + persisted record |
-| (TBD) | votebot | F3: conversation-history scan in `_should_use_bill_votes_tool()` + mirror change in `_prefetch_bill_info()` Method 3 |
-| (TBD) | votebot | Permanent leak canary metric in `scripts/evaluate_production.py` |
-| (TBD) | votebot | Release sequencing guardrail `scripts/deploy_fix_f.sh` |
+| `3ea053f` | ddp-sync | F1: stop producing bill-history docs in `bill_sync.py`/`sync_bill()` |
+| `698958e` | votebot | F2 + F3 + canary + release script + plan v6.2 + tests + docs (bundle commit) |
+| `c0c6c11` | votebot | F2 follow-up: `--yes` flag, paginated count via `index.list(prefix=...)`, post-delete eventual-consistency retry |
+| `32150a6` | votebot | Deploy script URL fix: `/votebot/sync/unified` for public proxy access |
+| `a792808` | votebot | Deploy script URL fix: `/ddp-sync/v1/sync/unified` for localhost access (matches DDP-Sync's `API_PREFIX`) |
+
+### Production verification (2026-04-29)
+
+After deploying both repos and running `scripts/flush_bill_history.py`:
+- Probe sync to ddp-sync returned `document_ids: ["bill-webflow-..."]` only — no `bill-history-*` entries
+- `chunks_created` per bill dropped from 57 to 45 (matches the predicted ~half-reduction from removing the bill-history doc)
+- Pinecone flush deleted 1,103 stale bill-history vectors. Eventual-consistency retry caught 100 stragglers on first poll, fully clean by second poll
+- Post-flush sync verified: count stays at 0 after a fresh sync run (F1 holding; no producer regenerating)
+
+### Deploy gotchas discovered during rollout
+
+1. **Non-editable install on ddp-sync.** First restart appeared to succeed (git pull was clean) but the running code was a cached `pip install .` snapshot from the original deploy. Symptom: response `document_ids` still contained `bill-history-...` despite the source on disk being clean. Fix: `.venv/bin/pip install -e .` then restart. Now editable; future deploys propagate without reinstall.
+
+2. **VoteBot uses `PYTHONPATH=/home/ubuntu/votebot/src` in its systemd unit.** Source changes load on restart even though the install is non-editable, because PYTHONPATH wins over site-packages in module resolution.
+
+3. **DDP-Sync routes mounted under `/ddp-sync/v1/` prefix.** The internal localhost URL is `http://localhost:8001/ddp-sync/v1/sync/unified`, not `/sync/unified` despite what DDP-Sync's README implies. Public access via DDP-API proxy is `https://api.digitaldemocracyproject.org/votebot/sync/unified` (proxy strips its own prefix before forwarding).
+
+4. **Venv paths differ:** ddp-sync uses `~/ddp-sync/.venv/`; votebot uses `~/votebot/venv/` (no leading dot).
+
+### Permanent canary
+
+A `bill_history_leak_count` metric was added to `scripts/evaluate_production.py`. Every eval run prints:
+
+```
+--- Bill-history leak canary ---
+  bill_history_leak_count: 0  (clean)
+```
+
+Any non-zero value flags a regression — investigate immediately. Suggested cadence: re-run eval at days 7, 14, 30 post-deploy to confirm sustained zero across a multi-week window.
 
 ---
 
