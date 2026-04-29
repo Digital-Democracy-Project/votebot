@@ -143,3 +143,34 @@ def test_cacheable_types_excludes_status_votes():
     assert "summary" in CACHEABLE_TYPES
     assert "pros_cons" in CACHEABLE_TYPES
     assert "status_votes" not in CACHEABLE_TYPES
+
+
+@pytest.mark.asyncio
+async def test_get_handles_missing_optional_citation_fields(cache, fake_store):
+    """A cached payload from an older version may lack newer Citation fields.
+
+    Defensive: get() should still return the dict, and downstream code (in
+    agent._maybe_serve_from_button_cache) uses .get(... , default) so missing
+    fields don't crash citation reconstruction.
+    """
+    # Simulate an old cached payload missing url + relevance_score
+    minimal_cached = {
+        "response": "old summary text",
+        "citations": [
+            {"source": "Congress.gov", "document_id": "bill-1", "excerpt": "text"}
+            # NOTE: no url, no relevance_score
+        ],
+        "confidence": 0.8,
+        "cached_at": "2026-04-01T00:00:00+00:00",
+        "button_type": "summary",
+    }
+    fake_store._client.store["votebot:button:hr-1234:summary"] = json.dumps(minimal_cached)
+
+    got = await cache.get("hr-1234", "summary")
+    assert got is not None
+    assert got["response"] == "old summary text"
+    # Verify the citation entry is preserved as-is — agent's defensive
+    # _maybe_serve_from_button_cache will fill defaults when reconstructing.
+    cit = got["citations"][0]
+    assert cit["source"] == "Congress.gov"
+    assert "url" not in cit  # not present in old payload — OK

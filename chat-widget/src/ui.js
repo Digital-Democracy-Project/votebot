@@ -755,11 +755,22 @@ const DDPUI = (function() {
     /**
      * Hide the quick-action button bar (called after first interaction
      * or on navigation away from a bill page).
+     *
+     * If a quick-action button currently has focus (which happens after a
+     * keyboard activation), shift focus to the chat input before hiding.
+     * Otherwise screen-reader users would be stranded on a node that's
+     * about to disappear from the accessibility tree.
      */
     function hideQuickActions() {
-        if (elements.quickActions) {
-            elements.quickActions.style.display = 'none';
+        if (!elements.quickActions) return;
+        // Check if any focused element is inside the quick-actions group
+        var active = shadowRoot && shadowRoot.activeElement;
+        if (active && elements.quickActions.contains(active)) {
+            if (elements.chatInput && !elements.chatInput.disabled) {
+                try { elements.chatInput.focus(); } catch (e) {}
+            }
         }
+        elements.quickActions.style.display = 'none';
     }
 
     /**

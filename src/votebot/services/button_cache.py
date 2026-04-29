@@ -190,8 +190,14 @@ _invalidate_task: Optional[asyncio.Task] = None
 async def start_invalidate_subscriber(redis_store: RedisStore) -> None:
     """Start listening for invalidation events on votebot:cache:invalidate.
 
-    No-op when Redis is unavailable. Safe to call multiple times — duplicate
-    starts are detected and ignored.
+    Runs a supervisor loop that auto-reconnects on Redis disconnects with
+    exponential backoff (capped at 60s). Without auto-reconnect, a transient
+    Redis blip would silently stop invalidation processing until the next
+    full service restart — stale cached responses would then accumulate
+    until each entry hit the 7-day safety TTL.
+
+    No-op when Redis is unavailable at startup. Safe to call multiple times
+    — duplicate starts are detected and ignored.
     """
     global _invalidate_pubsub, _invalidate_task
 
@@ -202,43 +208,87 @@ async def start_invalidate_subscriber(redis_store: RedisStore) -> None:
         return  # already running
 
     cache = ButtonCache(redis_store)
-    _invalidate_pubsub = redis_store._client.pubsub()
-    await _invalidate_pubsub.subscribe(INVALIDATE_CHANNEL)
 
-    async def _listen():
-        try:
-            async for message in _invalidate_pubsub.listen():
-                if message.get("type") != "message":
+    async def _process_messages(pubsub):
+        """Process messages from a single pubsub connection.
+
+        Returns when the connection drops (caller reconnects). Raises
+        CancelledError on shutdown (caller propagates).
+        """
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            try:
+                payload = json.loads(message["data"])
+                slug = payload.get("slug")
+                if not slug:
                     continue
-                try:
-                    payload = json.loads(message["data"])
-                    slug = payload.get("slug")
-                    if not slug:
-                        continue
-                    deleted = await cache.invalidate_bill(slug)
-                    logger.info(
-                        "ButtonCache: invalidation event handled",
-                        slug=slug,
-                        reason=payload.get("reason"),
-                        version_note=payload.get("version_note"),
-                        deleted=deleted,
-                    )
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "ButtonCache: invalid JSON on invalidate channel",
-                        raw=message.get("data"),
-                    )
-                except Exception as e:
-                    logger.error(
-                        "ButtonCache: error handling invalidation event",
-                        error=str(e),
-                    )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error("ButtonCache: subscriber listener crashed", error=str(e))
+                deleted = await cache.invalidate_bill(slug)
+                logger.info(
+                    "ButtonCache: invalidation event handled",
+                    slug=slug,
+                    reason=payload.get("reason"),
+                    version_note=payload.get("version_note"),
+                    deleted=deleted,
+                )
+            except json.JSONDecodeError:
+                logger.warning(
+                    "ButtonCache: invalid JSON on invalidate channel",
+                    raw=message.get("data"),
+                )
+            except Exception as e:
+                logger.error(
+                    "ButtonCache: error handling invalidation event",
+                    error=str(e),
+                )
 
-    _invalidate_task = asyncio.create_task(_listen())
+    async def _supervisor():
+        """Outer loop: reconnect on disconnect with exponential backoff."""
+        global _invalidate_pubsub
+        backoff = 1
+        max_backoff = 60
+        while True:
+            try:
+                if redis_store._client is None:
+                    # Redis went away entirely — wait + retry
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, max_backoff)
+                    continue
+
+                _invalidate_pubsub = redis_store._client.pubsub()
+                await _invalidate_pubsub.subscribe(INVALIDATE_CHANNEL)
+                logger.info(
+                    "ButtonCache subscriber connected",
+                    channel=INVALIDATE_CHANNEL,
+                )
+                backoff = 1  # reset backoff after a successful connect
+
+                await _process_messages(_invalidate_pubsub)
+
+                # listen() returned cleanly (no error) — connection probably
+                # closed; loop and reconnect
+                logger.warning(
+                    "ButtonCache subscriber stream ended; reconnecting",
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "ButtonCache subscriber connection error; will reconnect",
+                    error=str(e),
+                    backoff_seconds=backoff,
+                )
+                # Best-effort cleanup of the dead pubsub
+                try:
+                    if _invalidate_pubsub:
+                        await _invalidate_pubsub.close()
+                except Exception:
+                    pass
+                _invalidate_pubsub = None
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+    _invalidate_task = asyncio.create_task(_supervisor())
     logger.info("ButtonCache subscriber started", channel=INVALIDATE_CHANNEL)
 
 

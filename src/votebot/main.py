@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from votebot.api.middleware.logging import LoggingMiddleware
 from votebot.api.routes import (
+    cache_admin_router,
     chat_router,
     content_router,
     features_router,
@@ -104,6 +105,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router, prefix=settings.api_prefix)
     app.include_router(content_router, prefix=settings.api_prefix)
     app.include_router(features_router, prefix=settings.api_prefix)
+    app.include_router(cache_admin_router, prefix=settings.api_prefix)
     app.include_router(websocket_router)  # WebSocket at root level
 
     # Global exception handlers

@@ -1,5 +1,6 @@
 """API routes for VoteBot."""
 
+from votebot.api.routes.cache_admin import router as cache_admin_router
 from votebot.api.routes.chat import router as chat_router
 from votebot.api.routes.content import router as content_router
 from votebot.api.routes.features import router as features_router
@@ -7,6 +8,7 @@ from votebot.api.routes.health import router as health_router
 from votebot.api.routes.websocket import router as websocket_router
 
 __all__ = [
+    "cache_admin_router",
     "chat_router",
     "content_router",
     "features_router",
