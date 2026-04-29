@@ -437,8 +437,8 @@
 /* Quick-action buttons (bill pages only) */
 .ddp-quick-actions {
     display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
+    flex-wrap: wrap;            /* fallback if container ever shrinks below ~320px */
+    gap: 6px;
     padding: 10px 16px 6px;
     background: white;
     border-top: 1px solid var(--ddp-border);
@@ -449,12 +449,13 @@
     border: 1px solid var(--ddp-border);
     color: var(--ddp-primary);
     border-radius: 16px;
-    padding: 6px 14px;
-    font-size: 0.85rem;
+    padding: 6px 12px;
+    font-size: 0.82rem;
     font-family: inherit;
     cursor: pointer;
     transition: background-color 0.15s, border-color 0.15s, transform 0.1s;
     line-height: 1.2;
+    white-space: nowrap;        /* keep each label on a single line */
 }
 
 .ddp-quick-action:hover:not(:disabled) {

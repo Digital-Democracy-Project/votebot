@@ -135,9 +135,9 @@ const DDPUI = (function() {
                     </svg>
                 </button>
                 <div class="ddp-quick-actions" role="group" aria-label="Quick questions about this bill" style="display: none;">
-                    <button type="button" class="ddp-quick-action" data-action="summary" aria-label="Summarize this bill">Summarize this bill</button>
-                    <button type="button" class="ddp-quick-action" data-action="pros_cons" aria-label="Pros and cons">Pros and cons</button>
-                    <button type="button" class="ddp-quick-action" data-action="status_votes" aria-label="Latest status and votes">Latest status &amp; votes</button>
+                    <button type="button" class="ddp-quick-action" data-action="summary" aria-label="Summarize this bill">Summary</button>
+                    <button type="button" class="ddp-quick-action" data-action="pros_cons" aria-label="Pros and cons">Pros &amp; cons</button>
+                    <button type="button" class="ddp-quick-action" data-action="status_votes" aria-label="Latest status and votes">Status &amp; votes</button>
                 </div>
                 <div class="ddp-chat-input-area">
                     <div class="ddp-chat-input-container">
