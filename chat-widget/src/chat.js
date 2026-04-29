@@ -53,9 +53,11 @@ const DDPChat = (function() {
     /**
      * Send a user message.
      * @param {string} message - The message text
+     * @param {string|null} button - Optional quick-action button id
+     *     ('summary', 'pros_cons', 'status_votes'). null for free-typed messages.
      * @returns {boolean} - Whether the message was sent
      */
-    function sendMessage(message) {
+    function sendMessage(message, button) {
         message = message.trim();
         if (!message || !DDPWebSocket.isConnected() || isStreaming) {
             return false;
@@ -78,6 +80,9 @@ const DDPChat = (function() {
             scroll_depth: _getScrollDepth(),
             time_on_page: _getTimeOnPage()
         };
+        if (button) {
+            msgPayload.button = button;
+        }
         // entry_referrer only on first message per session
         if (isFirstMessage) {
             var ref = _extractDomain(document.referrer);

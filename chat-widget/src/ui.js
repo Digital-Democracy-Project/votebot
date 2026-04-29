@@ -134,6 +134,11 @@ const DDPUI = (function() {
                         <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/>
                     </svg>
                 </button>
+                <div class="ddp-quick-actions" role="group" aria-label="Quick questions about this bill" style="display: none;">
+                    <button type="button" class="ddp-quick-action" data-action="summary" aria-label="Summarize this bill">Summarize this bill</button>
+                    <button type="button" class="ddp-quick-action" data-action="pros_cons" aria-label="Pros and cons">Pros and cons</button>
+                    <button type="button" class="ddp-quick-action" data-action="status_votes" aria-label="Latest status and votes">Latest status &amp; votes</button>
+                </div>
                 <div class="ddp-chat-input-area">
                     <div class="ddp-chat-input-container">
                         <textarea
@@ -170,7 +175,9 @@ const DDPUI = (function() {
             messagesContainer: shadowRoot.querySelector('.ddp-chat-messages'),
             chatInput: shadowRoot.querySelector('.ddp-chat-input'),
             sendButton: shadowRoot.querySelector('.ddp-send-button'),
-            scrollBottomButton: shadowRoot.querySelector('.ddp-scroll-bottom')
+            scrollBottomButton: shadowRoot.querySelector('.ddp-scroll-bottom'),
+            quickActions: shadowRoot.querySelector('.ddp-quick-actions'),
+            quickActionButtons: shadowRoot.querySelectorAll('.ddp-quick-action')
         };
 
         // Hide scroll-to-bottom button when user scrolls to the bottom
@@ -735,6 +742,59 @@ const DDPUI = (function() {
         }
     }
 
+    /**
+     * Show the quick-action button bar (only when feature flag is on AND
+     * page_context is a bill page).
+     */
+    function showQuickActions() {
+        if (elements.quickActions) {
+            elements.quickActions.style.display = 'flex';
+        }
+    }
+
+    /**
+     * Hide the quick-action button bar (called after first interaction
+     * or on navigation away from a bill page).
+     */
+    function hideQuickActions() {
+        if (elements.quickActions) {
+            elements.quickActions.style.display = 'none';
+        }
+    }
+
+    /**
+     * Wire up click + keyboard handlers on the quick-action buttons.
+     * @param {Function} onClick - Receives (buttonType: string) when a button
+     *     is activated. Caller is responsible for sending the appropriate
+     *     message via the chat module.
+     */
+    function setupQuickActionHandlers(onClick) {
+        if (!elements.quickActionButtons) return;
+        elements.quickActionButtons.forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                if (btn.disabled) return;
+                onClick(btn.getAttribute('data-action'));
+            });
+            // Tab navigation works natively; Enter/Space already trigger click on <button>.
+        });
+    }
+
+    /**
+     * Disable all quick-action buttons (e.g., while a request is in-flight).
+     */
+    function disableQuickActions() {
+        if (!elements.quickActionButtons) return;
+        elements.quickActionButtons.forEach(function(btn) { btn.disabled = true; });
+    }
+
+    /**
+     * Re-enable all quick-action buttons.
+     */
+    function enableQuickActions() {
+        if (!elements.quickActionButtons) return;
+        elements.quickActionButtons.forEach(function(btn) { btn.disabled = false; });
+    }
+
     return {
         init: init,
         buildHTML: buildHTML,
@@ -760,6 +820,11 @@ const DDPUI = (function() {
         showHandoffConfirmation: showHandoffConfirmation,
         scrollToBottom: scrollToBottom,
         resetScrollState: resetScrollState,
-        handleUIUpdate: handleUIUpdate
+        handleUIUpdate: handleUIUpdate,
+        showQuickActions: showQuickActions,
+        hideQuickActions: hideQuickActions,
+        setupQuickActionHandlers: setupQuickActionHandlers,
+        disableQuickActions: disableQuickActions,
+        enableQuickActions: enableQuickActions
     };
 })();

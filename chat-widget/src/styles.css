@@ -434,6 +434,49 @@
 }
 
 /* Input area */
+/* Quick-action buttons (bill pages only) */
+.ddp-quick-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 16px 6px;
+    background: white;
+    border-top: 1px solid var(--ddp-border);
+}
+
+.ddp-quick-action {
+    background: white;
+    border: 1px solid var(--ddp-border);
+    color: var(--ddp-primary);
+    border-radius: 16px;
+    padding: 6px 14px;
+    font-size: 0.85rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s, transform 0.1s;
+    line-height: 1.2;
+}
+
+.ddp-quick-action:hover:not(:disabled) {
+    background: rgba(26, 95, 122, 0.08);
+    border-color: var(--ddp-primary);
+}
+
+.ddp-quick-action:focus {
+    outline: none;
+    border-color: var(--ddp-primary);
+    box-shadow: 0 0 0 3px rgba(26, 95, 122, 0.2);
+}
+
+.ddp-quick-action:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+.ddp-quick-action:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .ddp-chat-input-area {
     padding: 12px 16px;
     background: white;

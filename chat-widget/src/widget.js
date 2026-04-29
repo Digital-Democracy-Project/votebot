@@ -560,7 +560,81 @@
             DDPUI.openPopup();
         }
 
+        // Fetch feature flags from the server and conditionally show quick-action
+        // buttons on bill pages. Failures are silent — buttons stay hidden, which
+        // is the safe default. The fetch is fire-and-forget; the rest of the
+        // widget already works without it.
+        fetchFeatureFlagsAndMaybeShowButtons(pageContext);
+
         console.log('[DDPChat] Widget initialized with context:', pageContext, isReturning ? '(returning session)' : '(new session)');
+    }
+
+    /**
+     * Cache for the features endpoint result. Populated on first init,
+     * re-used by setPageContext when the user navigates between bills.
+     */
+    var _featuresCache = null;
+
+    /**
+     * Fetch /votebot/v1/features and show the quick-action button bar if the
+     * feature is enabled AND this is a bill page. Wires up click handlers
+     * that send the appropriate canned message via DDPChat.sendMessage.
+     */
+    function fetchFeatureFlagsAndMaybeShowButtons(pageContext) {
+        var apiBase = config.wsUrl
+            .replace('wss://', 'https://')
+            .replace('ws://', 'http://')
+            .replace(/\/ws.*$/, '');
+        var url = apiBase + '/votebot/v1/features';
+
+        var doRender = function(features) {
+            _featuresCache = features;
+            if (!features || !features.quick_action_buttons_enabled) return;
+            if (!pageContext || pageContext.type !== 'bill') return;
+            DDPUI.showQuickActions();
+            DDPUI.setupQuickActionHandlers(handleQuickActionClick);
+        };
+
+        if (_featuresCache !== null) {
+            doRender(_featuresCache);
+            return;
+        }
+
+        fetch(url)
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(data) { if (data) doRender(data); })
+            .catch(function(err) {
+                console.warn('[DDPChat] Features fetch failed (buttons stay hidden):', err);
+            });
+    }
+
+    /**
+     * Translate a quick-action button click into a canned message sent through
+     * the normal chat path. Hides the button bar so the user can't double-fire
+     * during the in-flight request.
+     */
+    function handleQuickActionClick(buttonType) {
+        var pageContext = DDPChat.getPageContext ? DDPChat.getPageContext() : null;
+        var billRef = (pageContext && (pageContext.title || pageContext.id)) || 'this bill';
+        var message;
+        switch (buttonType) {
+            case 'summary':
+                message = 'Summarize this bill';
+                break;
+            case 'pros_cons':
+                message = 'What are the pros and cons of this bill?';
+                break;
+            case 'status_votes':
+                // Embed the bill identifier so _should_use_bill_votes_tool() fires
+                // unambiguously even if page_context.id is missing on the server.
+                message = 'What is the latest status and vote history for ' + billRef + '?';
+                break;
+            default:
+                console.warn('[DDPChat] Unknown quick-action button:', buttonType);
+                return;
+        }
+        DDPUI.hideQuickActions();
+        DDPChat.sendMessage(message, buttonType);
     }
 
     /**
@@ -586,6 +660,7 @@
         elements.sendButton.addEventListener('click', function() {
             var message = DDPUI.getInputValue();
             if (message.trim()) {
+                DDPUI.hideQuickActions();
                 DDPChat.sendMessage(message);
             }
         });
@@ -596,6 +671,7 @@
                 e.preventDefault();
                 var message = DDPUI.getInputValue();
                 if (message.trim()) {
+                    DDPUI.hideQuickActions();
                     DDPChat.sendMessage(message);
                 }
             }
@@ -649,6 +725,18 @@
             if (showWelcome) {
                 var message = generateWelcomeMessage(context);
                 DDPUI.addSystemMessage(message);
+            }
+            // Re-show quick-action buttons if navigating to a (different) bill page.
+            // _featuresCache is populated on init; if it isn't yet, re-fetch.
+            if (context && context.type === 'bill') {
+                if (_featuresCache && _featuresCache.quick_action_buttons_enabled) {
+                    DDPUI.showQuickActions();
+                    DDPUI.enableQuickActions();
+                } else if (_featuresCache === null) {
+                    fetchFeatureFlagsAndMaybeShowButtons(context);
+                }
+            } else {
+                DDPUI.hideQuickActions();
             }
         },
 
