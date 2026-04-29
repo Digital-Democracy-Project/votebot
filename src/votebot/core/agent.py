@@ -704,8 +704,14 @@ class VoteBotAgent:
         )
         if cache_hit_result is not None:
             cached_response, cached_citations = cache_hit_result
+            # Cache-hit needs to mimic the normal streaming pattern, otherwise the
+            # widget never displays the response: the WebSocket handler only emits
+            # `stream_chunk` for chunks where done=False, and the widget's
+            # `finalizeStreamingMessage` early-returns when no streaming-message
+            # was created. Yield the text first (done=False), then the done marker.
+            yield StreamChunkData(text=cached_response, done=False)
             yield StreamChunkData(
-                text=cached_response,
+                text="",
                 done=True,
                 citations=cached_citations,
                 metadata=ResponseMetadata(
