@@ -54,7 +54,7 @@ echo
 
 # --- Step 2: Run the Pinecone flush ---
 echo "Step 2: Running Pinecone flush..."
-PYTHONPATH=src .venv/bin/python scripts/flush_bill_history.py --confirm
+PYTHONPATH=src .venv/bin/python scripts/flush_bill_history.py --yes
 echo
 
 # --- Step 3: Post-flush sanity check from the persisted record ---
