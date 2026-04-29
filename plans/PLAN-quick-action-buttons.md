@@ -1,7 +1,7 @@
 # PLAN: Quick-Action Buttons with Response Caching
 
-**Date:** 2026-03-30 (rev 2026-04-28a/b/c: Fix D scope correction + Fix F + PM review iterations; rev 2026-04-29a: Fix F shipped + verified; rev 2026-04-29b: Phases 2/3/5 implemented + PM-review polish)
-**Status:** v8 — All phases (1–5) implemented; Phase 4 (flag enable) is the only remaining manual step
+**Date:** 2026-03-30 (rev 2026-04-28a/b/c: Fix D scope correction + Fix F + PM review iterations; rev 2026-04-29a: Fix F shipped + verified; rev 2026-04-29b: Phases 2/3/5 implemented + PM-review polish; rev 2026-04-29c: Phase 4 enabled in production, post-enable polish)
+**Status:** v9 — FULLY SHIPPED. All phases (1–5) live in production as of 2026-04-29 ~04:30 UTC.
 
 **Motivation:** Analysis of 1,927 production queries shows 3 dominant question patterns that account for ~63% of first messages on bill pages. Adding quick-action buttons improves UX (one-tap access to common answers) and, with caching, reduces AI token usage and latency for summary and pros/cons responses. This also directly fixes the stale bill status problem (HR 7147 incident) by ensuring status queries trigger the live OpenStates lookup.
 
@@ -691,7 +691,7 @@ logger.info("Published button cache invalidation", slug=bill_slug, version_note=
 3. **Backend caching + logging + feature flag** — ✅ SHIPPED 2026-04-29 (votebot `e8cb33c` + `b000c03`). ButtonCache service (Redis-backed), agent button-aware processing, query_logger fields (`button_type`, `cache_hit`), `quick_action_buttons_enabled` flag, `/votebot/v1/features` discovery endpoint, `DELETE /votebot/v1/cache/button/{slug}` admin endpoint. Deployed with flag off — entire feature inert until Step 5.
 4. **Frontend buttons** — ✅ SHIPPED 2026-04-29 (votebot `8fc9b53` + `b000c03`). Three buttons render below input on bill pages, fetch `/features` at init, hide-on-send + re-show on bill navigation, WCAG 2.1 AA (native `<button>`, aria-labels, focus indicators, focus-shift on hide). Minified bundle rebuilt. CloudFlare cache purge required at enablement.
 5. **Cache invalidation from ddp-sync** — ✅ SHIPPED 2026-04-29 (ddp-sync `58956ba` + votebot `e8cb33c` / `b000c03`). DDP-Sync publishes `{slug, reason, version_note}` on `votebot:cache:invalidate` after successful bill text re-ingestion (`chunks_created > 0`). VoteBot subscribes on startup with auto-reconnect supervisor (exponential backoff 1s→60s). Startup reconciliation iterates `ddp:bill_version:*` records (using new `bill_slug` field) and invalidates entries with `cached_at` < `last_checked`. Subscriber runs on all workers — invalidation is idempotent, leader election was deemed over-engineered at 2-worker scale.
-6. **Enable feature flag** — Manual step. Add `VOTEBOT_QUICK_ACTION_BUTTONS=true` to `~/votebot/.env`, restart `votebot.service`, purge CloudFlare cache for `ddp-chat.min.js`. Watch the eval canary at days 7/14/30 for `cache_hit` distribution and `bill_history_leak_count` (still must be 0 from Fix F).
+6. **Enable feature flag** — ✅ DONE 2026-04-29 ~04:30 UTC. `VOTEBOT_QUICK_ACTION_BUTTONS=true` set in `~/votebot/.env`, votebot restarted, CloudFlare cache purged for `ddp-chat.min.js`. Buttons live on bill pages in production. Watch the eval canary at days 7/14/30 for `cache_hit` distribution and `bill_history_leak_count` (still must be 0 from Fix F).
 
 Step 2 was independent of the buttons feature and shipped first; Step 5 was previously the cache-invalidation rollout, now bundled with Steps 3–4.
 
@@ -706,6 +706,20 @@ To run after Step 6 (enabling the flag):
 5. Tap "Pros and cons" — repeats step 2/3 on a different cached key.
 6. Trigger a real bill version change via DDP-Sync (or wait for the daily 04:00 UTC scheduler to find one). Verify the cache for that bill is cleared by tapping "Summarize" again — should fire a fresh LLM call (`cache_hit: false`).
 7. Manual cache clear: `curl -X DELETE -H "Authorization: Bearer $API_KEY" https://api.digitaldemocracyproject.org/votebot/cache/button/{slug}` — should return `{"slug": ..., "deleted": 0..2}`. Steps 1–3 can deploy without frontend changes. Step 4 is a separate widget deploy. Step 5 is an env var change. Step 6 is a ddp-sync change.
+
+### Post-enable iterations (2026-04-29, after Phase 4 went live)
+
+Surfaced from hands-on testing of the live feature. Each was shipped as a small follow-up commit:
+
+1. **Env var binding fix** (`a812b87`) — `VOTEBOT_QUICK_ACTION_BUTTONS=true` in `.env` was being ignored because Pydantic auto-derives env names from field names (`QUICK_ACTION_BUTTONS_ENABLED`, no prefix). The plan + README + Ramon's `.env` all used the prefixed form. Added `validation_alias=AliasChoices("VOTEBOT_QUICK_ACTION_BUTTONS", "QUICK_ACTION_BUTTONS_ENABLED")` so both names resolve.
+
+2. **One-line button layout** (`96ee574`) — at the default ~360px popup width, the original labels ("Summarize this bill" / "Pros and cons" / "Latest status & votes") wrapped onto two rows. Shortened visible text to "Summary" / "Pros & cons" / "Status & votes" (full descriptions preserved on `aria-label` for screen readers). Tightened gap (8px → 6px) and padding. Added `white-space: nowrap` per pill.
+
+3. **Persistent buttons across the session** (`1987e94`) — original spec was hide-after-first-press. In practice users want them as a recurring tool (especially with cache making repeat taps cheap), so changed to keep visible always but disable while a request is in-flight. Wired through the existing `disableInput`/`enableInput` lifecycle so no new state machine.
+
+4. **Cache-hit hang fix** (`88b9dd2`) — the cache-hit streaming path yielded a single `StreamChunkData(text=cached_response, done=True)` chunk. The WebSocket handler at `routes/websocket.py:817-865` only emits `stream_chunk` for chunks where `done=False`; done=True triggers `stream_end` and the chunk text is silently dropped. Result: widget got `stream_end` with no preceding `stream_chunk`, `finalizeStreamingMessage` early-returned because no streaming-message div was created, typing indicator stayed on forever — looked like a hang. Latent bug since Phase 2 shipped (`e8cb33c`); surfaced when the second tap of "Summary" hit the cache. Fix: split the cache-hit response into two yields (`text` then `done`) matching normal streaming convention.
+
+**Lesson worth recording**: always test the cache-hit code path explicitly. `cache_hit=true, duration_ms=3` in the JSONL log meant the server was healthy, but the widget showed nothing. Server-side metrics alone aren't sufficient validation for any feature that involves both server logic AND a client renderer.
 
 ### Rollback
 
