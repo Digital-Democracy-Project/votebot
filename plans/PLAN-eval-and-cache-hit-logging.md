@@ -376,11 +376,13 @@ PM v2 spec gap: retention for `flow_status:*` keys is unbounded growth concern i
 
 PM review spec gaps #8 and #9: pin the contract so dashboard parsers and log alert rules don't break on a typo.
 
-**Redis keys (all under existing `flow_status:` infrastructure):**
+**Redis keys (all under existing `ddp:flow:` infrastructure):**
+
+The actual Redis key prefix used by `RedisStore.set_flow_status()` is `ddp:flow:` (defined in `src/ddp_sync/services/redis_store.py::FLOW_STATUS_PREFIX`). Earlier drafts of this plan called it `flow_status:`; that was wrong — corrected after Phase 5 deploy. To inspect: `redis-cli GET ddp:flow:votebot_eval | jq .`
 
 ```python
 # Per-run flow status (consistent with set_flow_status pattern)
-flow_status:votebot_eval = {
+ddp:flow:votebot_eval = {
     "flow": "votebot_eval",
     "started_at": "2026-05-04T12:00:00Z",
     "completed_at": "2026-05-04T12:02:18Z",
