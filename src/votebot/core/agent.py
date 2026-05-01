@@ -1590,28 +1590,40 @@ class VoteBotAgent:
                 bill_identifier=bill_identifier,
             )
 
-        # Method 5: Look up bill identifier from Webflow CMS via slug
-        # When page_context.id is not set but slug is available, fetch bill details
-        # from Webflow to get the authoritative identifier and jurisdiction
-        if not bill_identifier and page_context and page_context.type == "bill":
+        # Method 5: Webflow CMS via slug. When we're on a bill page, CMS is
+        # the authoritative source for identifier, jurisdiction, AND session-
+        # code (e.g. FL "2026D" — current-year inference would 404 these).
+        # Always run when on a bill page with a slug; Methods 1-3 still win
+        # for identifier so the user can ask about a different bill than the
+        # one whose page they're on.
+        openstates_url_from_cms: str | None = None
+        session_from_cms: str | None = None
+        if page_context and page_context.type == "bill":
             slug = getattr(page_context, "slug", None)
             if slug:
                 try:
                     bill_details = await self.webflow_lookup.get_bill_details(slug=slug)
-                    if bill_details.found and bill_details.identifier:
-                        bill_identifier = bill_details.identifier.replace(" ", "")
-                        if bill_details.jurisdiction:
+                    if bill_details.found:
+                        if not bill_identifier and bill_details.identifier:
+                            bill_identifier = bill_details.identifier.replace(" ", "")
+                        if not jurisdiction and bill_details.jurisdiction:
                             jurisdiction = bill_details.jurisdiction
+                        if bill_details.session:
+                            session_from_cms = bill_details.session
+                        if bill_details.openstates_url:
+                            openstates_url_from_cms = bill_details.openstates_url
                         logger.info(
-                            "Resolved bill identifier from Webflow slug for pre-fetch",
+                            "Resolved bill from Webflow CMS for pre-fetch",
                             bill_identifier=bill_identifier,
                             jurisdiction=jurisdiction,
+                            session=session_from_cms,
+                            has_openstates_url=bool(openstates_url_from_cms),
                             slug=slug,
                         )
                 except Exception as e:
                     logger.warning("Error resolving bill from slug", slug=slug, error=str(e))
 
-        if not bill_identifier:
+        if not bill_identifier and not openstates_url_from_cms:
             return ""
 
         # Extract jurisdiction from message or page context (if not already resolved)
@@ -1620,13 +1632,16 @@ class VoteBotAgent:
         if not jurisdiction:
             jurisdiction = page_context.jurisdiction or "US"
 
-        # Determine session (default to current year, service will fallback)
-        session = getattr(page_context, "session", None)
+        # Session priority: page_context (widget-provided) → CMS session-code →
+        # current-year fallback. The year fallback only applies when the CMS
+        # has nothing — never used to override CMS truth.
+        session = (
+            getattr(page_context, "session", None)
+            or session_from_cms
+        )
         if not session:
             from datetime import datetime
             year = datetime.now().year
-            # For federal bills (US jurisdiction), use Congress number instead of year
-            # Congress numbers: 119th = 2025-2027, 118th = 2023-2024, etc.
             if jurisdiction and jurisdiction.upper() == "US":
                 congress_number = (year - 2025) // 2 + 119
                 session = str(congress_number)
@@ -1638,14 +1653,22 @@ class VoteBotAgent:
             jurisdiction=jurisdiction,
             session=session,
             bill_identifier=bill_identifier,
+            via_cms_url=bool(openstates_url_from_cms),
         )
 
         try:
-            result = await self.bill_votes.get_bill_info(
-                jurisdiction=jurisdiction,
-                session=session,
-                bill_identifier=bill_identifier,
-            )
+            # Prefer the CMS-stored OpenStates URL — it carries the canonical
+            # (juris, session, id) tuple, so no inference is needed.
+            if openstates_url_from_cms:
+                result = await self.bill_votes.get_bill_info_by_url(
+                    openstates_url_from_cms
+                )
+            else:
+                result = await self.bill_votes.get_bill_info(
+                    jurisdiction=jurisdiction,
+                    session=session,
+                    bill_identifier=bill_identifier,
+                )
 
             if result and result.found:
                 formatted = self.bill_votes.format_bill_info_document(result)

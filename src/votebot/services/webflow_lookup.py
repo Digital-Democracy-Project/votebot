@@ -67,6 +67,16 @@ class BillDetailsResult:
     description: str
     jurisdiction: str
     slug: str
+    # CMS fields needed to call OpenStates accurately. `session` is the
+    # OpenStates-friendly identifier (e.g. "2026D" for FL special sessions);
+    # never fall back to the calendar year here — that loses the suffix and
+    # 404s on every special session. `openstates_url` is the canonical
+    # /bills/<juris>/<session>/<id>/ link straight from the CMS — parse it
+    # rather than re-inferring session from the slug or current year.
+    session: str = ""
+    bill_prefix: str = ""
+    bill_number: str = ""
+    openstates_url: str = ""
     found: bool = False
 
 
@@ -637,6 +647,10 @@ class WebflowLookupService:
             description=description,
             jurisdiction=fields.get("jurisdiction", ""),
             slug=fields.get("slug", ""),
+            session=fields.get("session-code", "") or "",
+            bill_prefix=prefix,
+            bill_number=number,
+            openstates_url=fields.get("open-states-url-2", "") or "",
             found=True,
         )
 

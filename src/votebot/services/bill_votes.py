@@ -461,18 +461,36 @@ class BillVotesService:
         Returns:
             BillVotesResult or None if not found
         """
-        # Parse the URL
+        parsed = self._parse_openstates_url(openstates_url)
+        if not parsed:
+            return None
+        jurisdiction, session, bill_id = parsed
+        return await self.get_bill_votes(jurisdiction, session, bill_id)
+
+    async def get_bill_info_by_url(self, openstates_url: str) -> BillInfoResult | None:
+        """
+        Get full bill info using its OpenStates URL (e.g. from Webflow CMS).
+
+        Preferred over get_bill_info() when the CMS already stores the
+        canonical /bills/<juris>/<session>/<id>/ link — it bypasses the
+        session/identifier inference that fails for special sessions
+        (e.g. Florida "2026D"). Mirrors get_bill_votes_by_url().
+        """
+        parsed = self._parse_openstates_url(openstates_url)
+        if not parsed:
+            return None
+        jurisdiction, session, bill_id = parsed
+        return await self.get_bill_info(jurisdiction, session, bill_id)
+
+    @staticmethod
+    def _parse_openstates_url(openstates_url: str) -> tuple[str, str, str] | None:
+        """Parse /bills/<juris>/<session>/<id>/ out of an OpenStates URL."""
         pattern = r"https?://openstates\.org/([a-z]{2})/bills/([^/]+)/([^/]+)/?"
         match = re.match(pattern, openstates_url, re.IGNORECASE)
         if not match:
             logger.warning("Invalid OpenStates URL", url=openstates_url)
             return None
-
-        jurisdiction = match.group(1).lower()
-        session = match.group(2)
-        bill_id = match.group(3)
-
-        return await self.get_bill_votes(jurisdiction, session, bill_id)
+        return match.group(1).lower(), match.group(2), match.group(3)
 
     async def _fetch_from_openstates(
         self,
