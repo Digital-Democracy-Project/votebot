@@ -110,14 +110,39 @@ class VoteBotAgent:
         *,
         page_context: PageContext,
         button: str | None,
-    ) -> tuple[str, list[Citation]] | None:
-        """Return (response, citations) on cache hit, or None on miss / non-cacheable / no slug."""
+    ) -> dict | None:
+        """Return cache-hit payload on hit, or None on miss / non-cacheable / no slug.
+
+        Return shape on hit:
+            {
+                "response": str,
+                "citations": list[Citation],
+                "cache_hit_metadata": {
+                    "grounding_status": str,
+                    "retrieval_count": int | None,
+                    "retrieval_sources": list[str] | None,
+                },
+            }
+
+        ``cache_hit_metadata`` is passed through to ``_log_query`` so the
+        cache-hit query_processed event preserves the original response's
+        grounding_status / retrieval_sources instead of being recomputed
+        from ``retrieval_count=0`` (which would force "ungrounded").
+
+        Legacy v1 entries lack the grounding triplet — for those, the
+        helper substitutes ``grounding_status="legacy_unknown"`` so the
+        eval script can exclude them from grounding-rate denominators.
+        """
         if not button:
             return None
         slug = getattr(page_context, "slug", None)
         if not slug:
             return None
-        from votebot.services.button_cache import CACHEABLE_TYPES, get_button_cache
+        from votebot.services.button_cache import (
+            CACHEABLE_TYPES,
+            LEGACY_GROUNDING_STATUS,
+            get_button_cache,
+        )
         if button not in CACHEABLE_TYPES:
             return None
         cached = await get_button_cache().get(slug, button)
@@ -141,7 +166,55 @@ class VoteBotAgent:
             button_type=button,
             cached_at=cached.get("cached_at"),
         )
-        return cached.get("response", ""), cit_objs
+        return {
+            "response": cached.get("response", ""),
+            "citations": cit_objs,
+            "cache_hit_metadata": {
+                # Missing grounding_status indicates a v1 (legacy) entry;
+                # mark it so the eval script can exclude from rates.
+                "grounding_status": cached.get(
+                    "grounding_status", LEGACY_GROUNDING_STATUS
+                ),
+                "retrieval_count": cached.get("retrieval_count"),
+                "retrieval_sources": cached.get("retrieval_sources"),
+            },
+        }
+
+    @staticmethod
+    def _derive_grounding_metadata(
+        result: "AgentResult",
+        retrieval_result: "RetrievalResult | None",
+    ) -> dict:
+        """Compute grounding_status, retrieval_count, retrieval_sources for an event.
+
+        Used at cache-write time so the cached payload preserves the
+        grounding triplet, and at cache-miss log time. Cache-hit logging
+        bypasses this entirely and uses ``cache_hit_metadata`` from the
+        cached payload directly.
+        """
+        retrieval_sources = None
+        if retrieval_result and retrieval_result.chunks:
+            raw_sources = {
+                c.metadata.get("document_type")
+                for c in retrieval_result.chunks
+                if c.metadata and c.metadata.get("document_type")
+            }
+            retrieval_sources = normalize_retrieval_sources(raw_sources)
+
+        has_citations = len(result.citations) > 0
+        retrieval_count = result.retrieval_count
+        if retrieval_count > 0 and has_citations:
+            grounding_status = "grounded"
+        elif retrieval_count > 0:
+            grounding_status = "partial"
+        else:
+            grounding_status = "ungrounded"
+
+        return {
+            "retrieval_count": retrieval_count,
+            "retrieval_sources": retrieval_sources,
+            "grounding_status": grounding_status,
+        }
 
     async def _populate_button_cache(
         self,
@@ -151,8 +224,17 @@ class VoteBotAgent:
         response_text: str,
         citations: list[Citation],
         confidence: float,
+        grounding_status: str,
+        retrieval_count: int,
+        retrieval_sources: list[str] | None,
     ) -> None:
-        """Store a freshly-generated response in the button cache (cacheable types only)."""
+        """Store a freshly-generated response in the button cache (cacheable types only).
+
+        The grounding triplet (``grounding_status`` / ``retrieval_count`` /
+        ``retrieval_sources``) is persisted alongside the response so a
+        future cache-hit query_processed event can faithfully reproduce
+        the original grounding metadata. See plan §1.1.
+        """
         if not button:
             return
         slug = getattr(page_context, "slug", None)
@@ -177,6 +259,9 @@ class VoteBotAgent:
                     for c in citations
                 ],
                 "confidence": confidence,
+                "grounding_status": grounding_status,
+                "retrieval_count": retrieval_count,
+                "retrieval_sources": retrieval_sources,
             },
         )
 
@@ -206,6 +291,7 @@ class VoteBotAgent:
         error_type: str | None = None,
         button_type: str | None = None,
         cache_hit: bool | None = None,
+        cache_hit_metadata: dict | None = None,
     ) -> None:
         """Fire-and-forget log of a completed query to JSONL.
 
@@ -244,27 +330,35 @@ class VoteBotAgent:
             primary_intent = classify_primary_intent(page_context.type, message)
             sub_intent = classify_sub_intent(primary_intent, message)
 
-            # Retrieval sources
-            retrieval_sources = None
-            if retrieval_result and retrieval_result.chunks:
-                raw_sources = {
-                    c.metadata.get("document_type")
-                    for c in retrieval_result.chunks
-                    if c.metadata and c.metadata.get("document_type")
-                }
-                retrieval_sources = normalize_retrieval_sources(raw_sources)
-
-            # Grounding & augmentation
+            # has_citations / citations_count are always derived from
+            # ``result.citations`` — the cache-hit path replays the same
+            # citations list, so this is correct in both branches.
             has_citations = len(result.citations) > 0
             citations_count = len(result.citations)
-            retrieval_count = result.retrieval_count
 
-            if retrieval_count > 0 and has_citations:
-                grounding_status = "grounded"
-            elif retrieval_count > 0:
-                grounding_status = "partial"
+            # Grounding metadata: cache-hit path preserves the original
+            # response's triplet (passed in via ``cache_hit_metadata``);
+            # cache-miss path derives fresh from result + retrieval_result.
+            # Without this branch, cache hits would always log
+            # grounding_status="ungrounded" because retrieval_count=0 on
+            # the replay path. Plan §1.3 (B1+B2 fix).
+            #
+            # Important: do NOT coerce retrieval_count None→0 here. Legacy
+            # v1 cache hits store no retrieval_count, and the eval script
+            # uses ``None`` to mean "unknown" (excluded from retrieval-miss
+            # rate) vs ``0`` which means "deliberately no retrieval ran"
+            # (counted as a miss). PM v5 build review caught this drift.
+            if cache_hit_metadata is not None:
+                retrieval_count = cache_hit_metadata.get("retrieval_count")
+                retrieval_sources = cache_hit_metadata.get("retrieval_sources")
+                grounding_status = (
+                    cache_hit_metadata.get("grounding_status") or "ungrounded"
+                )
             else:
-                grounding_status = "ungrounded"
+                _grounding = self._derive_grounding_metadata(result, retrieval_result)
+                retrieval_count = _grounding["retrieval_count"]
+                retrieval_sources = _grounding["retrieval_sources"]
+                grounding_status = _grounding["grounding_status"]
 
             external_augmentation = "web" if result.web_search_used else "none"
 
@@ -380,7 +474,9 @@ class VoteBotAgent:
             button=effective_button,
         )
         if cache_hit_result is not None:
-            cached_response, cached_citations = cache_hit_result
+            cached_response = cache_hit_result["response"]
+            cached_citations = cache_hit_result["citations"]
+            cache_hit_metadata = cache_hit_result["cache_hit_metadata"]
             cached_result = AgentResult(
                 response=cached_response,
                 citations=cached_citations,
@@ -411,6 +507,7 @@ class VoteBotAgent:
                 retrieval_result=None,
                 button_type=effective_button,
                 cache_hit=True,
+                cache_hit_metadata=cache_hit_metadata,
             )
             return cached_result
 
@@ -612,13 +709,19 @@ class VoteBotAgent:
         )
 
         # Populate the button cache for cacheable types (miss path).
+        # Compute grounding metadata once and persist it alongside the
+        # response so future cache hits can replay it (plan §1.1).
         if effective_button:
+            _grounding = self._derive_grounding_metadata(result, retrieval_result)
             await self._populate_button_cache(
                 page_context=page_context,
                 button=effective_button,
                 response_text=result.response,
                 citations=result.citations,
                 confidence=result.confidence,
+                grounding_status=_grounding["grounding_status"],
+                retrieval_count=_grounding["retrieval_count"],
+                retrieval_sources=_grounding["retrieval_sources"],
             )
 
         # Fire-and-forget query logging
@@ -703,7 +806,9 @@ class VoteBotAgent:
             button=effective_button,
         )
         if cache_hit_result is not None:
-            cached_response, cached_citations = cache_hit_result
+            cached_response = cache_hit_result["response"]
+            cached_citations = cache_hit_result["citations"]
+            cache_hit_metadata = cache_hit_result["cache_hit_metadata"]
             # Cache-hit needs to mimic the normal streaming pattern, otherwise the
             # widget never displays the response: the WebSocket handler only emits
             # `stream_chunk` for chunks where done=False, and the widget's
@@ -753,6 +858,7 @@ class VoteBotAgent:
                 retrieval_result=None,
                 button_type=effective_button,
                 cache_hit=True,
+                cache_hit_metadata=cache_hit_metadata,
             )
             return
 
@@ -925,13 +1031,29 @@ class VoteBotAgent:
 
                 # Populate the button cache for cacheable types — only on miss path
                 # (cache hit path returned early at the top of this method).
+                # Compute grounding metadata once here so the cached payload
+                # carries the triplet for future hit replays (plan §1.1).
                 if effective_button:
+                    _stream_result_for_grounding = AgentResult(
+                        response=full_response,
+                        citations=citations,
+                        confidence=confidence,
+                        requires_human=False,
+                        tokens_used=0,
+                        retrieval_count=retrieval_result.total_retrieved,
+                    )
+                    _grounding = self._derive_grounding_metadata(
+                        _stream_result_for_grounding, retrieval_result
+                    )
                     await self._populate_button_cache(
                         page_context=page_context,
                         button=effective_button,
                         response_text=full_response,
                         citations=citations,
                         confidence=confidence,
+                        grounding_status=_grounding["grounding_status"],
+                        retrieval_count=_grounding["retrieval_count"],
+                        retrieval_sources=_grounding["retrieval_sources"],
                     )
 
                 # Log the completed streaming interaction

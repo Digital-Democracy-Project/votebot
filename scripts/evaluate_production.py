@@ -15,8 +15,9 @@ import argparse
 import asyncio
 import json
 import re
+import statistics
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Ensure scripts/ is on sys.path for rag_test_common / rag_ground_truth
@@ -325,8 +326,272 @@ def load_log_entries(
 
 
 # ---------------------------------------------------------------------------
-# Main evaluation
+# Phase 2 — denominator-correct metrics + pinned headline block
 # ---------------------------------------------------------------------------
+
+# Sentinel from button_cache.py — entries with this grounding_status are
+# legacy v1 cache hits and are excluded from grounding/citation/retrieval-miss
+# rates per the Phase 1 → Phase 2 contract documented in plan §1.2.
+LEGACY_GROUNDING_STATUS = "legacy_unknown"
+
+
+def _is_legacy_cache_hit(event: dict) -> bool:
+    """True if this event lacks attributable retrieval/grounding metadata
+    and should be excluded from grounding/citation/retrieval-miss rate
+    denominators.
+
+    Three sentinel patterns, any one of which is sufficient (defense in
+    depth — the agent code sets all three together for legacy v1 hits,
+    but checking each independently means a single field corruption or
+    upstream bug can't silently mis-classify the event):
+
+    1. ``grounding_status == "legacy_unknown"`` — the canonical sentinel.
+    2. ``cache_hit is True AND retrieval_count is None`` — a cache hit
+       without retrieval metadata.
+    3. ``retrieval_count is None`` (regardless of cache_hit) — defends
+       against any future code path that emits None-valued retrieval_count
+       for a non-cache event. PM v5 build review v3 flagged this edge:
+       without it, such events would silently inflate the RAG denominator
+       and skew retrieval-miss + citation rates downward.
+
+    The function name preserves the original "legacy_unknown" framing
+    because that is the dominant case in production data; it's effectively
+    "should be excluded from RAG-attribution rates" but with a more
+    descriptive sentinel name.
+    """
+    return (
+        event.get("grounding_status") == LEGACY_GROUNDING_STATUS
+        or event.get("retrieval_count") is None
+    )
+
+
+def _compute_headline_metrics(
+    all_entries: list[dict],
+    start_date: datetime,
+    end_date: datetime,
+    days: int,
+) -> dict:
+    """Compute the pinned headline JSON block (plan §2.8).
+
+    Denominators are sliced by event_type first (plan §2.1). Cache-hit
+    semantics:
+    - retrieval_miss_rate_excl_cache excludes both cache hits and legacy
+      v1 entries — only "real" RAG queries with zero retrievals count as
+      misses (plan §2.2).
+    - p50/p95 latency reported twice: across all query_processed events,
+      and across the RAG-only subset (plan §2.3).
+    - citation/grounding rates exclude legacy v1 hits per the §1.2
+      contract — they have no metadata to attribute.
+    """
+    qp = [e for e in all_entries if e.get("event_type", "query_processed") == "query_processed"]
+    mr = [e for e in all_entries if e.get("event_type") == "message_received"]
+    ce = [e for e in all_entries if e.get("event_type") == "conversation_ended"]
+    n_qp = len(qp)
+
+    # Citation/grounding rates: exclude legacy v1 hits (no metadata).
+    qp_attributable = [e for e in qp if not _is_legacy_cache_hit(e)]
+    n_attr = len(qp_attributable)
+
+    citation_count = sum(1 for e in qp_attributable if e.get("has_citations"))
+    citation_rate = citation_count / n_attr if n_attr else 0.0
+
+    confidences = [e.get("confidence") for e in qp_attributable if e.get("confidence") is not None]
+    avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+
+    # Cache-hit rate: across all query_processed events (cache hits ARE part
+    # of user-facing traffic; this measures adoption, not quality).
+    cache_hits = [e for e in qp if e.get("cache_hit") is True]
+    cache_hit_rate = len(cache_hits) / n_qp if n_qp else 0.0
+
+    # Retrieval miss rate: exclude cache hits + legacy entries (plan §2.2).
+    # ``retrieval_count == 0`` is intentional zero ("we tried, got nothing").
+    # ``retrieval_count is None`` is "unknown" (legacy) — already filtered.
+    rag_only = [e for e in qp if not e.get("cache_hit") and not _is_legacy_cache_hit(e)]
+    retrieval_misses = [e for e in rag_only if e.get("retrieval_count") == 0]
+    retrieval_miss_rate_excl_cache = (
+        len(retrieval_misses) / len(rag_only) if rag_only else 0.0
+    )
+
+    # Fallback / web search rates over query_processed.
+    fallback = [e for e in qp if e.get("fallback_used")]
+    fallback_rate = len(fallback) / n_qp if n_qp else 0.0
+    web_search = [e for e in qp if e.get("web_search_used")]
+    web_search_rate = len(web_search) / n_qp if n_qp else 0.0
+
+    # Latency two ways (plan §2.3). Linear interpolation between adjacent
+    # ranks (same algorithm as numpy.percentile / Excel PERCENTILE.INC) so
+    # P50 on small N doesn't drift one rank high. PM v5 build review v3.
+    def _percentile(values: list[float], pct: float) -> int:
+        if not values:
+            return 0
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        if n == 1:
+            return int(sorted_vals[0])
+        k = (n - 1) * pct
+        f = int(k)
+        c = min(f + 1, n - 1)
+        if f == c:
+            return int(sorted_vals[f])
+        return int(sorted_vals[f] + (k - f) * (sorted_vals[c] - sorted_vals[f]))
+
+    latencies_all = [e.get("duration_ms", 0) for e in qp if e.get("duration_ms")]
+    latencies_rag = [e.get("duration_ms", 0) for e in rag_only if e.get("duration_ms")]
+
+    # Bill-history leak canary.
+    leak_count = sum(
+        1 for e in qp if "bill-history" in (e.get("retrieval_sources") or [])
+    )
+
+    # Pass rate is computed over validated TestResults later — we don't have
+    # them here. Caller injects pass_rate after validation completes.
+    return {
+        "window_days": days,
+        "window_start": start_date.strftime("%Y-%m-%d"),
+        "window_end": end_date.strftime("%Y-%m-%d"),
+        "n_query_processed": n_qp,
+        "n_message_received": len(mr),
+        "n_conversation_ended": len(ce),
+        "n_attributable": n_attr,  # qp minus legacy_unknown
+        # Computed directly via _is_legacy_cache_hit() rather than
+        # n_qp - n_attr so this metric stays accurate if future filters
+        # add other exclusion reasons. PM v5 build review v3.
+        "n_legacy_cache_hits": sum(1 for e in qp if _is_legacy_cache_hit(e)),
+        "pass_rate": None,  # injected later from TestReport
+        "citation_rate": round(citation_rate, 4),
+        "avg_confidence": round(avg_confidence, 4),
+        "fallback_rate": round(fallback_rate, 4),
+        "web_search_rate": round(web_search_rate, 4),
+        "cache_hit_rate": round(cache_hit_rate, 4),
+        "retrieval_miss_rate_excl_cache": round(retrieval_miss_rate_excl_cache, 4),
+        "p50_latency_ms_all": _percentile(latencies_all, 0.50),
+        "p95_latency_ms_all": _percentile(latencies_all, 0.95),
+        "p50_latency_ms_rag_only": _percentile(latencies_rag, 0.50),
+        "p95_latency_ms_rag_only": _percentile(latencies_rag, 0.95),
+        "bill_history_leak_count": leak_count,
+    }
+
+
+def _print_headline_summary(headline: dict) -> None:
+    """One-line-per-row top-of-stdout summary (plan §2.7).
+
+    The cron pipeline tails the first ~10 lines of stdout to answer
+    "did anything regress?" without parsing JSON. Keep this compact and
+    scannable.
+    """
+    print()
+    print("=" * 70)
+    print(
+        f"=== VoteBot eval — last {headline['window_days']} days "
+        f"({headline['window_start']} → {headline['window_end']}) ==="
+    )
+    print(
+        f"N={headline['n_query_processed']} query_processed "
+        f"(+{headline['n_message_received']} message_received, "
+        f"+{headline['n_conversation_ended']} conversation_ended)"
+    )
+    if headline['n_legacy_cache_hits']:
+        print(
+            f"  (excluded from rates: {headline['n_legacy_cache_hits']} "
+            f"legacy v1 cache hits)"
+        )
+    cite_pct = headline['citation_rate'] * 100
+    print(f"Citation rate: {cite_pct:.1f}%   (target ≥60%)")
+    print(
+        f"Avg confidence: {headline['avg_confidence']:.2f}   "
+        f"Avg latency P50/P95: {headline['p50_latency_ms_all']/1000:.1f}s / "
+        f"{headline['p95_latency_ms_all']/1000:.1f}s   "
+        f"(RAG-only: {headline['p50_latency_ms_rag_only']/1000:.1f}s / "
+        f"{headline['p95_latency_ms_rag_only']/1000:.1f}s)"
+    )
+    print(
+        f"Fallback rate: {headline['fallback_rate']*100:.1f}%    "
+        f"Cache hit rate: {headline['cache_hit_rate']*100:.1f}%"
+    )
+    leak = headline['bill_history_leak_count']
+    print(f"bill_history_leak_count: {leak} {'✓' if leak == 0 else '*** REGRESSION ***'}")
+    print("=" * 70)
+
+
+def _print_cache_hit_breakdown(qp: list[dict]) -> None:
+    """Cache-hit breakdown section (plan §2.4)."""
+    n_qp = len(qp)
+    if n_qp == 0:
+        return
+
+    cache_hits = [e for e in qp if e.get("cache_hit") is True]
+    cache_misses = [e for e in qp if e.get("cache_hit") is False]
+    if not cache_hits:
+        return  # nothing to break down
+
+    by_button: dict[str, int] = {}
+    for e in cache_hits:
+        bt = e.get("button_type") or "unknown"
+        by_button[bt] = by_button.get(bt, 0) + 1
+
+    hit_lat = [e.get("duration_ms", 0) for e in cache_hits if e.get("duration_ms")]
+    miss_lat = [e.get("duration_ms", 0) for e in cache_misses if e.get("duration_ms")]
+
+    hit_cited = sum(1 for e in cache_hits if e.get("has_citations"))
+    miss_cited = sum(1 for e in cache_misses if e.get("has_citations"))
+
+    print(f"\n--- Cache-hit breakdown ---")
+    print(
+        f"  Cache hits:      {len(cache_hits)} of {n_qp} query_processed "
+        f"({len(cache_hits)/n_qp*100:.1f}%)"
+    )
+    button_str = ", ".join(f"{k} {v}" for k, v in sorted(by_button.items()))
+    print(f"  By button:       {button_str}")
+    if hit_lat or miss_lat:
+        avg_hit = (sum(hit_lat) / len(hit_lat)) if hit_lat else 0
+        avg_miss = (sum(miss_lat) / len(miss_lat)) if miss_lat else 0
+        print(
+            f"  Avg latency_ms:  {avg_hit:.0f} (cache hits) vs "
+            f"{avg_miss:.0f} (cache misses)"
+        )
+    if cache_hits:
+        print(
+            f"  Citation rate on hits:  {hit_cited/len(cache_hits)*100:.1f}% "
+            f"(should match miss rate after Phase 1: "
+            f"{miss_cited/len(cache_misses)*100 if cache_misses else 0:.1f}%)"
+        )
+
+
+def _print_subintent_breakdown(qp: list[dict]) -> None:
+    """Per-sub-intent + per-button citation rate cross-tabs (plan §2.5)."""
+    if not qp:
+        return
+
+    qp_attr = [e for e in qp if not _is_legacy_cache_hit(e)]
+
+    # Citation rate by sub_intent
+    by_sub: dict[str, dict[str, int]] = {}
+    for e in qp_attr:
+        si = e.get("sub_intent") or "none"
+        d = by_sub.setdefault(si, {"n": 0, "cited": 0})
+        d["n"] += 1
+        if e.get("has_citations"):
+            d["cited"] += 1
+    if by_sub:
+        print(f"\n--- Citation rate by sub_intent ---")
+        for si, d in sorted(by_sub.items(), key=lambda x: -x[1]["n"]):
+            rate = d["cited"] / d["n"] * 100 if d["n"] else 0
+            print(f"  {si:<25s} n={d['n']:3d}  cited={d['cited']:3d}  rate={rate:5.1f}%")
+
+    # Citation rate by button_type
+    by_btn: dict[str, dict[str, int]] = {}
+    for e in qp_attr:
+        bt = e.get("button_type") or "none"
+        d = by_btn.setdefault(bt, {"n": 0, "cited": 0})
+        d["n"] += 1
+        if e.get("has_citations"):
+            d["cited"] += 1
+    if len(by_btn) > 1:  # only interesting if buttons were used
+        print(f"\n--- Citation rate by button_type ---")
+        for bt, d in sorted(by_btn.items(), key=lambda x: -x[1]["n"]):
+            rate = d["cited"] / d["n"] * 100 if d["n"] else 0
+            print(f"  {bt:<15s} n={d['n']:3d}  cited={d['cited']:3d}  rate={rate:5.1f}%")
+
 
 def _print_analytics_report(entries: list[dict], verbose: bool = False) -> None:
     """Print analytics metrics from structured event log entries.
@@ -403,11 +668,21 @@ def _print_analytics_report(entries: list[dict], verbose: bool = False) -> None:
         for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
             print(f"    {reason}: {count}")
 
-    # --- Retrieval Miss ---
-    retrieval_miss = [e for e in query_events if e.get("retrieval_count", 0) == 0]
-    print(f"  Retrieval miss rate: {len(retrieval_miss)} ({len(retrieval_miss)/total*100:.1f}%)")
+    # --- Retrieval Miss (cache hits + legacy excluded per plan §2.2) ---
+    # Cache hits have retrieval_count=0 by design; legacy v1 entries have None.
+    # Neither is a "real" retrieval miss — they didn't run the retrieval path.
+    rag_only = [e for e in query_events if not e.get("cache_hit") and not _is_legacy_cache_hit(e)]
+    retrieval_miss = [e for e in rag_only if e.get("retrieval_count") == 0]
+    if rag_only:
+        print(
+            f"  Retrieval miss rate: {len(retrieval_miss)} of {len(rag_only)} RAG-only "
+            f"({len(retrieval_miss)/len(rag_only)*100:.1f}%) "
+            f"[excludes {total - len(rag_only)} cache-hits + legacy entries]"
+        )
+    else:
+        print(f"  Retrieval miss rate: 0 / 0 RAG-only (all events are cache hits or legacy)")
 
-    # --- Grounding Distribution ---
+    # --- Grounding Distribution (legacy_unknown shown separately) ---
     grounding_counts: dict[str, int] = {}
     for e in query_events:
         gs = e.get("grounding_status")
@@ -415,8 +690,15 @@ def _print_analytics_report(entries: list[dict], verbose: bool = False) -> None:
             grounding_counts[gs] = grounding_counts.get(gs, 0) + 1
     if grounding_counts:
         print(f"\n--- Grounding Distribution ---")
+        # Exclude legacy_unknown from the rate calculation; report separately.
+        attributable = sum(c for s, c in grounding_counts.items() if s != LEGACY_GROUNDING_STATUS)
         for status, count in sorted(grounding_counts.items(), key=lambda x: -x[1]):
-            print(f"  {status}: {count} ({count/total*100:.1f}%)")
+            if status == LEGACY_GROUNDING_STATUS:
+                print(f"  {status}: {count} (excluded from rate denominator)")
+            elif attributable:
+                print(f"  {status}: {count} ({count/attributable*100:.1f}% of attributable)")
+            else:
+                print(f"  {status}: {count}")
 
     # --- Handoff Rates (multi-level) ---
     query_handoffs = [e for e in query_events if e.get("handoff_triggered")]
@@ -497,6 +779,7 @@ async def evaluate(
     output: str | None = None,
     visitor: str | None = None,
     event_type: str | None = None,
+    days: int = 1,
 ) -> TestReport:
     """Run offline evaluation against ground truth."""
     # Load log entries
@@ -512,7 +795,20 @@ async def evaluate(
         print("No entries found. Nothing to evaluate.")
         return TestReport(timestamp=datetime.now().isoformat())
 
-    # Classify queries
+    # Compute and print the headline summary FIRST so the cron log tail
+    # answers "did anything regress?" without scrolling (plan §2.7).
+    headline = _compute_headline_metrics(entries, start_date, end_date, days)
+    _print_headline_summary(headline)
+
+    # Slice by event_type before classification (plan §2.1). Without this,
+    # message_received + conversation_ended events get classified as
+    # "general" and inflate the TestResult denominator.
+    query_events = [
+        e for e in entries
+        if e.get("event_type", "query_processed") == "query_processed"
+    ]
+
+    # Classify queries (only over query_processed events).
     classified: dict[str, list[dict]] = {
         "bill": [],
         "organization": [],
@@ -520,11 +816,11 @@ async def evaluate(
         "general": [],
         "out_of_scope": [],
     }
-    for entry in entries:
+    for entry in query_events:
         query_type = classify_query(entry)
         classified[query_type].append(entry)
 
-    print(f"\nQuery classification:")
+    print(f"\nQuery classification (n={len(query_events)} query_processed events):")
     for qtype, elist in classified.items():
         print(f"  {qtype}: {len(elist)}")
 
@@ -605,11 +901,61 @@ async def evaluate(
     # Print analytics report (for entries with structured event fields)
     _print_analytics_report(entries, verbose=verbose)
 
-    # Save to JSON if output path specified
-    output_path = output or f"eval_report_{start_date.strftime('%Y-%m-%d')}.json"
-    save_report(report, output_path)
+    # New Phase 2 breakdowns (cache-hit + per-sub-intent + per-button)
+    _print_cache_hit_breakdown(query_events)
+    _print_subintent_breakdown(query_events)
+
+    # Inject pass_rate into the headline now that validation has run.
+    headline["pass_rate"] = round(report.pass_rate / 100, 4) if report.pass_rate else 0.0
+
+    # Save the augmented report (plan §2.6 + §2.8). Filename includes the
+    # window end date + days + UTC HHMMSS so successive runs don't collide.
+    if output:
+        output_path = output
+    else:
+        now_utc = datetime.now(timezone.utc)
+        output_path = (
+            f"eval_report_{end_date.strftime('%Y-%m-%d')}_last{days}d_"
+            f"{now_utc.strftime('%H%M%S')}.json"
+        )
+    _save_augmented_report(report, headline, output_path)
 
     return report
+
+
+def _save_augmented_report(report: TestReport, headline: dict, output_path: str) -> None:
+    """Save report JSON with the pinned ``headline`` block at the top.
+
+    The cron pipeline (Phase 3) parses the headline block as a stable
+    contract — keeping all the existing report fields nested under
+    ``report`` so future dashboard parsers don't need to fish keys out.
+    """
+    from dataclasses import asdict
+
+    augmented = {
+        "headline": headline,
+        "report": {
+            "timestamp": report.timestamp,
+            "total_tests": report.total_tests,
+            "passed": report.passed,
+            "failed": report.failed,
+            "not_validated": report.not_validated,
+            "errors": report.errors,
+            "pass_rate": report.pass_rate,
+            "avg_confidence": report.avg_confidence,
+            "avg_latency": report.avg_latency,
+            "p95_latency": report.p95_latency,
+            "citation_rate": report.citation_rate,
+            "results_by_category": report.results_by_category,
+            "results_by_entity_type": report.results_by_entity_type,
+            "results_by_jurisdiction": report.results_by_jurisdiction,
+            "results_by_mode": report.results_by_mode,
+            "all_results": [asdict(r) for r in report.all_results],
+        },
+    }
+    with open(output_path, "w") as f:
+        json.dump(augmented, f, indent=2, default=str)
+    print(f"\nReport saved to: {output_path}")
 
 
 def parse_args():
@@ -687,6 +1033,7 @@ def main():
             output=args.output,
             visitor=args.visitor,
             event_type=args.event_type,
+            days=args.days,
         )
     )
 

@@ -134,9 +134,10 @@ async def test_list_cached_keys_uses_scan(cache, fake_store):
     ])
 
 
-def test_make_key_format():
-    assert make_key("hr-1234", "summary") == "votebot:button:hr-1234:summary"
-    assert make_key("hr-1234", "pros_cons") == "votebot:button:hr-1234:pros_cons"
+def test_make_key_uses_v2_prefix():
+    """v2 prefix bump (plan §1.2) — new writes always include `:v2:`."""
+    assert make_key("hr-1234", "summary") == "votebot:button:v2:hr-1234:summary"
+    assert make_key("hr-1234", "pros_cons") == "votebot:button:v2:hr-1234:pros_cons"
 
 
 def test_cacheable_types_excludes_status_votes():
@@ -151,7 +152,8 @@ async def test_get_handles_missing_optional_citation_fields(cache, fake_store):
 
     Defensive: get() should still return the dict, and downstream code (in
     agent._maybe_serve_from_button_cache) uses .get(... , default) so missing
-    fields don't crash citation reconstruction.
+    fields don't crash citation reconstruction. Stored under the legacy v1
+    prefix so the dual-read fallback exercises the same code path.
     """
     # Simulate an old cached payload missing url + relevance_score
     minimal_cached = {
@@ -164,6 +166,7 @@ async def test_get_handles_missing_optional_citation_fields(cache, fake_store):
         "cached_at": "2026-04-01T00:00:00+00:00",
         "button_type": "summary",
     }
+    # Legacy v1 prefix (no ":v2:") — exercises the dual-read fallback in get().
     fake_store._client.store["votebot:button:hr-1234:summary"] = json.dumps(minimal_cached)
 
     got = await cache.get("hr-1234", "summary")
@@ -174,3 +177,23 @@ async def test_get_handles_missing_optional_citation_fields(cache, fake_store):
     cit = got["citations"][0]
     assert cit["source"] == "Congress.gov"
     assert "url" not in cit  # not present in old payload — OK
+
+
+@pytest.mark.asyncio
+async def test_set_persists_grounding_triplet(cache, fake_store):
+    """Plan §1.1 — payload carries grounding_status, retrieval_count, retrieval_sources."""
+    payload = {
+        "response": "Bill summary",
+        "citations": [],
+        "confidence": 0.9,
+        "grounding_status": "grounded",
+        "retrieval_count": 3,
+        "retrieval_sources": ["bill", "bill-webflow"],
+    }
+    await cache.set("hr-1234", "summary", payload)
+
+    got = await cache.get("hr-1234", "summary")
+    assert got is not None
+    assert got["grounding_status"] == "grounded"
+    assert got["retrieval_count"] == 3
+    assert got["retrieval_sources"] == ["bill", "bill-webflow"]

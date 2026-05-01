@@ -1,14 +1,23 @@
 """Redis-backed cache for quick-action button responses.
 
-See plans/PLAN-quick-action-buttons.md for the full architecture.
+See plans/PLAN-quick-action-buttons.md for the full architecture, and
+plans/PLAN-eval-and-cache-hit-logging.md §1.1-1.2 for the v2 schema.
 
 Cacheable types: 'summary' and 'pros_cons' — these depend only on bill text,
 which only changes when ddp-sync detects a new bill version (publishes an
 invalidation event). 'status_votes' is NEVER cached because it must always
 hit live OpenStates for fresh data.
 
-Keys: votebot:button:{slug}:{button_type}
+Keys (v2): votebot:button:v2:{slug}:{button_type}
 TTL: 7-day safety net only — primary invalidation is amendment-triggered.
+
+The v2 key prefix introduced in plan §1.2 carries grounding_status,
+retrieval_count, and retrieval_sources alongside the response text so
+cache-hit query_processed log events can preserve the original grounding
+metadata. Legacy v1 entries (without those fields) remain readable for
+their remaining 7-day TTL via a dual-read fallback in get(); on a v1 hit,
+grounding_status falls through to "legacy_unknown" so the eval script
+can cleanly exclude them from grounding/citation rate calculations.
 """
 
 from __future__ import annotations
@@ -41,13 +50,30 @@ ALL_BUTTON_TYPES: tuple[str, ...] = ("summary", "pros_cons", "status_votes")
 # cases like bills being removed from Webflow entirely.
 SAFETY_TTL = 7 * 24 * 60 * 60
 
-# Key prefix used by all button cache entries. Module-level constant so the
-# startup reconciliation scan can find them without instantiating the cache.
-KEY_PREFIX = "votebot:button:"
+# Key prefix used by v2 cache entries (current schema). Module-level constant
+# so the startup reconciliation scan can find them without instantiating the
+# cache. v2 carries grounding_status, retrieval_count, retrieval_sources
+# alongside the response.
+KEY_PREFIX = "votebot:button:v2:"
+
+# Legacy v1 prefix — read-only fallback during the 7-day migration window.
+# v1 entries lack grounding metadata; on a v1 hit, the consumer marks the
+# event with grounding_status="legacy_unknown" so the eval script excludes it.
+LEGACY_KEY_PREFIX_V1 = "votebot:button:"
+
+# Sentinel grounding_status for cache-hits that came from a v1 entry.
+# Recognized by scripts/evaluate_production.py to skip these from grounding
+# and citation-rate denominators (they have no metadata to attribute).
+LEGACY_GROUNDING_STATUS = "legacy_unknown"
 
 
 def make_key(slug: str, button_type: str) -> str:
     return f"{KEY_PREFIX}{slug}:{button_type}"
+
+
+def make_v1_key(slug: str, button_type: str) -> str:
+    """Compose the legacy v1 key for read-only dual-read fallback."""
+    return f"{LEGACY_KEY_PREFIX_V1}{slug}:{button_type}"
 
 
 class ButtonCache:
@@ -68,16 +94,34 @@ class ButtonCache:
         return self._store._client
 
     async def get(self, slug: str, button_type: str) -> Optional[dict]:
-        """Return cached response dict, or None on miss / non-cacheable type / Redis down."""
+        """Return cached response dict, or None on miss / non-cacheable type / Redis down.
+
+        Reads v2 first; on miss, attempts a read-only fallback to the legacy
+        v1 prefix for the duration of the 7-day migration window. v1 entries
+        are returned as-is (the consumer treats missing grounding_status as
+        ``legacy_unknown``).
+        """
         if button_type not in CACHEABLE_TYPES:
             return None
         if self._client is None:
             return None
         try:
             raw = await self._client.get(make_key(slug, button_type))
-            if not raw:
+            if raw:
+                return json.loads(raw)
+            # v2 miss — fall back to read-only lookup under v1 prefix.
+            # Writes never go to v1 (set() always uses make_key); legacy
+            # entries decay on their own 7-day TTL.
+            v1_raw = await self._client.get(make_v1_key(slug, button_type))
+            if not v1_raw:
                 return None
-            return json.loads(raw)
+            payload = json.loads(v1_raw)
+            logger.info(
+                "ButtonCache: v1 dual-read hit",
+                slug=slug,
+                button_type=button_type,
+            )
+            return payload
         except Exception as e:
             logger.warning(
                 "ButtonCache: get failed",
@@ -93,6 +137,19 @@ class ButtonCache:
         The stored payload is augmented with cached_at + button_type so the
         startup reconciliation scan can compare timestamps without re-deriving
         them from the key.
+
+        Expected v2 keys in ``response`` (caller's responsibility — see
+        agent._populate_button_cache):
+          - ``response`` (str): the response text to replay on hit
+          - ``citations`` (list[dict]): serialized Citation objects
+          - ``confidence`` (float)
+          - ``grounding_status`` (str): "grounded" | "partial" | "ungrounded"
+          - ``retrieval_count`` (int)
+          - ``retrieval_sources`` (list[str] | None): normalized doc-types
+
+        The grounding triplet was added in plan §1.1 so cache-hit
+        query_processed log events can faithfully reproduce the original
+        grounding metadata instead of defaulting to "ungrounded".
         """
         if button_type not in CACHEABLE_TYPES:
             return
