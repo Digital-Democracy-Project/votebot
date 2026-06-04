@@ -68,6 +68,7 @@ scripts/*_webflow.json
 scripts/*_openstates.json
 scripts/explore_*.py
 test_report_*.json
+eval_report_*.json
 nightly_sync_logs*.txt
 overnight_sync.log
 
