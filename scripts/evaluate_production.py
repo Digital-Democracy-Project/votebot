@@ -781,6 +781,7 @@ async def evaluate(
     event_type: str | None = None,
     days: int = 1,
     reclassify_intents: bool = False,
+    recompute_citations: bool = False,
 ) -> TestReport:
     """Run offline evaluation against ground truth."""
     # Load log entries
@@ -811,6 +812,34 @@ async def evaluate(
                 reclassified += 1
             e["sub_intent"] = new_si
         print(f"  Reclassified sub_intent for {reclassified} entries using current intent.py")
+
+    if recompute_citations:
+        import re as _re
+        _markdown_pat = _re.compile(r"\[Source:\s*[^\]]+\]\([^)]+\)")
+        _bold_inline_pat = _re.compile(r"\*\*Sources?:\*\*\s*\[[^\]]+\]\([^)]+\)")
+        _sources_block_pat = _re.compile(r"\*\*Sources?:\*\*[ \t]*\n((?:[ \t]*[-*][ \t]*.+\n?)*)")
+        _link_pat = _re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+        recomputed = 0
+        for e in entries:
+            if e.get("event_type") != "query_processed":
+                continue
+            response = e.get("response") or ""
+            found = bool(
+                _markdown_pat.search(response) or
+                _bold_inline_pat.search(response) or
+                (lambda m: m and _link_pat.search(m.group(1)))(_sources_block_pat.search(response))
+            )
+            if found != bool(e.get("has_citations")):
+                recomputed += 1
+            e["has_citations"] = found
+            if found and not e.get("citations_count"):
+                # rough count: sum all detected links across formats
+                count = len(_markdown_pat.findall(response)) + len(_bold_inline_pat.findall(response))
+                block = _sources_block_pat.search(response)
+                if block:
+                    count += len(_link_pat.findall(block.group(1)))
+                e["citations_count"] = max(e.get("citations_count") or 0, count)
+        print(f"  Recomputed has_citations for {recomputed} entries using current citation patterns")
 
     # Compute and print the headline summary FIRST so the cron log tail
     # answers "did anything regress?" without scrolling (plan §2.7).
@@ -1032,6 +1061,11 @@ def parse_args():
         action="store_true",
         help="Re-run intent classification from current code, overriding logged sub_intent values.",
     )
+    parser.add_argument(
+        "--recompute-citations",
+        action="store_true",
+        help="Re-run citation detection from current patterns, overriding logged has_citations values.",
+    )
     return parser.parse_args()
 
 
@@ -1057,6 +1091,7 @@ def main():
             event_type=args.event_type,
             days=args.days,
             reclassify_intents=args.reclassify_intents,
+            recompute_citations=args.recompute_citations,
         )
     )
 
