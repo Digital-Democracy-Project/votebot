@@ -780,6 +780,7 @@ async def evaluate(
     visitor: str | None = None,
     event_type: str | None = None,
     days: int = 1,
+    reclassify_intents: bool = False,
 ) -> TestReport:
     """Run offline evaluation against ground truth."""
     # Load log entries
@@ -794,6 +795,22 @@ async def evaluate(
     if not entries:
         print("No entries found. Nothing to evaluate.")
         return TestReport(timestamp=datetime.now().isoformat())
+
+    if reclassify_intents:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+        from votebot.utils.intent import classify_sub_intent
+        reclassified = 0
+        for e in entries:
+            if e.get("event_type") != "query_processed":
+                continue
+            pi = e.get("primary_intent", "general")
+            msg = e.get("message", "")
+            new_si = classify_sub_intent(pi, msg)
+            if new_si != e.get("sub_intent"):
+                reclassified += 1
+            e["sub_intent"] = new_si
+        print(f"  Reclassified sub_intent for {reclassified} entries using current intent.py")
 
     # Compute and print the headline summary FIRST so the cron log tail
     # answers "did anything regress?" without scrolling (plan §2.7).
@@ -1010,6 +1027,11 @@ def parse_args():
         default=None,
         help="Filter by event type (e.g., query_processed, conversation_ended).",
     )
+    parser.add_argument(
+        "--reclassify-intents",
+        action="store_true",
+        help="Re-run intent classification from current code, overriding logged sub_intent values.",
+    )
     return parser.parse_args()
 
 
@@ -1034,6 +1056,7 @@ def main():
             visitor=args.visitor,
             event_type=args.event_type,
             days=args.days,
+            reclassify_intents=args.reclassify_intents,
         )
     )
 

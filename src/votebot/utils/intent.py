@@ -59,6 +59,8 @@ class SubIntent(StrEnum):
     HOW_TO_VOTE = "how_to_vote"
     ABOUT_DDP = "about_ddp"
     ISSUE_AREA = "issue_area"
+    # cross-primary — text refinement requests
+    TEXT_EDITING = "text_editing"
     # out_of_scope
     GREETING = "greeting"
     OFF_TOPIC = "off_topic"
@@ -110,6 +112,13 @@ _OUT_OF_SCOPE_KEYWORDS = [
 
 # Sub-intent keyword maps per primary intent
 _BILL_SUB_KEYWORDS: dict[str, list[str]] = {
+    "text_editing": [
+        "concise", "trim", "shorten", "rewrite",
+        "make it shorter", "make it longer", "make it more concise",
+        "fewer words", "more words", "a few more words", "one more word",
+        "slightly more", "slightly less", "add back",
+        "more detail", "less detail", "expand", "paragraph",
+    ],
     "vote_history": [
         "vote", "voted", "voting", "yea", "nay", "roll call", "tally",
         "passed the house", "passed the senate",
@@ -138,9 +147,7 @@ _BILL_SUB_KEYWORDS: dict[str, list[str]] = {
     "comparison": ["compare", "difference", "vs", "versus", "similar"],
     "summary": [
         "summary", "summarize", "overview", "about", "what is this bill",
-        "tell me about", "expand", "concise", "trim", "shorten",
-        "paragraph", "more detail", "less detail", "rewrite",
-        "make it", "add back", "slightly more",
+        "tell me about", "make it",
     ],
     "civic_action": [
         "email", "letter", "contact", "write to", "call my",
@@ -163,15 +170,19 @@ _ORG_SUB_KEYWORDS: dict[str, list[str]] = {
 }
 
 _GENERAL_SUB_KEYWORDS: dict[str, list[str]] = {
+    "text_editing": [
+        "concise", "trim", "shorten", "rewrite",
+        "make it shorter", "make it longer", "make it more concise",
+        "fewer words", "more words", "a few more words", "one more word",
+        "slightly more", "slightly less", "add back",
+        "more detail", "less detail", "expand", "paragraph",
+    ],
     "navigation": ["where", "find", "navigate", "page", "link", "go to"],
     "how_to_vote": ["vote", "register", "ballot", "how do i vote", "cast"],
     "about_ddp": ["ddp", "digital democracy", "votebot", "this site", "this platform"],
     "issue_area": [
         "issue", "topic", "policy", "immigration", "healthcare",
         "education", "environment",
-        "concise", "expand", "trim", "shorten", "more detail",
-        "less detail", "make it", "add back", "slightly more",
-        "paragraph", "rewrite",
     ],
 }
 
