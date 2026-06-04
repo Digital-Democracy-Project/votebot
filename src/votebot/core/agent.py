@@ -1145,46 +1145,91 @@ class VoteBotAgent:
         citations = []
 
         # Look for citation patterns:
-        # 1. Markdown link format: [Source: name](url)
-        # 2. Plain format: [Source: name]
+        # 1. [Source: name](url) — preferred explicit format
+        # 2. [Source: name] — plain, no URL
+        # 3. **Source:** [name](url) — bold header + inline link
+        # 4. **Sources:** bullet list — bold header + bullet links on following lines
         markdown_pattern = r"\[Source:\s*([^\]]+)\]\(([^)]+)\)"
         plain_pattern = r"\[Source:\s*([^\]]+)\](?!\()"
+        # **Source:** [name](url) or **Sources:** [name](url) on same line
+        bold_inline_pattern = r"\*\*Sources?:\*\*\s*\[([^\]]+)\]\(([^)]+)\)"
 
-        # Extract markdown citations (with URLs)
         markdown_matches = re.findall(markdown_pattern, response)
-        # Extract plain citations (without URLs)
         plain_matches = re.findall(plain_pattern, response)
+        bold_inline_matches = re.findall(bold_inline_pattern, response)
 
-        # Combine all source names for matching
-        all_source_names = [m[0] for m in markdown_matches] + plain_matches
+        # Extract [name](url) pairs from **Sources:** bullet list sections
+        bullet_matches: list[tuple[str, str]] = []
+        sources_block = re.search(r"\*\*Sources?:\*\*[ \t]*\n((?:[ \t]*[-*][ \t]*.+\n?)*)", response)
+        if sources_block:
+            for m in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", sources_block.group(1)):
+                bullet_matches.append((m.group(1), m.group(2)))
 
-        # Match citations to retrieved chunks by source name or doc_id
-        for source_name in all_source_names:
+        # All (name, url) pairs from formats that carry a URL
+        all_with_urls: list[tuple[str, str]] = markdown_matches + bold_inline_matches + bullet_matches
+        all_source_names: list[str] = [m[0] for m in all_with_urls] + plain_matches
+
+        def _make_citation_from_url(name: str, url: str) -> Citation:
+            from urllib.parse import urlparse
+            return Citation(
+                source=name or urlparse(url).netloc,
+                document_id=url,
+                excerpt="",
+                url=url,
+                relevance_score=None,
+            )
+
+        # Match citations to retrieved chunks by source name, URL, or doc_id.
+        # Fall back to a URL-anchored Citation when no chunk matches — this
+        # ensures **Sources:** bullet-list responses get credit even when the
+        # display name doesn't align with chunk metadata.
+        for name, url in all_with_urls:
+            name_lower = name.lower().strip()
+            url_lower = url.lower()
+            matched_chunk = None
+            for chunk in retrieved_chunks:
+                chunk_id_lower = chunk.id.lower()
+                chunk_source = chunk.metadata.get("source", "").lower()
+                chunk_url = chunk.metadata.get("url", "").lower()
+
+                if (name_lower in chunk_source or chunk_source in name_lower or
+                        name_lower in chunk_id_lower or chunk_id_lower in name_lower or
+                        (chunk_url and (url_lower == chunk_url or
+                                        url_lower in chunk_url or
+                                        chunk_url in url_lower))):
+                    matched_chunk = chunk
+                    break
+
+            if matched_chunk:
+                citations.append(Citation(
+                    source=matched_chunk.metadata.get("source", "Unknown"),
+                    document_id=matched_chunk.id,
+                    excerpt=matched_chunk.content[:200],
+                    url=matched_chunk.metadata.get("url"),
+                    relevance_score=matched_chunk.score,
+                ))
+            else:
+                citations.append(_make_citation_from_url(name, url))
+
+        # Handle plain [Source: name] matches (no URL available)
+        for source_name in plain_matches:
             source_lower = source_name.lower().strip()
             for chunk in retrieved_chunks:
                 chunk_id_lower = chunk.id.lower()
                 chunk_source = chunk.metadata.get("source", "").lower()
-
-                # Match by source name OR document ID
                 if (source_lower in chunk_source or chunk_source in source_lower or
-                    source_lower in chunk_id_lower or chunk_id_lower in source_lower):
-                    citations.append(
-                        Citation(
-                            source=chunk.metadata.get("source", "Unknown"),
-                            document_id=chunk.id,
-                            excerpt=chunk.content[:200],
-                            url=chunk.metadata.get("url"),
-                            relevance_score=chunk.score,
-                        )
-                    )
+                        source_lower in chunk_id_lower or chunk_id_lower in source_lower):
+                    citations.append(Citation(
+                        source=chunk.metadata.get("source", "Unknown"),
+                        document_id=chunk.id,
+                        excerpt=chunk.content[:200],
+                        url=chunk.metadata.get("url"),
+                        relevance_score=chunk.score,
+                    ))
                     break
 
-        # Only show citations that were explicitly referenced by the LLM
-        # Do NOT add implicit citations from retrieved chunks as they may be
-        # irrelevant to the actual response (especially for conversational queries)
-
-        # Deduplicate
-        seen_ids = set()
+        # Deduplicate by document_id
+        seen_ids: set[str] = set()
         unique_citations = []
         for citation in citations:
             if citation.document_id not in seen_ids:
