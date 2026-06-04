@@ -972,6 +972,12 @@ PYTHONPATH=src python scripts/evaluate_production.py --days 30 --visitor v_a1b2c
 
 # Filter by event type
 PYTHONPATH=src python scripts/evaluate_production.py --days 7 --event-type conversation_ended
+
+# Re-classify sub_intent using current intent.py (useful after classifier changes)
+PYTHONPATH=src python scripts/evaluate_production.py --days 7 --reclassify-intents
+
+# Recompute has_citations using current detection patterns (useful after citation logger fixes)
+PYTHONPATH=src python scripts/evaluate_production.py --days 7 --recompute-citations
 ```
 
 The report includes:
