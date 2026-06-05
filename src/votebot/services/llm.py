@@ -60,6 +60,7 @@ class StreamChunk:
 
     text: str
     done: bool = False
+    web_search_used: bool = False
 
 
 class LLMService:
@@ -612,6 +613,7 @@ class LLMService:
 
         try:
             # Use Responses API with streaming
+            _web_search_used = False
             async with self.client.responses.stream(
                 model=self.model,
                 input=user_message,
@@ -626,8 +628,10 @@ class LLMService:
                         if event.type == "response.output_text.delta":
                             if hasattr(event, "delta") and event.delta:
                                 yield StreamChunk(text=event.delta, done=False)
+                        elif "web_search" in event.type:
+                            _web_search_used = True
                         elif event.type == "response.completed":
-                            yield StreamChunk(text="", done=True)
+                            yield StreamChunk(text="", done=True, web_search_used=_web_search_used)
                             return
 
         except Exception as e:

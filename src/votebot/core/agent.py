@@ -995,12 +995,15 @@ class VoteBotAgent:
 
         # Step 6: Stream response (with OpenAI web search if enabled)
         full_response = ""
+        web_search_used_in_stream = False
         async for chunk in self.llm.stream(
             messages=messages,
             system_prompt=system_prompt,
             enable_web_search=enable_web_search,
         ):
             full_response += chunk.text
+            if chunk.web_search_used:
+                web_search_used_in_stream = True
 
             if chunk.done:
                 # Extract citations from full response
@@ -1066,6 +1069,7 @@ class VoteBotAgent:
                     retrieval_count=retrieval_result.total_retrieved,
                     bill_votes_tool_used=bill_votes_tool_used_in_stream,
                     bill_votes_tool_duration_ms=bill_votes_tool_duration_ms,
+                    web_search_used=web_search_used_in_stream,
                 )
                 self._log_query(
                     session_id=session_id,
@@ -1149,14 +1153,18 @@ class VoteBotAgent:
         # 2. [Source: name] — plain, no URL
         # 3. **Source:** [name](url) — bold header + inline link
         # 4. **Sources:** bullet list — bold header + bullet links on following lines
+        # 5. ([name](url)) — OpenAI web search parenthetical inline format
         markdown_pattern = r"\[Source:\s*([^\]]+)\]\(([^)]+)\)"
         plain_pattern = r"\[Source:\s*([^\]]+)\](?!\()"
         # **Source:** [name](url) or **Sources:** [name](url) on same line
         bold_inline_pattern = r"\*\*Sources?:\*\*\s*\[([^\]]+)\]\(([^)]+)\)"
+        # ([name](url)) — used by OpenAI web search in responses
+        web_search_inline_pattern = r"\(\[([^\]]+)\]\(([^)]+)\)\)"
 
         markdown_matches = re.findall(markdown_pattern, response)
         plain_matches = re.findall(plain_pattern, response)
         bold_inline_matches = re.findall(bold_inline_pattern, response)
+        web_search_inline_matches = re.findall(web_search_inline_pattern, response)
 
         # Extract [name](url) pairs from **Sources:** bullet list sections
         bullet_matches: list[tuple[str, str]] = []
@@ -1166,7 +1174,9 @@ class VoteBotAgent:
                 bullet_matches.append((m.group(1), m.group(2)))
 
         # All (name, url) pairs from formats that carry a URL
-        all_with_urls: list[tuple[str, str]] = markdown_matches + bold_inline_matches + bullet_matches
+        all_with_urls: list[tuple[str, str]] = (
+            markdown_matches + bold_inline_matches + bullet_matches + web_search_inline_matches
+        )
         all_source_names: list[str] = [m[0] for m in all_with_urls] + plain_matches
 
         def _make_citation_from_url(name: str, url: str) -> Citation:

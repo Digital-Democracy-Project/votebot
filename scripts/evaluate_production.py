@@ -818,6 +818,7 @@ async def evaluate(
         _markdown_pat = _re.compile(r"\[Source:\s*[^\]]+\]\([^)]+\)")
         _bold_inline_pat = _re.compile(r"\*\*Sources?:\*\*\s*\[[^\]]+\]\([^)]+\)")
         _sources_block_pat = _re.compile(r"\*\*Sources?:\*\*[ \t]*\n((?:[ \t]*[-*][ \t]*.+\n?)*)")
+        _web_search_inline_pat = _re.compile(r"\(\[[^\]]+\]\([^)]+\)\)")
         _link_pat = _re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
         recomputed = 0
         for e in entries:
@@ -827,6 +828,7 @@ async def evaluate(
             found = bool(
                 _markdown_pat.search(response) or
                 _bold_inline_pat.search(response) or
+                _web_search_inline_pat.search(response) or
                 (lambda m: m and _link_pat.search(m.group(1)))(_sources_block_pat.search(response))
             )
             if found != bool(e.get("has_citations")):
@@ -834,7 +836,11 @@ async def evaluate(
             e["has_citations"] = found
             if found and not e.get("citations_count"):
                 # rough count: sum all detected links across formats
-                count = len(_markdown_pat.findall(response)) + len(_bold_inline_pat.findall(response))
+                count = (
+                    len(_markdown_pat.findall(response))
+                    + len(_bold_inline_pat.findall(response))
+                    + len(_web_search_inline_pat.findall(response))
+                )
                 block = _sources_block_pat.search(response)
                 if block:
                     count += len(_link_pat.findall(block.group(1)))
