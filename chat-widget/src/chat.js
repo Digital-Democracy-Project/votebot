@@ -128,9 +128,11 @@ const DDPChat = (function() {
                 break;
 
             case 'session_restored':
-                // Restore previous messages
+                // Restore previous messages — skip system-role messages (LLM context injections,
+                // not conversation history; rendering them would show internal nav notes to users)
                 if (data.payload.messages && onUIUpdateCallback) {
                     data.payload.messages.forEach(function(msg) {
+                        if (msg.role === 'system') return;
                         onUIUpdateCallback({
                             type: 'restored_message',
                             payload: {
