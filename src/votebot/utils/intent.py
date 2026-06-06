@@ -113,16 +113,23 @@ _OUT_OF_SCOPE_KEYWORDS = [
     "thanks", "thank you", "bye", "goodbye",
 ]
 
+# Canonical changelog keyword list — single source of truth.
+# Used for SubIntent.CHANGELOG classification AND imported by retrieval.py
+# for Phase 5 trigger detection. "amendment"/"amended" are intentionally
+# excluded here (they remain in the "status" sub-intent for analytics) but
+# retrieval.py extends this list with those terms for broader recall.
+CHANGELOG_KEYWORDS: list[str] = [
+    "what changed", "what's changed", "what has changed",
+    "how has", "how it changed",
+    "what was added", "what was removed", "what was modified",
+    "compare version", "different version", "difference", "differences",
+    "between versions", "updated since", "revision",
+    "new version", "previous version", "old version", "what's new in",
+]
+
 # Sub-intent keyword maps per primary intent
 _BILL_SUB_KEYWORDS: dict[str, list[str]] = {
-    "changelog": [
-        "what changed", "what's changed", "what has changed",
-        "how has", "how it changed",
-        "what was added", "what was removed", "what was modified",
-        "compare version", "different version", "between versions",
-        "updated since", "revision", "new version", "previous version",
-        "old version", "what's new in",
-    ],
+    "changelog": CHANGELOG_KEYWORDS,
     "text_editing": [
         "concise", "trim", "shorten", "rewrite",
         "make it shorter", "make it longer", "make it more concise",

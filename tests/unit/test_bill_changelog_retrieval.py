@@ -51,8 +51,22 @@ class TestChangelogSubIntent:
         result = classify_sub_intent(PrimaryIntent.BILL, "how did senators vote on this?")
         assert result != SubIntent.CHANGELOG
 
+    def test_difference_triggers_changelog(self):
+        assert classify_sub_intent(PrimaryIntent.BILL, "what's the difference between the versions?") == SubIntent.CHANGELOG
+
     def test_changelog_is_valid_sub_intent(self):
         assert SubIntent.CHANGELOG == "changelog"
+
+    def test_status_query_with_amendment_word_does_not_trigger_changelog(self):
+        """'amended' alone in a status question should not be classified as changelog."""
+        result = classify_sub_intent(PrimaryIntent.BILL, "was this bill amended by the committee?")
+        # "amended" is not in the intent list (only in retrieval), so falls through to "status"
+        assert result != SubIntent.CHANGELOG
+
+    def test_non_bill_context_vote_query_does_not_trigger_changelog(self):
+        """Changelog sub-intent only applies to bill primary intent."""
+        result = classify_sub_intent(PrimaryIntent.LEGISLATOR, "what changed in her voting record?")
+        assert result != SubIntent.CHANGELOG
 
 
 # ---------------------------------------------------------------------------

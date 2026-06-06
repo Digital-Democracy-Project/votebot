@@ -310,16 +310,12 @@ class RetrievalService:
         query_lower = query.lower()
         is_org_query = any(kw in query_lower for kw in org_keywords)
 
-        # Phase 5 detection — evaluated early so it influences final result ordering
-        changelog_keywords = [
-            "what changed", "what's changed", "what has changed",
-            "how has", "how it changed",
-            "what was added", "what was removed", "what was modified",
-            "compare version", "different version", "between versions",
-            "updated since", "revision", "new version", "previous version",
-            "old version", "what's new in", "amendment", "amended",
-        ]
-        is_changelog_query = any(kw in query_lower for kw in changelog_keywords)
+        # Phase 5 detection — evaluated early so it influences final result ordering.
+        # Extends the canonical CHANGELOG_KEYWORDS with retrieval-only terms
+        # ("amendment"/"amended") that broaden recall without polluting analytics.
+        from votebot.utils.intent import CHANGELOG_KEYWORDS
+        _changelog_retrieval_keywords = CHANGELOG_KEYWORDS + ["amendment", "amended"]
+        is_changelog_query = any(kw in query_lower for kw in _changelog_retrieval_keywords)
 
         org_results = []
         bill_org_results = []
