@@ -309,6 +309,18 @@ class RetrievalService:
         ]
         query_lower = query.lower()
         is_org_query = any(kw in query_lower for kw in org_keywords)
+
+        # Phase 5 detection — evaluated early so it influences final result ordering
+        changelog_keywords = [
+            "what changed", "what's changed", "what has changed",
+            "how has", "how it changed",
+            "what was added", "what was removed", "what was modified",
+            "compare version", "different version", "between versions",
+            "updated since", "revision", "new version", "previous version",
+            "old version", "what's new in", "amendment", "amended",
+        ]
+        is_changelog_query = any(kw in query_lower for kw in changelog_keywords)
+
         org_results = []
         bill_org_results = []
 
@@ -550,8 +562,30 @@ class RetrievalService:
                 vote_query_preview=vote_query[:50],
             )
 
+        # Phase 5: Changelog — version transition summaries (changelog intent only)
+        changelog_results = []
+        if is_changelog_query and filters.get("webflow_id"):
+            changelog_results = await self.vector_store.query(
+                query=query,
+                top_k=3,
+                filter={
+                    "document_type": "bill-changelog",
+                    "webflow_id": filters["webflow_id"],
+                },
+            )
+            changelog_results = [
+                r for r in changelog_results if r.score >= self.config.similarity_threshold
+            ]
+            logger.info(
+                "Bill text retrieval phase 5 (changelog)",
+                changelog_chunks_found=len(changelog_results),
+            )
+
         # Combine results based on query type
-        if (is_vote_query or is_legislator_followup) and (legislator_votes_results or vote_results):
+        if is_changelog_query and changelog_results:
+            # For changelog queries, surface changelog docs first, then current text
+            combined = changelog_results + text_results + summary_results + history_results + vote_results + org_results
+        elif (is_vote_query or is_legislator_followup) and (legislator_votes_results or vote_results):
             # For vote queries and legislator follow-ups, prioritize:
             # 1. Legislator-votes documents (if we found the specific legislator)
             # 2. Bill-votes documents

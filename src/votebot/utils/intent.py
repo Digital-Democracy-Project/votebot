@@ -44,6 +44,7 @@ class SubIntent(StrEnum):
     STATUS = "status"
     EXPLANATION = "explanation"
     COMPARISON = "comparison"
+    CHANGELOG = "changelog"
     # legislator
     VOTING_RECORD = "voting_record"
     CONTACT = "contact"
@@ -80,6 +81,8 @@ VALID_RETRIEVAL_SOURCES = frozenset({
     "bill-text",
     "bill-history",
     "bill-votes",
+    "bill-changelog",
+    "bill-text-history",
     "legislator",
     "legislator-votes",
     "organization",
@@ -112,6 +115,14 @@ _OUT_OF_SCOPE_KEYWORDS = [
 
 # Sub-intent keyword maps per primary intent
 _BILL_SUB_KEYWORDS: dict[str, list[str]] = {
+    "changelog": [
+        "what changed", "what's changed", "what has changed",
+        "how has", "how it changed",
+        "what was added", "what was removed", "what was modified",
+        "compare version", "different version", "between versions",
+        "updated since", "revision", "new version", "previous version",
+        "old version", "what's new in",
+    ],
     "text_editing": [
         "concise", "trim", "shorten", "rewrite",
         "make it shorter", "make it longer", "make it more concise",

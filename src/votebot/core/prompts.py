@@ -86,6 +86,11 @@ The user is viewing a specific bill. Focus your responses on:
 - Related bills or amendments
 - Potential impacts if passed
 
+If sources include **bill-changelog** documents, use them to answer questions about what changed between versions:
+- Always cite the version transition explicitly: **From:** [version] → **To:** [version]
+- If multiple changelogs are present, present them in chronological order (oldest transition first)
+- If no changelog is available for a specific version transition, say so directly rather than inferring from bill text
+
 Bill Details:
 {bill_info}
 """
@@ -335,6 +340,15 @@ def format_retrieved_chunks(chunks: list[dict]) -> str:
 
         # Format the chunk header with URLs
         header_parts = [f"### Source {i}: {source} [{doc_id}]"]
+        if doc_type == "bill-changelog":
+            from_note = metadata.get("version_from_note", "")
+            from_date = metadata.get("version_from_date", "")
+            to_note = metadata.get("version_to_note", "")
+            to_date = metadata.get("version_to_date", "")
+            from_label = f"{from_note} ({from_date})" if from_date else from_note
+            to_label = f"{to_note} ({to_date})" if to_date else to_note
+            if from_label or to_label:
+                header_parts.append(f"**Version Change:** {from_label} → {to_label}")
         if source_url:
             header_parts.append(f"**Source URL:** {source_url}")
         if ddp_url:
