@@ -18,6 +18,37 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+def _join_response_blocks(response: object) -> str:
+    """Extract and join all text blocks from a Responses API response.
+
+    The SDK's output_text convenience property uses "".join() across blocks,
+    which drops whitespace at block boundaries. When the API splits a paragraph
+    across two blocks the newlines are lost, producing runs like
+    "...programs.Potential Impact:". This function inserts "\\n\\n" at any
+    boundary where both sides lack whitespace.
+    """
+    if not hasattr(response, "output"):
+        return getattr(response, "output_text", "") or ""
+
+    parts: list[str] = []
+    for item in response.output:
+        if not hasattr(item, "content"):
+            continue
+        for block in item.content:
+            if hasattr(block, "text") and block.text:
+                parts.append(block.text)
+
+    if not parts:
+        return ""
+
+    result = parts[0]
+    for part in parts[1:]:
+        if result and part and not result[-1].isspace() and not part[0].isspace():
+            result += "\n\n"
+        result += part
+    return result
+
+
 @dataclass
 class WebSearchCitation:
     """A citation from web search results."""
@@ -411,8 +442,13 @@ class LLMService:
                 function_count=len(function_results),
             )
 
-        # Extract response content
-        content = response.output_text if hasattr(response, 'output_text') else ""
+        # Extract response content. The SDK's output_text property joins text
+        # blocks with "".join(), which drops any whitespace that sat at block
+        # boundaries. When the API splits a paragraph across two blocks the
+        # trailing/leading newlines can be lost, producing runs like
+        # "...programs.Potential Impact:". We extract blocks manually and
+        # insert "\n\n" at any boundary where both sides lack whitespace.
+        content = _join_response_blocks(response)
 
         # Check if web search was used and extract citations
         web_search_used = self._check_web_search_used(response)
