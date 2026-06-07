@@ -12,7 +12,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 
 - **Context-Aware Responses**: Understands the page context (bill, legislator, organization, general) to provide relevant answers
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
-- **Multi-Phase Retrieval**: For bill queries, prioritizes legislative text over CMS summaries, with dedicated phases for organization positions and vote records
+- **Multi-Phase Retrieval**: For bill queries, prioritizes legislative text over CMS summaries, with dedicated phases for organization positions, vote records, and version changelogs. Phase 5 fires on "what changed / what was added / difference" queries and surfaces `bill-changelog` documents (LLM-generated diffs produced by DDP-Sync on each version transition)
 - **Organization-Aware Retrieval**: Scoped retrieval on org pages via `webflow_id`/`slug` filters (mirrors bill/legislator pattern), plus query-based detection for org queries on non-org pages. Fetches all related chunks for complete bill position data
 - **Legislator Slug Resolution**: Automatically resolves legislator slugs from Webflow pages to OpenStates person IDs via Webflow CMS lookup, enabling correct Pinecone filtering even when only the URL slug is available
 - **Webflow CMS Runtime Lookup**: Bidirectional Webflow CMS pre-fetch — fetches authoritative org positions for bill→org queries (99.1%) and bill positions for org→bill queries (100%), bypassing Pinecone similarity thresholds
@@ -553,6 +553,10 @@ The build output includes a `name_enrichments` count showing how many legislator
 
 | Document Type | Description | ID Format |
 |--------------|-------------|-----------|
+| `bill` | CMS summary (description, support/oppose, org positions) | `bill-webflow-{webflow_id}` |
+| `bill-text` | Current legislative text (PDF/HTML) — overwritten on each version | `bill-pdf-{webflow_id}` |
+| `bill-text-history` | Permanent per-version copy of bill text — never overwritten | `bill-text-history-{webflow_id}-{version_date}` |
+| `bill-changelog` | LLM-generated diff between consecutive versions (gpt-4o-mini) | `bill-changelog-{webflow_id}-{version_date}` |
 | `bill-votes` | Per-bill vote records with all legislators | `bill-votes-{webflow_id}` |
 | `legislator-votes` | Per-legislator voting history | `legislator-votes-{person_uuid}` |
 
