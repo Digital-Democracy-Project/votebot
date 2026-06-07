@@ -72,8 +72,8 @@ Single source of truth for intent taxonomy and retrieval vocabulary.
   - `health_check() -> bool`
 - **`_join_response_blocks(response) -> str`** — module-level helper. Replaces `response.output_text` to fix SDK block-boundary whitespace loss (`"".join()` drops `\n\n` at block boundaries). **Do not use `response.output_text` directly.**
 - **`LLMResponse`** — `content, tokens_used, model, finish_reason, web_search_used, web_citations, bill_votes_tool_used, response_id`
-- **`StreamChunk`** — `text, done, web_search_used`
-- **`WebSearchCitation`** — `url, title, snippet`
+- **`StreamChunk`** ⚠️ — `text, done, web_search_used`. **Name collision**: `api/schemas/chat.py` also has a class called `StreamChunk` (the WebSocket wire format). When importing, always verify which module you're pulling from. Consider renaming one of them in a future cleanup.
+- **`WebSearchCitation`** ⚠️ — `url, title, snippet`. **Near-duplicate**: `api/schemas/chat.py` has `WebCitation` with the same three fields as a Pydantic model. One is a dataclass (internal), one is the API schema (external). There is a translation step between them. Don't add a third web citation shape.
 - **`BillVotesToolResult`** — tool call result shape from `get_bill_info`
 - **`LLMServiceFactory.get_instance()`** — singleton
 
@@ -182,9 +182,9 @@ Singleton: `get_redis_store() -> RedisStore`. All methods no-op gracefully when 
 - **`PageContext`** — `type: "bill"|"legislator"|"organization"|"general"`, `id, slug, webflow_id, title, jurisdiction, url`. The filter source for retrieval — always pass through rather than building filters from raw message text.
 - **`ChatRequest`** — `message, session_id, human_active, page_context, conversation_history, button`
 - **`ChatResponse`** — `response, citations, confidence, requires_human, web_search_used, bill_votes_tool_used, metadata, suppressed`
-- **`StreamChunk`** (schema) — WebSocket streaming token
+- **`StreamChunk`** (schema) ⚠️ — WebSocket wire format. **Name collision with `services/llm.py::StreamChunk`** (the internal LLM token). Same name, different modules, different shapes. Always check the import path.
 - **`Citation`** — `source, document_id, excerpt, url, relevance_score`
-- **`WebCitation`** — `url, title, snippet`
+- **`WebCitation`** ⚠️ — `url, title, snippet`. **Near-duplicate of `services/llm.py::WebSearchCitation`** (same fields, dataclass vs Pydantic). Don't add a third web citation shape.
 - **`ResponseMetadata`** — `model, tokens_used, retrieval_count, latency_ms, cached`
 
 ## Pinecone document types (controlled vocabulary)
