@@ -3635,39 +3635,54 @@ Startup reconciliation iterates `ddp:bill_version:*` records (one per actively-s
 
 ### Symptom
 
-Two distinct formatting bugs can appear in VoteBot responses:
+Three distinct formatting bugs can appear in VoteBot responses:
 
-**Bug A — Paragraph break missing:** A section header or new paragraph runs directly into the previous sentence with no blank line:
+**Bug A — Paragraph break missing (non-streaming):** A section header runs directly into the previous sentence:
 ```
 ...measures in federal child care and nutrition programs.Potential Impact: The bill could...
 ```
 
-**Bug B — Bullet items on one line:** Multiple list items appear on a single line with no newlines between them:
+**Bug B — Bullet items on one line (intermittent):** Multiple list items appear on a single line with `- ` prefixes visible:
 ```
 - States must verify eligibility. - States must investigate fraud. - Providers found guilty...
 ```
 
-### Root Cause
+**Bug C — Section headers and bullets running together (widget):** Section headers flow directly into adjacent paragraphs, and/or bullet `- ` markers appear inline rather than as formatted list items:
+```
+Purpose: This resolution...military action.Key Provisions:Congressional Approval Required:...
+```
 
-**Bug A** is caused by the OpenAI Responses API SDK's `output_text` property, which joins internal text blocks with `"".join()`. When the API splits a response across blocks at a paragraph boundary, the `\n\n` that belongs at the boundary ends up in neither block and is lost.
+### Root Causes
 
-**Bug B** is intermittent non-deterministic model behaviour — GPT-4.1 occasionally generates list items without `\n` between them despite the system prompt requesting structured formatting.
+**Bug A** — The OpenAI Responses API SDK's `output_text` property joins internal text blocks with `"".join()`, dropping whitespace at block boundaries.
 
-### Fix (June 2026)
+**Bug B** — Intermittent model behaviour: GPT-4.1 occasionally omits `\n` between list items.
+
+**Bug C** — Two bugs in the widget's custom markdown parser (`chat-widget/src/ui.js`):
+1. *Paragraph wrapping*: paragraphs starting with inline HTML elements like `<strong>` were not wrapped in `<p>`, causing them to share an anonymous block with adjacent paragraphs and run together visually.
+2. *List grouping*: consecutive `<li>` elements were each wrapped in their own `<ul>` (instead of one shared `<ul>`), breaking list rendering.
+
+Note: Bug C is a **widget-side** rendering issue. The model output and server pipeline are correct — confirmed by inspecting raw `chat_completions_full_response` logs which showed proper `\n\n` separators throughout.
+
+### Fixes (June 2026)
 
 **Bug A** — `services/llm.py` replaces `response.output_text` with `_join_response_blocks()`, which extracts text blocks manually and inserts `\n\n` at any boundary where both sides lack whitespace.
 
-**Bug B** — `core/prompts.py` `SYSTEM_PROMPT_BASE` has an explicit instruction: *"When using bullet points, always place each item on its own line. Never run multiple bullet items together on a single line."*
+**Bug B** — `core/prompts.py` `SYSTEM_PROMPT_BASE`: *"When using bullet points, always place each item on its own line. Never run multiple bullet items together on a single line."*
+
+**Bug C** — `chat-widget/src/ui.js` paragraph step: removed the condition that skipped `<p>` wrapping for inline-element paragraphs; now only block-level elements (`h1-4`, `ul`, `ol`, `pre`, `blockquote`, `hr`, `p`) skip wrapping. List grouping: replaced the two-step strip-then-wrap regex with a single regex that groups all consecutive `<li>` elements into one `<ul>`. After any `ui.js` change, rebuild with `cd chat-widget && node build.js`.
 
 ### Diagnosis
 
-To check whether missing newlines are a pipeline issue or a model issue, enable debug logging temporarily in `_join_response_blocks()`:
-
+**Is it a pipeline issue or a model issue?** Add temporary logging in `_join_response_blocks()`:
 ```python
 logger.info("response_blocks_raw", block_count=len(parts), blocks=[repr(p) for p in parts])
 ```
+- `block_count > 1` with a boundary missing whitespace → Bug A
+- `block_count == 1` but `\n` missing in text → Bug B (model output)
+- Model output looks correct but widget shows broken formatting → Bug C
 
-If `block_count > 1` and a boundary has no whitespace → Bug A. If `block_count == 1` but the text already lacks `\n` between bullets → Bug B (model output).
+**Caching gotcha:** After deploying widget fixes, users must hard-refresh (`Cmd+Shift+R`) to bypass browser cache. Cloudflare cache flush only clears CDN — browser cache is separate. If the formatting issue persists only for certain bills after a deploy, also check Redis button cache: `redis-cli KEYS 'votebot:button:*'`.
 
 ---
 
