@@ -41,12 +41,6 @@ def _join_response_blocks(response: object) -> str:
     if not parts:
         return ""
 
-    logger.info(
-        "response_blocks_raw",
-        block_count=len(parts),
-        blocks=[repr(p) for p in parts],
-    )
-
     result = parts[0]
     for part in parts[1:]:
         if result and part and not result[-1].isspace() and not part[0].isspace():
