@@ -557,8 +557,6 @@ class LLMService:
         Yields:
             StreamChunk objects with text fragments
         """
-        logger.info("stream_path_selected", enable_web_search=enable_web_search)
-
         # Use Responses API for web search streaming
         if enable_web_search:
             async for chunk in self._stream_with_responses_api(
@@ -591,17 +589,14 @@ class LLMService:
             stream=True,
         )
 
-        _chat_full = ""
         async for chunk in stream:
             if chunk.choices:
                 delta = chunk.choices[0].delta
                 if delta.content:
-                    _chat_full += delta.content
                     yield StreamChunk(text=delta.content, done=False)
 
                 # Check for completion
                 if chunk.choices[0].finish_reason:
-                    logger.info("chat_completions_full_response", response_repr=repr(_chat_full[:500]))
                     yield StreamChunk(text="", done=True)
                     break
 
@@ -663,21 +658,11 @@ class LLMService:
                 temperature=temperature or self.temperature,
                 tools=[{"type": "web_search_preview"}],
             ) as stream:
-                _dbg_output_index = -1
                 async for event in stream:
                     # Handle different event types from Responses API streaming
                     if hasattr(event, "type"):
                         if event.type == "response.output_text.delta":
                             if hasattr(event, "delta") and event.delta:
-                                _idx = getattr(event, "output_index", 0)
-                                if _idx != _dbg_output_index:
-                                    logger.info(
-                                        "stream_block_transition",
-                                        old_index=_dbg_output_index,
-                                        new_index=_idx,
-                                        delta_repr=repr(event.delta[:40]),
-                                    )
-                                    _dbg_output_index = _idx
                                 yield StreamChunk(text=event.delta, done=False)
                         elif "web_search" in event.type:
                             _web_search_used = True

@@ -56,10 +56,11 @@ const DDPUI = (function() {
             // Horizontal rule
             html = html.replace(/^---$/gm, '<hr>');
 
-            // Unordered lists
+            // Unordered lists — group consecutive <li> elements into one <ul>
             html = html.replace(/^[\*\-] (.+)$/gm, '<li>$1</li>');
-            html = html.replace(/(<li>.*<\/li>)\n(?=<li>)/g, '$1');
-            html = html.replace(/(<li>[\s\S]*?<\/li>)(?!\n<li>)/g, '<ul>$1</ul>');
+            html = html.replace(/(<li>[^\n]*<\/li>)(\n<li>[^\n]*<\/li>)*/g, function(match) {
+                return '<ul>' + match.replace(/\n/g, '') + '</ul>';
+            });
 
             // Ordered lists
             html = html.replace(/^\d+\. (.+)$/gm, '<oli>$1</oli>');
@@ -71,14 +72,14 @@ const DDPUI = (function() {
             });
 
             // Paragraphs (lines not already wrapped)
+            // Only skip <p> wrapping for block-level elements. Paragraphs starting
+            // with inline elements like <strong> must be wrapped so they form their
+            // own block instead of flowing into adjacent paragraphs.
             html = html.split('\n\n').map(function(para) {
                 para = para.trim();
                 if (!para) return '';
-                if (para.match(/^<(h[1-4]|ul|ol|pre|blockquote|hr)/)) return para;
-                if (!para.match(/^<[a-z]/)) {
-                    return '<p>' + para.replace(/\n/g, '<br>') + '</p>';
-                }
-                return para;
+                if (para.match(/^<(h[1-4]|ul|ol|pre|blockquote|hr|p)\b/)) return para;
+                return '<p>' + para.replace(/\n/g, '<br>') + '</p>';
             }).join('');
 
             // Clean up consecutive blockquotes
