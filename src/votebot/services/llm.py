@@ -658,11 +658,21 @@ class LLMService:
                 temperature=temperature or self.temperature,
                 tools=[{"type": "web_search_preview"}],
             ) as stream:
+                _dbg_output_index = -1
                 async for event in stream:
                     # Handle different event types from Responses API streaming
                     if hasattr(event, "type"):
                         if event.type == "response.output_text.delta":
                             if hasattr(event, "delta") and event.delta:
+                                _idx = getattr(event, "output_index", 0)
+                                if _idx != _dbg_output_index:
+                                    logger.info(
+                                        "stream_block_transition",
+                                        old_index=_dbg_output_index,
+                                        new_index=_idx,
+                                        delta_repr=repr(event.delta[:40]),
+                                    )
+                                    _dbg_output_index = _idx
                                 yield StreamChunk(text=event.delta, done=False)
                         elif "web_search" in event.type:
                             _web_search_used = True
