@@ -557,6 +557,8 @@ class LLMService:
         Yields:
             StreamChunk objects with text fragments
         """
+        logger.info("stream_path_selected", enable_web_search=enable_web_search)
+
         # Use Responses API for web search streaming
         if enable_web_search:
             async for chunk in self._stream_with_responses_api(
@@ -589,14 +591,17 @@ class LLMService:
             stream=True,
         )
 
+        _chat_full = ""
         async for chunk in stream:
             if chunk.choices:
                 delta = chunk.choices[0].delta
                 if delta.content:
+                    _chat_full += delta.content
                     yield StreamChunk(text=delta.content, done=False)
 
                 # Check for completion
                 if chunk.choices[0].finish_reason:
+                    logger.info("chat_completions_full_response", response_repr=repr(_chat_full[:500]))
                     yield StreamChunk(text="", done=True)
                     break
 
