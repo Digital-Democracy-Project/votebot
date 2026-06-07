@@ -41,7 +41,7 @@ def _join_response_blocks(response: object) -> str:
     if not parts:
         return ""
 
-    logger.debug(
+    logger.info(
         "response_blocks_raw",
         block_count=len(parts),
         blocks=[repr(p) for p in parts],
