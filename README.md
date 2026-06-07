@@ -1040,6 +1040,7 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 - RAG test suite diagnostics and benchmarks
 - Full index rebuild procedures
 - Chat widget truncated on mobile (send button cut off due to layout viewport expansion on content-rich host pages — fixed with `screen.width` mobile detection)
+- Missing line breaks in responses (two bugs: SDK block-boundary whitespace loss fixed in `_join_response_blocks()`; intermittent model bullet formatting fixed via system prompt instruction)
 - Production query monitoring (JSONL logging, offline evaluation)
 - Batch sync progress reporting and checkpoint/resume after worker crash
 - Large PDF memory management (incremental embed+upsert, gc per bill, page limit)

@@ -36,6 +36,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Bills With Empty Status Field in Webflow CMS](#bills-with-empty-status-field-in-webflow-cms)
 - [Nightly Bill Sync Skips Bills for Certain States](#nightly-bill-sync-skips-bills-for-certain-states)
 - [Stale Bill Status Data (HR 7147 Incident)](#stale-bill-status-data-hr-7147-incident)
+- [Missing Line Breaks in LLM Responses](#missing-line-breaks-in-llm-responses)
 
 ---
 
@@ -3627,6 +3628,46 @@ Startup reconciliation iterates `ddp:bill_version:*` records (one per actively-s
 
 1. **Check that ddp-sync stores `bill_slug`**: `redis-cli -u $REDIS_URL HGET ddp:bill_version:{webflow_id} bill_slug` (the slug is needed for the lookup). Bills synced before 2026-04-29 might lack the field — those rely on the 7-day TTL only.
 2. **Check timestamps**: compare cached_at on the cache entry vs last_checked on the bill_version record. Reconciliation only invalidates when cached_at < last_checked.
+
+---
+
+## Missing Line Breaks in LLM Responses
+
+### Symptom
+
+Two distinct formatting bugs can appear in VoteBot responses:
+
+**Bug A — Paragraph break missing:** A section header or new paragraph runs directly into the previous sentence with no blank line:
+```
+...measures in federal child care and nutrition programs.Potential Impact: The bill could...
+```
+
+**Bug B — Bullet items on one line:** Multiple list items appear on a single line with no newlines between them:
+```
+- States must verify eligibility. - States must investigate fraud. - Providers found guilty...
+```
+
+### Root Cause
+
+**Bug A** is caused by the OpenAI Responses API SDK's `output_text` property, which joins internal text blocks with `"".join()`. When the API splits a response across blocks at a paragraph boundary, the `\n\n` that belongs at the boundary ends up in neither block and is lost.
+
+**Bug B** is intermittent non-deterministic model behaviour — GPT-4.1 occasionally generates list items without `\n` between them despite the system prompt requesting structured formatting.
+
+### Fix (June 2026)
+
+**Bug A** — `services/llm.py` replaces `response.output_text` with `_join_response_blocks()`, which extracts text blocks manually and inserts `\n\n` at any boundary where both sides lack whitespace.
+
+**Bug B** — `core/prompts.py` `SYSTEM_PROMPT_BASE` has an explicit instruction: *"When using bullet points, always place each item on its own line. Never run multiple bullet items together on a single line."*
+
+### Diagnosis
+
+To check whether missing newlines are a pipeline issue or a model issue, enable debug logging temporarily in `_join_response_blocks()`:
+
+```python
+logger.info("response_blocks_raw", block_count=len(parts), blocks=[repr(p) for p in parts])
+```
+
+If `block_count > 1` and a boundary has no whitespace → Bug A. If `block_count == 1` but the text already lacks `\n` between bullets → Bug B (model output).
 
 ---
 
