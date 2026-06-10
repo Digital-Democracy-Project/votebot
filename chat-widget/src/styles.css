@@ -56,7 +56,7 @@
 /* Chat popup container */
 .ddp-chat-popup {
     position: fixed;
-    bottom: 100px;
+    bottom: 24px;
     right: 24px;
     width: 400px;
     max-width: 100vw;
