@@ -1,6 +1,6 @@
 # Eval Script Fixes + Cache-Hit Logging Fidelity + Recurring Eval Cron
 
-**Status:** Ready for implementation (final — v5)
+**Status:** Phases 1–2 SHIPPED (commit `52a7a98`, 2026-04-30) — cache-hit logging fidelity (B1/B2) and eval-script denominator fixes both landed with real diffs to `ButtonCache`, agent logging, and `evaluate_production.py`. **Still open:** Phase 3 (recurring weekly eval cron via ddp-sync APScheduler) — no evidence found in either this repo or `ddp-sync` that it was registered; the acceptance checklist below remains unchecked as of 2026-07-23.
 **Created:** 2026-04-30
 **Revised:** 2026-04-30 (v5 — adopts existing Zapier alerting pattern, bumps lock TTL margin to +300s, rejects unknown YAML keys)
 **Source:** Production-log audit run on 2026-04-29 → 2026-04-30 (118 events / 45 query_processed events). Triage in this conversation surfaced two real bugs and three eval-script artifacts that misleadingly looked like regressions.
