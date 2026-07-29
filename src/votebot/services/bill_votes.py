@@ -4,14 +4,45 @@ This service provides real-time vote lookup for bills via the OpenStates API.
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 import httpx
 import structlog
 
 from votebot.config import Settings, get_settings
+from votebot.utils.federal_legislator_cache import get_federal_cache
 
 logger = structlog.get_logger()
+
+
+def _normalize_name_key(name: str) -> str:
+    """Lowercase and strip diacritics for name-based party lookups.
+
+    House/Senate roll-call XML transliterates accented names to plain ASCII
+    (e.g. "Velazquez" for "Velázquez"), so both sides of a name match need to
+    fold the same way rather than relying on exact-string equality.
+    """
+    decomposed = unicodedata.normalize("NFKD", name)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).lower().strip()
+
+
+def _federal_cache_lookup_candidates(voter_name: str) -> list[str]:
+    """Build lookup candidates for FederalLegislatorCache from a federal vote's raw name.
+
+    Federal roll-call XML disambiguates same-surname members with a trailing state
+    code ("Scott (VA)") or, when even that's ambiguous, "Last, First (State)"
+    ("Green, Al (TX)"). The cache indexes a bare "{last} ({state})" variant that
+    matches the first form directly; for the second, strip the first-name segment
+    before the state suffix so "Green, Al (TX)" also resolves to "Green (TX)".
+    """
+    candidates = [voter_name]
+    match = re.match(r"^([^,]+),\s*[^(]+(\(.*\))?\s*$", voter_name)
+    if match:
+        last_name = match.group(1).strip()
+        state_part = (match.group(2) or "").strip()
+        candidates.append(f"{last_name} {state_part}".strip())
+    return candidates
 
 
 @dataclass
@@ -257,7 +288,7 @@ class BillVotesService:
                 legislator_parties = await self._get_legislator_parties(jurisdiction, client, headers)
 
                 # Parse votes with party info
-                votes = self._parse_votes(data.get("votes", []), legislator_parties)
+                votes = self._parse_votes(data.get("votes", []), legislator_parties, jurisdiction)
 
                 # Get latest action for status
                 latest_action = data.get("latest_action_description", "")
@@ -345,8 +376,8 @@ class BillVotesService:
                         name = person.get("name", "")
                         party = person.get("party", "")
                         if name and party:
-                            # Store by lowercase name for case-insensitive lookup
-                            name_to_party[name.lower()] = party
+                            # Store by normalized name for case/diacritic-insensitive lookup
+                            name_to_party[_normalize_name_key(name)] = party
 
                     # Check pagination
                     pagination = data.get("pagination", {})
@@ -538,7 +569,7 @@ class BillVotesService:
                 legislator_parties = await self._get_legislator_parties(jurisdiction, client, headers)
 
                 # Parse the votes with party info
-                votes = self._parse_votes(data.get("votes", []), legislator_parties)
+                votes = self._parse_votes(data.get("votes", []), legislator_parties, jurisdiction)
 
                 logger.info(
                     "Parsed votes from OpenStates",
@@ -774,18 +805,24 @@ class BillVotesService:
         self,
         votes_data: list,
         legislator_parties: dict[str, str] | None = None,
+        jurisdiction: str = "",
     ) -> list[BillVote]:
         """Parse votes from OpenStates response.
 
         Args:
             votes_data: Raw vote data from OpenStates
             legislator_parties: Optional dict mapping legislator names to parties
+            jurisdiction: State code (e.g., 'va', 'fl', 'us') -- when 'us', an
+                additional federal-legislator-cache lookup is tried for names the
+                per-jurisdiction full-name match misses (see _federal_cache_lookup_candidates)
 
         Returns:
             List of BillVote objects
         """
         votes = []
         legislator_parties = legislator_parties or {}
+        is_federal = jurisdiction.lower() == "us"
+        federal_cache = get_federal_cache() if is_federal else None
 
         for vote in votes_data:
             # Parse counts
@@ -815,7 +852,19 @@ class BillVotesService:
 
                 # Fall back to legislator cache for party if not in voter object
                 if not party:
-                    party = legislator_parties.get(voter_name.lower(), "")
+                    party = legislator_parties.get(_normalize_name_key(voter_name), "")
+
+                # Federal vote names carry a disambiguating state suffix ("Scott (VA)")
+                # that the full-name-only lookup above won't match -- try the
+                # federal legislator cache's name-variant index instead.
+                if not party and federal_cache is not None:
+                    for candidate in _federal_cache_lookup_candidates(voter_name):
+                        federal_info = federal_cache.lookup_with_info(candidate)
+                        if federal_info:
+                            party = federal_info.get("party", "")
+                            if not person_id:
+                                person_id = federal_info.get("person_id", "")
+                            break
 
                 vote_records.append(VoteRecord(
                     legislator_id=person_id,

@@ -9,6 +9,7 @@ For example: "Alsobrooks (D-MD)" -> "ocd-person/abc123..."
 
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 import httpx
@@ -21,6 +22,17 @@ logger = structlog.get_logger()
 # Cache file location
 CACHE_DIR = Path(__file__).parent.parent.parent.parent / "data" / "cache"
 CACHE_FILE = CACHE_DIR / "federal_legislators.json"
+
+
+def _normalize(name: str) -> str:
+    """Lowercase and strip diacritics for name-variant matching.
+
+    House/Senate roll-call XML transliterates accented names to plain ASCII
+    (e.g. "Velazquez" for "Velázquez"), so lookups need to fold both sides the
+    same way rather than relying on exact-string equality.
+    """
+    decomposed = unicodedata.normalize("NFKD", name)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).lower().strip()
 
 
 class FederalLegislatorCache:
@@ -78,7 +90,7 @@ class FederalLegislatorCache:
             name_variants = self._generate_name_variants(name, party_abbrev, state)
             for variant in name_variants:
                 # Normalize for lookup
-                normalized = variant.lower().strip()
+                normalized = _normalize(variant)
                 if normalized and normalized not in self._name_to_id:
                     self._name_to_id[normalized] = person_id
 
@@ -90,6 +102,10 @@ class FederalLegislatorCache:
 
         For "Angela Alsobrooks" with party "D" and state "MD":
         - "Alsobrooks (D-MD)" - Senate vote format
+        - "Alsobrooks (MD)" - House/Senate roll-call XML sort-field format (state only,
+          no party letter -- this is the shape OpenStates' federal vote records actually
+          carry through from the Clerk/LIS source XML, and the one that disambiguates
+          same-surname members, e.g. three different "Scott"s each in a different state)
         - "Alsobrooks" - Last name only
         - "Angela Alsobrooks" - Full name
         """
@@ -123,6 +139,10 @@ class FederalLegislatorCache:
             if party_abbrev:
                 variants.append(f"{last_name} ({party_abbrev})")
 
+            # Last name with just state (roll-call XML sort-field format)
+            if state:
+                variants.append(f"{last_name} ({state})")
+
         return variants
 
     def lookup(self, voter_name: str) -> str | None:
@@ -137,7 +157,7 @@ class FederalLegislatorCache:
         """
         self._ensure_loaded()
 
-        normalized = voter_name.lower().strip()
+        normalized = _normalize(voter_name)
         return self._name_to_id.get(normalized)
 
     def lookup_with_info(self, voter_name: str) -> dict | None:
