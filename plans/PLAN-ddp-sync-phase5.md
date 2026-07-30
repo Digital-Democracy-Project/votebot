@@ -62,15 +62,17 @@ Removed:
 ```
 
 ### Runtime verification (on EC2 deploy, Phase 7)
-- [ ] DDP-API starts without errors: `uvicorn app.main:app --port 5000`
+- [x] DDP-API starts without errors: `uvicorn app.main:app --port 5000` — confirmed running on EC2, see PLAN-ddp-sync-phase7.md
 - [ ] Logs show "DDP-API started (proxy mode)" — no scheduler messages
-- [ ] `/health` endpoint returns healthy
-- [ ] VoteBot chat proxy works: `POST /votebot/chat`
+- [x] `/health` endpoint returns healthy — confirmed on EC2, see PLAN-ddp-sync-phase7.md
+- [x] VoteBot chat proxy works: `POST /votebot/chat` — confirmed ("Chat queries responsive from DDP website"), see PLAN-ddp-sync-phase7.md
 - [ ] WebSocket proxy works: `WS /votebot/ws`
 - [ ] Voatz proxy works: `POST /get_tokens`, `/get_users`, `/get_events`
 - [ ] Brevo proxy works: `POST /update_segment_attribute`, `/user_updates`
 - [ ] Webflow CMS endpoints work: `POST /webflow/fill/session-code`, etc.
 - [ ] Old trigger endpoints return 404: `POST /trigger_sync` → 404
+
+The unchecked items above were not explicitly re-tested in Phase 7's deployment record and remain unverified.
 
 ---
 

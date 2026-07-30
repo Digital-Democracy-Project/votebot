@@ -1,16 +1,16 @@
 # User Personalization Plan: Anonymous-to-Authenticated Identity Pipeline
 
-> **SUPERSEDED**: This plan has been absorbed into the Jigsaw staged rollout. See [PLAN-jigsaw-overview.md](PLAN-jigsaw-overview.md) for the master index.
+> **SUPERSEDED**: This plan was absorbed into the Jigsaw staged rollout, which was itself tracked in this repo as `PLAN-jigsaw-overview.md` plus stage docs `PLAN-jigsaw-stage-a.md` through `-e.md` and `PLAN-votebot-polis-jigsaw.md`. All of those Jigsaw/Polis planning docs were removed from this repo in commit `77f1d4e` ("docs: remove Polis/Jigsaw plans, moved to ddp-infra") and now live in the separate `ddp-infra` repo, where they've since been superseded again by `PLAN-bill-concept-polling.md` and its supporting docs. **None of the Jigsaw filenames referenced anywhere below exist in this repo anymore** — every such reference in this document is a pointer to design history, not a working link. For the current personalization/opinion-elicitation design, see `ddp-infra`, not this repo.
 >
 > | Phase | Status | Where It Went |
 > |---|---|---|
 > | Phase 0 (IP fix) | Not started | Standalone infra task — not part of Jigsaw stages |
 > | Phase 1 (visitor tracking) | **Implemented** | [user-analytics-logging.md](user-analytics-logging.md) (commit `5d1870d`) |
-> | Phase 2 (Memberstack) | **Superseded** | [PLAN-jigsaw-stage-c.md](PLAN-jigsaw-stage-c.md) — conversational onboarding |
-> | Phase 3 (personalization) | **Moved** | [PLAN-jigsaw-stage-a.md](PLAN-jigsaw-stage-a.md) — first thing built |
+> | Phase 2 (Memberstack) | **Superseded** | Jigsaw's conversational-onboarding stage (was `PLAN-jigsaw-stage-c.md`) — now in `ddp-infra` |
+> | Phase 3 (personalization) | **Moved** | Jigsaw's Stage A (was `PLAN-jigsaw-stage-a.md`), the first thing built — now in `ddp-infra` |
 > | Phase 4 (analytics) | **Implemented** | [user-analytics-logging.md](user-analytics-logging.md) |
 >
-> This document is retained as reference for the design history. The Phase 0 IP fix (`X-Forwarded-For` propagation through DDP-API) is the only remaining standalone task.
+> This document is retained as reference for the design history. The Phase 0 IP fix (`X-Forwarded-For` propagation through DDP-API) is the only remaining standalone task tracked in this repo.
 
 ## Problem Statement
 
@@ -283,14 +283,14 @@ if visitor_id:
 
 ## Phase 2: Memberstack Authentication Integration — SUPERSEDED
 
-> **Superseded** by the conversational onboarding design in `plans/PLAN-votebot-polis-jigsaw.md` Phase 6. The approach below (client-side Memberstack modal, bare member_id on WebSocket URL, optional server-side JWT validation) has been replaced with:
+> **Superseded** by the conversational onboarding design in the Jigsaw plan's Phase 6 (was `plans/PLAN-votebot-polis-jigsaw.md` in this repo; now in `ddp-infra` — see the top-of-file note). The approach below (client-side Memberstack modal, bare member_id on WebSocket URL, optional server-side JWT validation) has been replaced with:
 >
 > - **Server-side account creation** via Memberstack Admin API (no client-side modal needed)
 > - **Conversational onboarding** — VoteBot asks for name + email in chat, creates account server-side
 > - **Catalist voter verification** — VoteBot asks for DOB + zip, verifies against national voter file
 > - **Mandatory server-side identity verification** for any write operation (opinion submission, Polis votes)
 >
-> See the Jigsaw plan for the current design. The sections below are retained for reference but should not be implemented as written.
+> See the Jigsaw plan in `ddp-infra` for the current design. The sections below are retained for reference but should not be implemented as written.
 
 ### 2.1 How Memberstack Works with Webflow *(reference only — see Jigsaw plan)*
 
@@ -495,7 +495,7 @@ New metrics enabled by visitor tracking:
 - [x] Deploy widget + backend, verify visitor tracking in logs ✓ (confirmed working 2026-03-26)
 
 ### Phase 2: Memberstack Integration — SUPERSEDED BY JIGSAW PLAN
-See `plans/PLAN-votebot-polis-jigsaw.md` Phase 6 for the current design:
+See the Jigsaw plan's Phase 6 (was `plans/PLAN-votebot-polis-jigsaw.md` in this repo; now in `ddp-infra`) for the current design:
 - [ ] `services/memberstack.py` — Admin API client (create_member, update_metadata, validate_token)
 - [ ] Conversational onboarding Step A: name + email → server-side Memberstack account creation
 - [ ] Conversational onboarding Step B: DOB + zip → Catalist voter verification
@@ -505,7 +505,7 @@ See `plans/PLAN-votebot-polis-jigsaw.md` Phase 6 for the current design:
 - [ ] Opinion vector promotion (visitor_id → member_id)
 
 ### Phase 3: Personalization — MOVED TO JIGSAW STAGE A (highest priority)
-Personalization has been moved to **Stage A (Weeks 1-4)** of the Jigsaw staged rollout (`PLAN-votebot-polis-jigsaw.md`). It's the first user-visible feature — easy, high-impact, and delivers value immediately while opinion extraction is validated silently in the background.
+Personalization has been moved to **Stage A (Weeks 1-4)** of the Jigsaw staged rollout (was `PLAN-votebot-polis-jigsaw.md` in this repo; now in `ddp-infra`). It's the first user-visible feature — easy, high-impact, and delivers value immediately while opinion extraction is validated silently in the background.
 - [ ] Redis visitor profiles (`votebot:visitor:{visitor_id}`)
 - [ ] Context-aware welcome messages based on visitor history
 - [ ] Jurisdiction inference from visitor behavior

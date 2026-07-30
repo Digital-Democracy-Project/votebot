@@ -81,12 +81,14 @@ This means `embeddings.py` is shared between sync (embedding documents during in
 
 ## Remaining verification (on EC2 deploy, Phase 7)
 
-- [ ] VoteBot starts without errors: `uvicorn votebot.main:app --port 8000`
-- [ ] `GET /votebot/v1/health` returns healthy
+- [x] VoteBot starts without errors: `uvicorn votebot.main:app --port 8000` — confirmed running on EC2, see PLAN-ddp-sync-phase7.md
+- [x] `GET /votebot/v1/health` returns healthy — confirmed on EC2, see PLAN-ddp-sync-phase7.md
 - [ ] `GET /votebot/v1/health/ready` returns all services connected
-- [ ] Chat queries work: `POST /votebot/v1/chat` with a bill question
-- [ ] WebSocket chat works
+- [x] Chat queries work: `POST /votebot/v1/chat` with a bill question — confirmed ("Chat queries responsive from DDP website"), see PLAN-ddp-sync-phase7.md
+- [x] WebSocket chat works — confirmed ("WebSocket sessions reconnected after VoteBot restart"), see PLAN-ddp-sync-phase7.md
 - [ ] Content resolution works: `GET /votebot/v1/content/resolve?url=...`
 - [ ] No import errors in logs
 - [ ] Sync endpoints return 404 (not 500): `POST /votebot/v1/sync/unified` → 404
 - [ ] Federal legislator cache still works (used by retrieval.py for vote lookups)
+
+The unchecked items above were not explicitly called out in Phase 7's deployment record and remain unverified (though nothing in the codebase or later commit history suggests a problem).

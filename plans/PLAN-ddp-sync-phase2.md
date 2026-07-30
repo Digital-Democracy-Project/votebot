@@ -485,6 +485,8 @@ DDP-API's `start_scheduler()` calls `run_sync_job()` immediately after starting 
 - [ ] All 9 organizations sync correctly (Federal runs last)
 - [ ] Phone conflict resolution works across orgs (shared `claimed_phones` dict)
 
+**Update:** Per PLAN-ddp-sync-phase7.md, the EC2 deployment confirmed `/ddp-sync/v1/trigger/user-sync` completes successfully (Voatz→Brevo sync) and config shows 9 organizations loaded. The scheduler runs 11–12 total jobs (this phase's 8 plus Phase 1's 3) rather than exactly 11 in isolation. The remaining items above (full-sync trigger, Webflow batch job on schedule, Zapier webhook firing, phone conflict resolution across orgs) were not explicitly re-confirmed in Phase 7 and remain open/unverified.
+
 ---
 
 ## Files created/modified (this phase)

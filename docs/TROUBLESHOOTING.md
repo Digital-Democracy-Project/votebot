@@ -2,6 +2,8 @@
 
 This document captures common issues, diagnostic procedures, and solutions for VoteBot's RAG and data sync systems.
 
+> **Orientation note:** As of commit `df25db5` (March 2026), all sync/ingestion code (`src/votebot/sync/`, `src/votebot/updates/`, `src/votebot/ingestion/`, the `/votebot/v1/sync/*` routes, and `python -m votebot.sync.*` / `python -m votebot.updates.*` CLI invocations) was extracted from this repo into the standalone [ddp-sync](https://github.com/Digital-Democracy-Project/ddp-sync) service. Sections below dated before that migration (mostly "February 2026") describe those modules as if they still live in `src/votebot/` — they don't anymore, so the exact commands/paths in those older sections won't run against this repo as-is. `src/votebot/utils/federal_legislator_cache.py` is the one sync-adjacent file that stayed (moved from `sync/` to `utils/`; still imported by chat for vote lookups). Sections dated March 2026 or later generally already distinguish `votebot` vs `ddp-sync` file paths correctly — see [DDP-Sync Issues](#ddp-sync-issues) and [Nightly Bill Sync Skips Bills for Certain States](#nightly-bill-sync-skips-bills-for-certain-states) for examples of the current cross-repo pattern.
+
 ## Table of Contents
 
 - [Wrong Legislator Returned on Webflow Pages](#wrong-legislator-returned-on-webflow-pages)

@@ -24,10 +24,10 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Web Search Fallback**: Automatically searches the web (via OpenAI web search + Tavily) when RAG confidence is low
 - **User Analytics & Behavioral Logging**: Event-based logging system with three event types (`message_received`, `query_processed`, `conversation_ended`), three-level identity model (visitor, session, conversation), two-level intent classification, grounding status tracking, fallback detection, and conversation boundary analysis. All events logged to date-partitioned JSONL files for offline evaluation and analytics.
 - **Quick-Action Buttons**: Three preset buttons on bill pages — "Summary", "Pros & cons", "Status & votes" (visible labels; full descriptions on `aria-label` for screen readers). Buttons stay visible across the chat session and are disabled in-flight to prevent double-fires. Summary + pros/cons responses are cached in Redis (slug-keyed, amendment-triggered invalidation via pub/sub from DDP-Sync, 7-day safety TTL). Status/votes button is never cached — always hits live OpenStates. Gated on `VOTEBOT_QUICK_ACTION_BUTTONS` (default `false`); enabled in production 2026-04-29. See [plans/PLAN-quick-action-buttons.md](plans/PLAN-quick-action-buttons.md).
-- **Opinion Elicitation (Jigsaw — planned)**: Guided opinion capture through natural conversation with 5 elicitation modes, multi-position opinion vectors, Polis integration for clustering, Memberstack authentication, and Catalist voter file verification. See [plans/PLAN-jigsaw-overview.md](plans/PLAN-jigsaw-overview.md) for the staged rollout plan.
+- **Opinion Elicitation (exploratory)**: A guided opinion-capture feature — multi-position opinion vectors, Polis-based clustering, Memberstack accounts, Catalist voter verification — has been discussed as a future direction. Not implemented in VoteBot; design docs now live in the ddp-infra repo.
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
-- **Multi-Source Data**: Ingests data from Congress.gov, OpenStates, Webflow CMS, and custom sources
-- **Data Sync**: Content ingestion pipeline (bills, legislators, orgs) with sync handlers and CLI scripts. Scheduled sync jobs run via [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync)
+- **Multi-Source Data**: RAG index is built from Congress.gov, OpenStates, Webflow CMS, and custom sources — ingestion itself is handled by [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync), a standalone service
+- **Data Sync**: Content ingestion (bills, legislators, orgs), sync handlers, CLI tooling, and scheduled jobs all live in [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) — VoteBot itself is chat/RAG-only and contains no ingestion code
 - **High Performance**: Designed for 1000+ concurrent conversations
 
 ## Tech Stack
@@ -36,8 +36,8 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Vector Database**: Pinecone
 - **LLM**: OpenAI GPT-4.1 (via Responses API with web search)
 - **Embeddings**: OpenAI text-embedding-3-large
-- **Caching / Cross-Worker State**: Redis (thread-to-session mapping, pub/sub for multi-worker handoff, active jurisdictions tracking, bill version cache, sync task state + checkpoints)
-- **Database**: PostgreSQL (optional)
+- **Caching / Cross-Worker State**: Redis (thread-to-session mapping, pub/sub for multi-worker handoff, active jurisdictions tracking, bill version cache, quick-action button cache)
+- **Database**: PostgreSQL — config field (`DATABASE_URL`) is reserved but not currently used by any application code; no Postgres driver is in `pyproject.toml`
 
 ## Quick Start
 
@@ -91,11 +91,11 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `PINECONE_INDEX_NAME` | Pinecone index name (default: votebot-large) | Yes |
 | `PINECONE_NAMESPACE` | Pinecone namespace (default: default) | No |
 | `API_KEY` | API key for authentication | Yes |
-| `WEBFLOW_VOTEBOT_API_KEY` | Webflow CMS API key (read-only, used at query time) | For sync |
-| `WEBFLOW_SCHEDULER_API_KEY` | Webflow CMS API key with CMS:write scope (used by DDP-Sync for gov-url updates) | For sync |
-| `WEBFLOW_BILLS_COLLECTION_ID` | Webflow bills collection | For sync |
-| `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection | For sync |
-| `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection | For sync |
+| `WEBFLOW_VOTEBOT_API_KEY` | Webflow CMS API key (read-only, used at query time by `/content/resolve` and runtime CMS lookups) | Yes |
+| `WEBFLOW_SCHEDULER_API_KEY` | Webflow CMS API key with CMS:write scope (not currently read by any VoteBot code path — used by DDP-Sync for gov-url updates) | No |
+| `WEBFLOW_BILLS_COLLECTION_ID` | Webflow bills collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
+| `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
+| `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
 | `CONGRESS_API_KEY` | Congress.gov API key | For federal bills |
 | `OPENSTATES_API_KEY` | OpenStates API key | For state bills |
 | `TAVILY_API_KEY` | Tavily API key for web search fallback | For web search |
@@ -129,12 +129,12 @@ Process a chat message and return a response.
     "type": "bill",
     "id": "HR-1234",
     "jurisdiction": "US",
-    "session-code": "119"
+    "session": "119"
   }
 }
 ```
 
-> **Note**: The `session-code` field should contain the OpenStates-friendly session identifier from Webflow (e.g., "119" for 119th Congress, "2025" for state legislative sessions). This is used for vote verification lookups.
+> **Note**: `page_context.session` should contain the OpenStates-friendly session identifier (e.g., "119" for 119th Congress, "2025" for state legislative sessions). This is used for vote verification lookups. Webflow CMS calls the equivalent field `session-code`; the WebSocket protocol (used by the chat widget) accepts either `session` or `session-code` in the raw payload, but the REST `PageContext` schema only recognizes `session`.
 
 **Response:**
 ```json
@@ -190,10 +190,12 @@ curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=htt
   "id": "HR 1",
   "title": "One Big Beautiful Bill Act (HR1)",
   "jurisdiction": "US",
+  "session": "119",
   "description": "The One Big Beautiful Bill Act aims to reform...",
   "status": "",
   "url": "https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025",
-  "slug": "one-big-beautiful-bill-act-hr1-2025"
+  "slug": "one-big-beautiful-bill-act-hr1-2025",
+  "webflow_id": "6512abc123..."
 }
 ```
 
@@ -230,79 +232,7 @@ Force-clear all cached button responses (`summary`, `pros_cons`) for a bill slug
 
 ### Unified Sync API
 
-> **Note**: In production, sync operations are handled by [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) on port 8001. DDP-API proxies `/votebot/sync/*` and `/votebot/trigger/*` to DDP-Sync automatically. The endpoints below are VoteBot's local sync API, used by DDP-Sync internally and for local development.
-
-```
-POST /votebot/v1/sync/unified
-```
-
-Sync content to the vector store. Supports bills, legislators, organizations, webpages, and training documents.
-
-**Request Body (single item):**
-```json
-{
-  "content_type": "bill",
-  "mode": "single",
-  "slug": "fl-hb-123-2025",
-  "include_pdfs": true,
-  "include_openstates": true
-}
-```
-
-**Request Body (batch):**
-```json
-{
-  "content_type": "bill",
-  "mode": "batch",
-  "jurisdiction": "FL",
-  "limit": 100,
-  "include_pdfs": true
-}
-```
-
-> **Note**: Batch bill sync with `include_openstates` (default: true) automatically chains `BillVersionSyncService` after the OpenStates history sync. This checks for newer bill text versions (PDF/HTML), re-ingests updated text into Pinecone, and updates Webflow CMS fields (`gov-url`, `status`, `status-date`). CMS fields that already match OpenStates values are skipped to minimize Webflow API calls. The same version sync also runs independently on the daily scheduler (04:00 UTC).
-
-**Request Body (resume after crash):**
-```json
-{
-  "content_type": "bill",
-  "mode": "batch",
-  "resume_task_id": "abc-123-def"
-}
-```
-
-When `resume_task_id` is provided, the new task copies the checkpoint set from the previous task and skips already-processed items. This allows a crashed batch sync to pick up where it left off instead of re-processing from scratch.
-
-**Response:**
-```json
-{
-  "success": true,
-  "content_type": "bill",
-  "mode": "batch",
-  "status": "accepted",
-  "task_id": "abc-123-def",
-  "items_processed": 0,
-  "chunks_created": 0
-}
-```
-
-For batch operations, the sync runs in the background. Check status with:
-
-```
-GET /votebot/v1/sync/unified/status/{task_id}
-```
-
-Via the DDP-API proxy:
-```
-GET https://api.digitaldemocracyproject.org/votebot/sync/unified/status/{task_id}
-```
-
-**Live progress**: The status endpoint returns real-time counts (`items_processed`, `items_successful`, `items_failed`, `chunks_created`) while the sync is running. The in-memory dict updates after every item; Redis is updated every 10 items for cross-worker visibility.
-
-**Sync all content types:**
-```
-POST /votebot/v1/sync/unified/all
-```
+> **Sync/ingestion has moved entirely to [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync).** VoteBot no longer implements a sync API, ingestion pipeline, or scheduler — it is a chat/RAG-only service (see `src/votebot/main.py`). DDP-API proxies `/votebot/sync/*` and `/votebot/trigger/*` to DDP-Sync, which runs as a standalone service on port 8001. See the DDP-Sync repo for its current sync API, request/response shapes, and CLI.
 
 ## Chat Widget
 
@@ -515,39 +445,13 @@ VoteBot maintains a reverse index of legislator voting records, enabling queries
 
 ```bash
 # Refresh the federal legislator cache (538 members of Congress)
-python -m votebot.sync.federal_legislator_cache
+python -m votebot.utils.federal_legislator_cache
 
 # Show cached legislators
-python -m votebot.sync.federal_legislator_cache --show
-
-# Build legislator-votes documents from bill-votes (reverse index)
-python -m votebot.sync.build_legislator_votes
-
-# Dry run to see stats without writing
-python -m votebot.sync.build_legislator_votes --dry-run
-
-# Clean up corrupted documents (from chunk boundary parsing issues)
-python -m votebot.sync.build_legislator_votes --cleanup --dry-run  # Preview
-python -m votebot.sync.build_legislator_votes --cleanup            # Delete corrupted docs
+python -m votebot.utils.federal_legislator_cache --show
 ```
 
-### Sync Workflow
-
-For complete legislator voting records:
-
-```bash
-# 1. Refresh federal legislator cache (periodic - legislators don't change often)
-python -m votebot.sync.federal_legislator_cache
-
-# 2. Sync bills with OpenStates data (injects person IDs into vote content)
-python -m votebot.updates.bill_sync batch --jurisdiction us --include-openstates
-python -m votebot.updates.bill_sync batch --jurisdiction fl --include-openstates
-
-# 3. Build reverse index for legislator-votes documents
-python -m votebot.sync.build_legislator_votes
-```
-
-The build output includes a `name_enrichments` count showing how many legislators had their names enriched from the federal cache. For optimal search results, ensure the federal cache is refreshed before building.
+> **Note**: Bill syncing (which injects OpenStates person IDs into vote content) and building the `legislator-votes` reverse index from `bill-votes` documents are now handled by [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) — this functionality no longer lives in VoteBot. `federal_legislator_cache` is the one piece VoteBot still owns locally, since the chat agent depends on it at query time (`src/votebot/core/retrieval.py`).
 
 ### Document Types
 
@@ -567,7 +471,7 @@ The build output includes a `name_enrichments` count showing how many legislator
 
 ## Data Ingestion
 
-VoteBot uses a unified sync service for all content types. The primary data sources are:
+All content ingestion now happens in [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync), a standalone service — VoteBot contains no sync/ingestion code (removed in favor of DDP-Sync; see `src/votebot/main.py`). VoteBot only reads from Pinecone at query time, plus the runtime CMS/OpenStates lookups described below. The primary data sources (ingested by DDP-Sync) are:
 - **Webflow CMS** - Bills, legislators, and organizations managed in Webflow
 - **OpenStates** - Legislative history, votes, actions, and sponsored bills
 - **Congress.gov** - Federal bill text and amendments
@@ -589,93 +493,7 @@ VoteBot maintains bidirectional linkages between content types:
 | Dispute Verification | Any → CMS | Bill/legislator/org details on disputes | Webflow CMS |
 | Vote Verification | Any → OpenStates | Legislator vote lookup (any page type) | OpenStates API |
 
-### Full Rebuild Script
-
-For a complete rebuild of the Pinecone index with all content types:
-
-```bash
-# Full rebuild with prompts
-python scripts/rebuild_pinecone.py
-
-# Non-interactive (auto-confirm all prompts)
-python scripts/rebuild_pinecone.py --yes
-
-# Skip wipe (add to existing data)
-python scripts/rebuild_pinecone.py --skip-wipe
-
-# Specific content types only
-python scripts/rebuild_pinecone.py --content-types bill,legislator
-```
-
-**Sync Order** (recommended for proper data linkages):
-1. `bill` - Creates bill-votes with OpenStates person IDs and org positions
-2. `legislator` - Creates legislator profiles with OpenStates IDs
-3. `organization` - Creates org profiles with bill positions
-4. `webpage` - DDP website pages (about, faq, vote, tally, score, etc.)
-5. `training` - Training documents for agent behavior
-6. `legislator-votes` - Reverse index built from bill-votes (post-sync)
-
-### Unified Sync CLI
-
-```bash
-# Single item sync
-python scripts/sync.py bill --slug fl-hb-123-2025
-python scripts/sync.py bill --webflow-id 6512abc123
-python scripts/sync.py legislator --slug rick-scott
-python scripts/sync.py organization --slug aclu
-
-# Batch sync (all items of a type)
-python scripts/sync.py bill --batch
-python scripts/sync.py bill --batch --jurisdiction FL --limit 100
-python scripts/sync.py legislator --batch --no-sponsored-bills
-python scripts/sync.py organization --batch
-
-# Sync all content types
-python scripts/sync.py all
-python scripts/sync.py all --dry-run --limit 50
-
-# Full refresh (clear and resync)
-python scripts/sync.py all --clear-namespace
-
-# Clear namespace only (DESTRUCTIVE)
-python scripts/sync.py clear --confirm
-```
-
-### Sync Options
-
-| Option | Description |
-|--------|-------------|
-| `--batch` | Sync all items (vs single item) |
-| `--dry-run` | Preview without ingesting |
-| `--limit N` | Maximum items to process |
-| `--jurisdiction` | Filter by jurisdiction (e.g., FL, US) |
-| `--no-pdfs` | Skip PDF processing for bills |
-| `--no-openstates` | Skip OpenStates data for bills |
-| `--no-sponsored-bills` | Skip sponsored bills for legislators |
-| `--clear-namespace` | Delete all data before syncing |
-| `--log-level` | DEBUG, INFO, WARNING, ERROR |
-
-### Sync Progress & Resume
-
-> **In production, sync operations are managed by [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync).** The progress/resume features below apply to the local sync API.
-
-**Live progress reporting**: During batch sync, the status endpoint (`GET /sync/unified/status/{task_id}`) returns real-time counts while the sync is running.
-
-**Manual resume**: Resume a crashed sync with `resume_task_id`:
-
-```bash
-curl -X POST -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"content_type": "bill", "mode": "batch", "resume_task_id": "abc-123"}' \
-  https://api.digitaldemocracyproject.org/votebot/sync/unified
-```
-
-### Legacy Scripts
-
-```bash
-# Seed development data
-python scripts/seed_data.py
-```
+> **Note**: The Pinecone rebuild/sync scripts formerly documented here (`scripts/rebuild_pinecone.py`, `scripts/sync.py`, `scripts/seed_data.py`, etc.) depended on the sync/ingestion code that has since moved to DDP-Sync — they are no longer functional against this repo. See [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) for current ingestion, full-rebuild, and CLI tooling.
 
 ### Sync Scheduling
 
@@ -725,16 +543,17 @@ mypy src/votebot
 
 ```
 votebot/
-├── src/votebot/
+├── src/votebot/              # Chat/RAG only — sync & ingestion live in DDP-Sync
 │   ├── main.py              # FastAPI application
 │   ├── config.py            # Configuration
 │   ├── api/                  # API layer
 │   │   ├── routes/          # Endpoint handlers
-│   │   │   ├── chat.py      # POST /chat endpoints
+│   │   │   ├── chat.py      # POST /chat, /chat/stream endpoints
 │   │   │   ├── websocket.py # WebSocket /ws/chat
 │   │   │   ├── health.py    # Health checks
 │   │   │   ├── content.py   # Content resolution
-│   │   │   └── sync_unified.py  # Unified sync API
+│   │   │   ├── features.py  # Feature-flag discovery
+│   │   │   └── cache_admin.py  # Button cache admin
 │   │   ├── schemas/         # Request/response models
 │   │   └── middleware/      # Auth, logging
 │   ├── core/                # Business logic
@@ -747,35 +566,16 @@ votebot/
 │   │   ├── vector_store.py  # Pinecone operations
 │   │   ├── web_search.py    # Tavily web search
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
+│   │   ├── button_cache.py  # Redis-backed quick-action button cache
 │   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification + gov-url write)
-│   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub + active jurisdictions + bill version cache + sync checkpoints)
+│   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub + active jurisdictions + bill version cache)
 │   │   ├── query_logger.py  # Event & query logger (JSONL, date-partitioned, 3 event types)
 │   │   └── slack.py         # Slack human handoff
-│   ├── sync/                # Unified sync service
-│   │   ├── service.py       # UnifiedSyncService
-│   │   ├── types.py         # ContentType, SyncMode, etc.
-│   │   ├── build_legislator_votes.py  # Reverse index builder
-│   │   ├── federal_legislator_cache.py  # Federal legislator ID cache
-│   │   └── handlers/        # Content-specific handlers
-│   │       ├── bill.py      # Bill sync (Webflow + OpenStates + PDFs)
-│   │       ├── legislator.py    # Legislator sync
-│   │       ├── organization.py  # Organization sync
-│   │       ├── webpage.py   # Webpage sync
-│   │       └── training.py  # Training document sync
-│   ├── ingestion/           # Data ingestion pipeline
-│   │   ├── pipeline.py      # Main orchestrator
-│   │   ├── sources/         # Data source connectors
-│   │   │   ├── congress.py  # Congress.gov API
-│   │   │   ├── openstates.py    # OpenStates API
-│   │   │   ├── webflow.py   # Webflow CMS
-│   │   │   └── pdf.py       # PDF extraction
-│   │   └── chunking.py      # Text chunking
 │   └── utils/               # Utility modules
 │       ├── legislative_calendar.py  # Session date lookup (live OpenStates + hardcoded fallback)
+│       ├── federal_legislator_cache.py  # Federal legislator ID cache (only sync-adjacent file VoteBot still owns)
 │       └── intent.py         # Two-level intent classification (primary + sub) with controlled enums
 ├── scripts/
-│   ├── sync.py              # Unified sync CLI
-│   ├── seed_data.py         # Development data seeding
 │   ├── test_bill_votes_tool.py  # Bill votes tool tests
 │   ├── rag_test_common.py       # Shared test infra (TestResult, VoteBotTestClient, reporting)
 │   ├── rag_ground_truth.py      # Ground truth fetcher (Webflow CMS + OpenStates)
@@ -996,21 +796,9 @@ The report includes:
 - **Device distribution**: Desktop vs mobile vs tablet
 - **Confidence and citation analysis**: Low-confidence flagging, citation rates
 
-## Opinion Elicitation (Jigsaw — Planned)
+## Opinion Elicitation (Exploratory)
 
-VoteBot is being extended with a guided opinion elicitation system that captures voter opinions on legislation through natural conversation. The system uses multi-position opinion vectors, Polis for clustering, and Catalist for voter verification.
-
-**Staged rollout** — each stage validates assumptions before the next begins:
-
-| Stage | What It Does | Status |
-|---|---|---|
-| A | Personalization + silent opinion extraction | Ready for implementation |
-| B | 5-mode guided elicitation + "add your voice" | Blocked on Stage A |
-| C | Memberstack accounts + Catalist voter verification + cost control | Blocked on Stage B |
-| D | Polis clustering + opinion maps on DDP website | Blocked on Stage C |
-| E | Emergent positions + feedback loop monitoring | Blocked on Stage D |
-
-See [plans/PLAN-jigsaw-overview.md](plans/PLAN-jigsaw-overview.md) for the complete system design, and individual stage documents for implementation details.
+A guided opinion-elicitation system — capturing voter opinions on legislation through natural conversation, using multi-position opinion vectors, Polis for clustering, Memberstack for accounts, and Catalist for voter verification — has been discussed as a future direction for VoteBot. There is no implementation in this repo (no code, routes, or dependencies for Jigsaw/Polis/Memberstack/Catalist exist under `src/`). The design docs and staged rollout plan now live in the ddp-infra repo alongside the rest of the fleet's `PLAN-*.md` files.
 
 ## Performance Targets
 

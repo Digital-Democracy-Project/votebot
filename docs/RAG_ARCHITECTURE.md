@@ -27,6 +27,8 @@ This document provides a comprehensive reference for VoteBot's Retrieval-Augment
 
 This is the offline pipeline that takes raw content from various sources, chunks it, embeds it, and stores it in Pinecone.
 
+> **Note (accuracy as of this writing):** As of commit `df25db5` (March 2026), the ingestion/sync pipeline — data sources, metadata extraction, chunking, pipeline orchestration, and sync handlers (Steps 1–3, 6, and 7 below) — was extracted from this repo into the standalone [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) service. `src/votebot/ingestion/` and `src/votebot/sync/` no longer exist in this codebase; that code (and any drift from what's described below) now lives in the ddp-sync repo. Steps 4 (Embedding) and 5 (Vector Store Upsert) remain accurate as written — `embeddings.py` and `vector_store.py` are still part of VoteBot, since retrieval also needs them for query-time embedding and search. The description below is kept for conceptual reference (the pipeline shape is still similar), not as a guide to this repo's current file layout.
+
 ### Step 1: Data Sources
 
 **Location:** `src/votebot/ingestion/sources/`
@@ -50,7 +52,7 @@ Each source implements an async generator `fetch(**config)` that yields `Documen
 `MetadataExtractor` normalizes raw API data into a `DocumentMetadata` dataclass with standardized fields:
 
 - `document_id` — unique ID like `"bill-openstates-HB363"` or `"legislator-ocd-person/abc123"`
-- `document_type` — one of: `bill`, `bill-text`, `bill-votes`, `legislator`, `legislator-votes`, `organization`, `training` (note: `bill-history` was removed in Fix F — bill status/actions now served exclusively by live OpenStates API)
+- `document_type` — one of: `bill`, `bill-text`, `bill-votes`, `bill-changelog`, `legislator`, `legislator-votes`, `organization`, `training` (note: `bill-history` was removed in Fix F — bill status/actions now served exclusively by live OpenStates API; `bill-history` and `bill-text-history` remain in `utils/intent.py`'s `VALID_RETRIEVAL_SOURCES` only for backward-compatible analytics normalization of old logs, not as active ingested types)
 - `source`, `title`, `jurisdiction`, `bill_id`, `legislator_id`, `url`
 - `extra` dict — additional filterable fields (`webflow_id`, `slug`, `party`, `chamber`, `bill_prefix`, `bill_number`, etc.)
 
@@ -149,8 +151,8 @@ Each handler uses `IngestionPipeline` for the chunk -> embed -> upsert flow.
 
 **Sync is triggered via:**
 - DDP-Sync scheduled jobs (automatic, production)
-- `POST /votebot/v1/sync/unified` (API endpoint for on-demand sync)
-- CLI scripts in `scripts/` (e.g., `sync_bills.py`, `sync_legislators.py`)
+- DDP-Sync's own on-demand sync endpoint (`POST /ddp-sync/v1/sync/unified`, proxied publicly at `/votebot/sync/unified`) — this route now lives in the ddp-sync repo, not in `src/votebot/`
+- Note: `scripts/sync.py`, `scripts/sync_bills.py`, `scripts/sync_legislators.py`, and `scripts/ingest.py` still exist in this repo's `scripts/` directory but are dead code post-migration — they import `votebot.ingestion`/`votebot.sync`, which were removed. Use the equivalent ddp-sync CLI/API instead.
 
 ---
 
@@ -250,6 +252,7 @@ All the pre-fetched data is layered in priority order (most authoritative first)
 | 4a-i | `bill` (targeted query) | Bill's own chunks containing org position sections |
 | 4a-ii | `organization` | Standalone org docs that reference this bill |
 | 4b | `bill-votes` | Vote records |
+| 5 | `bill-changelog` | Version-transition summaries — only queried when the query matches changelog intent (`CHANGELOG_KEYWORDS` from `utils/intent.py`, plus retrieval-only terms "amendment"/"amended") and a `webflow_id` filter is available. When matched, changelog results are surfaced first in the combined result ordering. |
 
 Also detects **legislator follow-up questions** (e.g., "how about Rick Scott?") using a federal legislator cache, and looks up `legislator-votes` documents by person ID.
 
@@ -341,15 +344,6 @@ After response delivery, three event types are logged to date-partitioned JSONL 
 
 ---
 
-## Planned Extension: Opinion Elicitation (Jigsaw)
+## Planned Extension: Opinion Elicitation (Jigsaw/Polis)
 
-The RAG pipeline will be extended with an opinion extraction layer that runs async post-response on bill-page messages (Step 14 analytics events already provide the trigger). Opinion extraction will:
-
-1. Match user language against a **policy position landscape** per bill (PostgreSQL `opinion_landscapes`)
-2. Generate stance scores (agree/disagree, -1 to +1) with confidence levels
-3. Store extraction results as **OpinionSignal** records (PostgreSQL `opinion_signals`)
-4. Feed into multi-position **opinion vectors** that accumulate across sessions
-
-This does not modify the existing RAG retrieval or generation pipeline — it runs alongside it as an async post-processing step using cheap models (Haiku/4o-mini) to minimize cost impact.
-
-See [plans/PLAN-jigsaw-overview.md](../plans/PLAN-jigsaw-overview.md) for the full system design and [plans/PLAN-jigsaw-stage-a.md](../plans/PLAN-jigsaw-stage-a.md) for the initial implementation plan.
+There was a plan for an opinion-extraction layer (working name "Jigsaw") that would run async post-response on bill-page messages, using Step 14's analytics events as the trigger. That plan has moved to the `ddp-infra` repo and no longer lives in this repo's `plans/` directory. VoteBot's own codebase (`src/`) has no Jigsaw/Polis-related code today — this RAG pipeline is unaffected by that plan unless and until it's implemented here.
