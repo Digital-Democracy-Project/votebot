@@ -803,10 +803,10 @@ WantedBy=multi-user.target
 - [x] `pip install -e .` succeeds in a fresh venv
 - [x] `python -c "from ddp_sync.config import get_settings; ..."` works with `.env` (config source: env)
 - [x] App creation succeeds — all 5 routes registered under `/ddp-sync/v1/`
-- [ ] `uvicorn ddp_sync.app:app --port 8001` starts without errors (requires Redis)
-- [ ] `curl localhost:8001/ddp-sync/v1/health` returns config_source, redis, pinecone status (requires Redis)
-- [ ] `curl localhost:8001/ddp-sync/v1/schedule` shows 3 jobs (requires Redis)
-- [ ] Single-bill sync via API returns task_id and completes successfully (requires Redis + credentials)
+- [x] `uvicorn ddp_sync.app:app --port 8001` starts without errors (requires Redis) — confirmed on EC2, see PLAN-ddp-sync-phase7.md
+- [x] `curl localhost:8001/ddp-sync/v1/health` returns config_source, redis, pinecone status (requires Redis) — confirmed on EC2 (`healthy, pinecone connected`), see PLAN-ddp-sync-phase7.md
+- [x] `curl localhost:8001/ddp-sync/v1/schedule` shows scheduled jobs (requires Redis) — confirmed on EC2; by deployment time this showed all combined Phase 1+2 jobs (11–12), not just the original 3, since Phase 2 shipped before Phase 7's deployment
+- [x] Single-bill sync via API returns task_id and completes successfully (requires Redis + credentials) — confirmed on EC2 (single bill sync, 34 chunks, 16s), see PLAN-ddp-sync-phase7.md
 - [x] AWS Secrets Manager secret `ddp-sync/credentials` created and populated
 
 ### Fixes applied during verification

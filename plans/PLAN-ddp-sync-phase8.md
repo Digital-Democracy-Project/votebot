@@ -328,7 +328,7 @@ Key changes:
 - [x] DDP-API README updated — no scheduler references, proxy docs added, secrets example updated
 - [x] VoteBot TROUBLESHOOTING.md updated — DDP-Sync issues section added (commit 5275ddb)
 - [x] VoteBot RAG_ARCHITECTURE.md updated — sync scheduling section points to DDP-Sync
-- [ ] All three `journalctl -u <service>` streams show only relevant logs (verified during Phase 7)
+- [x] All three `journalctl -u <service>` streams show only relevant logs (verified during Phase 7)
 
 ---
 

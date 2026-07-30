@@ -3,7 +3,7 @@
 **Date:** 2026-03-29
 **Status:** All three deploys LIVE and validated as of 2026-03-30.
 - Deploy 1 COMPLETE (commit `5789b04`, 2026-03-29) — duplicate events fixed, confidence varies 0.54–0.82, sub-intent unknown rate <20% on real queries.
-- Deploy 2 ACTIVE (toggle enabled 2026-03-30 03:46 UTC) — 48hr validation window ends 2026-04-01 ~04:00 UTC. Initial citation rate 75% (3/4 real queries). Full soak pending.
+- Deploy 2 toggle enabled 2026-03-30 03:46 UTC. Initial 48hr sample showed 75% (3/4 real queries), but that did not hold up at scale: per `plans/PLAN-eval-and-cache-hit-logging.md`, production audits on 2026-04-28 and 2026-04-30 measured citation rate at 31.6% and ~27% respectively — both well below the ≥60% acceptance criterion below. The toggle remains enabled, but Deploy 2's goal has not been met; this is tracked as an open problem in `PLAN-eval-and-cache-hit-logging.md`.
 - Deploy 3 COMPLETE (commit `5126ffe`, 2026-03-30) — page_context now includes `id` and `jurisdiction` (e.g., `id=HR6984`, `jurisdiction=US`). Required CloudFlare cache purge for widget JS.
 
 **Related fix (from PLAN-quick-action-buttons):** Stale bill status bug (HR 7147) fully fixed across 5 commits: `52b8d80` (tool trigger on bill pages), `ee1227a` (slug-based bill resolution), `b518132` (remove stale Pinecone bill-history), `d0fed09` + `6f756c7` (full OpenStates action history). See `docs/TROUBLESHOOTING.md` for complete details.

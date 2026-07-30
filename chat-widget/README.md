@@ -10,7 +10,7 @@ Embeddable chat widget for Digital Democracy Project VoteBot.
 
 ## Features
 
-- Single JavaScript file (~57KB minified)
+- Single JavaScript file (~111KB minified, `dist/ddp-chat.min.js`)
 - Shadow DOM for style isolation
 - WebSocket streaming with auto-reconnection
 - Markdown rendering
@@ -150,7 +150,7 @@ The widget persists chat sessions across full-page navigations within the same b
 
 ### How It Works
 
-- **Storage**: All state is stored in `sessionStorage` with the prefix `ddp_votebot_`. This is scoped to the browser tab and automatically cleared when the tab is closed.
+- **Storage**: Most state is stored in `sessionStorage` with the prefix `ddp_votebot_`, scoped to the browser tab and automatically cleared when the tab is closed. One exception: a `visitor_id` is stored in `localStorage` (see below) so it persists across tabs/sessions for analytics.
 - **Session ID**: When the WebSocket connects and receives a `session_info` response, the session ID is saved. On subsequent page loads, the saved session ID is sent to the server, which restores the conversation.
 - **Activity timeout**: A 30-minute inactivity timeout ensures stale sessions are cleared. Each message send and server response resets the timer.
 - **Page context**: The current page context is persisted so the widget can detect when the user navigates to a different entity.
@@ -174,6 +174,7 @@ The widget persists chat sessions across full-page navigations within the same b
 | `ddp_votebot_last_activity` | Timestamp of last activity (for 30-min timeout) |
 | `ddp_votebot_page_context` | JSON-serialized page context for change detection |
 | `ddp_votebot_popup_open` | `"1"` or `"0"` — popup visibility state |
+| `ddp_votebot_visitor_id` | **`localStorage`** (not `sessionStorage`) — persistent cross-session visitor identity, sent to the server as `visitor_id` for analytics/conversation tracking |
 
 ## Embedding on Your Website
 
@@ -192,11 +193,11 @@ Basic embedding (no context):
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `wsUrl` | string | `wss://api.digitaldemocracyproject.org/votebot/ws` | WebSocket server URL |
+| `wsUrl` | string | `wss://api.digitaldemocracyproject.org/ws/chat` | WebSocket server URL |
 | `position` | string | `bottom-right` | Widget position |
 | `primaryColor` | string | `#1a5f7a` | Primary brand color |
 | `botName` | string | `VoteBot` | Bot display name |
-| `avatar` | string | `🗳️` | Bot avatar emoji |
+| `avatar` | string | (built-in DDP logo, base64-encoded PNG data URI) | Bot avatar — pass any image URL or emoji string to override |
 | `welcomeMessage` | string | `null` | Custom welcome message (null = auto-generate) |
 | `pageContext` | object | `null` | Explicit page context (null = use autoDetect) |
 | `autoDetect` | boolean | `false` | Auto-detect context from page |

@@ -9,7 +9,7 @@
 > - **Engagement data** (`entry_referrer`, `page_url`, `scroll_depth`, `time_on_page`) sent from the widget
 > - **Intent classification** and **grounding status** computed per query
 >
-> These changes extend the WebSocket handler and widget payload but do not modify the Slack handoff flow or session management described in this document. The Jigsaw opinion elicitation system ([PLAN-jigsaw-overview.md](PLAN-jigsaw-overview.md)) will add further WebSocket message types (`member_auth`) and session-level opinion tracking in future stages.
+> These changes extend the WebSocket handler and widget payload but do not modify the Slack handoff flow or session management described in this document. The Jigsaw opinion elicitation system (formerly `PLAN-jigsaw-overview.md` in this repo; that plan and its stage docs were moved to the `ddp-infra` repo — see commit `77f1d4e`) will add further WebSocket message types (`member_auth`) and session-level opinion tracking in future stages.
 
 ## Executive Summary
 

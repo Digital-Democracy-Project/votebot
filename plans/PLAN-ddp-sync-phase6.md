@@ -123,16 +123,18 @@ Unchanged:
 ```
 
 ### Runtime verification (on EC2 deploy, Phase 7)
-- [ ] `POST /votebot/sync/unified` routes to ddp-sync and returns task_id
-- [ ] `GET /votebot/sync/unified/status/{id}` routes to ddp-sync and returns task status
-- [ ] `POST /votebot/trigger/user-sync` triggers Voatz→Brevo sync via ddp-sync
+- [x] `POST /votebot/sync/unified` routes to ddp-sync and returns task_id — confirmed (single bill sync, 34 chunks, 16s), see PLAN-ddp-sync-phase7.md
+- [x] `GET /votebot/sync/unified/status/{id}` routes to ddp-sync and returns task status — confirmed (returns "Task not found" for an unknown id, as expected), see PLAN-ddp-sync-phase7.md
+- [x] `POST /votebot/trigger/user-sync` triggers Voatz→Brevo sync via ddp-sync — confirmed, see PLAN-ddp-sync-phase7.md
 - [ ] `POST /votebot/trigger/full-sync` triggers full-attribute sync via ddp-sync
-- [ ] VoteBot chat endpoints still work (unaffected by changes)
+- [x] VoteBot chat endpoints still work (unaffected by changes) — confirmed, see PLAN-ddp-sync-phase7.md
 - [ ] Webflow CMS endpoints still work (unaffected)
 - [ ] Voatz/Brevo proxy endpoints still work (unaffected)
 - [ ] Old single-item sync endpoints return 404 from ddp-sync (not 502/500)
-- [ ] DDP-Sync health check accessible: `curl localhost:8001/ddp-sync/v1/health`
+- [x] DDP-Sync health check accessible: `curl localhost:8001/ddp-sync/v1/health` — confirmed, see PLAN-ddp-sync-phase7.md
 - [ ] Error case: if ddp-sync is down, DDP-API returns 502 (not 500 or hang)
+
+The unchecked items above were not explicitly re-tested in Phase 7's deployment record and remain unverified.
 
 ---
 

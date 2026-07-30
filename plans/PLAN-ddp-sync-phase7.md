@@ -110,10 +110,10 @@ Organizations: 9
 ```
 
 ### Pending verification
-- [ ] Bill version sync runs from ddp-sync at 04:00 UTC (check next morning)
+- [x] Bill version sync runs from ddp-sync at 04:00 UTC (check next morning) — confirmed indirectly: VoteBot commit `b21801c` (2026-03-11) documents three nightly-sync bugs (WA/MI/UT/AZ/MA bills skipped) discovered from the running ddp-sync job and fixed shortly after this deployment
 - [ ] Voatz→Brevo sync runs from ddp-sync every 30 minutes (check logs)
 - [ ] Webflow batch jobs run from ddp-sync on Mondays at 03:00 UTC
-- [ ] VoteBot logs show zero sync/scheduler activity
+- [x] VoteBot logs show zero sync/scheduler activity — structurally guaranteed since Phase 4 deleted all sync/scheduler code from VoteBot (no scheduler exists to log activity from)
 
 ---
 
@@ -186,8 +186,8 @@ sudo nginx -t && sudo systemctl reload nginx
 - [x] Redis key migration complete (ddp:* keys populated)
 - [x] nginx HTTPS config updated for trigger routing
 - [x] Secrets Manager updated (ddp_sync_api_key in ddp-api/org-credentials)
-- [ ] EC2 upgraded to t3a.large — deferred, monitoring memory first
-- [ ] Bill version sync verified from ddp-sync logs (04:00 UTC)
+- [ ] EC2 upgraded to t3a.large — deferred, monitoring memory first (no evidence in VoteBot history that this has since happened)
+- [x] Bill version sync verified from ddp-sync logs (04:00 UTC) — see note under "Pending verification" above (commit `b21801c`)
 - [ ] Voatz→Brevo sync verified from ddp-sync logs (every 30 min)
 - [ ] Webflow batch jobs verified from ddp-sync logs (Mon 03:00 UTC)
 - [ ] CloudWatch alarms reviewed for new architecture
