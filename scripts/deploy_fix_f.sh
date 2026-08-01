@@ -41,10 +41,10 @@ echo
 # --- Step 1: Probe ddp-sync to confirm F1 is live ---
 # Path differs by access mode:
 #   - localhost:8001 (EC2 internal): /ddp-sync/v1/sync/unified  (mounted under API_PREFIX in ddp_sync/app.py)
-#   - https://api.digitaldemocracyproject.org (public): /votebot/sync/unified  (DDP-API proxy strips its own prefix)
+#   - https://api.digitaldemocracyproject.org (public): /sync/unified  (DDP-API's root-level DDP-Sync proxy)
 case "$DDP_SYNC_URL" in
   *localhost*|*127.0.0.1*) PROBE_PATH="/ddp-sync/v1/sync/unified" ;;
-  *) PROBE_PATH="/votebot/sync/unified" ;;
+  *) PROBE_PATH="/sync/unified" ;;
 esac
 
 echo "Step 1: Probing ${DDP_SYNC_URL}${PROBE_PATH} to confirm F1 is live..."

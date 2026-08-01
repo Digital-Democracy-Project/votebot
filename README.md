@@ -232,7 +232,7 @@ Force-clear all cached button responses (`summary`, `pros_cons`) for a bill slug
 
 ### Unified Sync API
 
-> **Sync/ingestion has moved entirely to [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync).** VoteBot no longer implements a sync API, ingestion pipeline, or scheduler — it is a chat/RAG-only service (see `src/votebot/main.py`). DDP-API proxies `/votebot/sync/*` and `/votebot/trigger/*` to DDP-Sync, which runs as a standalone service on port 8001. See the DDP-Sync repo for its current sync API, request/response shapes, and CLI.
+> **Sync/ingestion has moved entirely to [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync).** VoteBot no longer implements a sync API, ingestion pipeline, or scheduler — it is a chat/RAG-only service (see `src/votebot/main.py`). DDP-API proxies `/sync/*` and `/trigger/*` to DDP-Sync, which runs as a standalone service on port 8001. See the DDP-Sync repo for its current sync API, request/response shapes, and CLI.
 
 ## Chat Widget
 
