@@ -3566,7 +3566,7 @@ After deploying both repos and running `scripts/flush_bill_history.py`:
 
 2. **VoteBot uses `PYTHONPATH=/home/ubuntu/votebot/src` in its systemd unit.** Source changes load on restart even though the install is non-editable, because PYTHONPATH wins over site-packages in module resolution.
 
-3. **DDP-Sync routes mounted under `/ddp-sync/v1/` prefix.** The internal localhost URL is `http://localhost:8001/ddp-sync/v1/sync/unified`, not `/sync/unified` despite what DDP-Sync's README implies. Public access via DDP-API proxy is `https://api.digitaldemocracyproject.org/votebot/sync/unified` (proxy strips its own prefix before forwarding).
+3. **DDP-Sync routes mounted under `/ddp-sync/v1/` prefix.** The internal localhost URL is `http://localhost:8001/ddp-sync/v1/sync/unified`, not `/sync/unified` despite what DDP-Sync's README implies. Public access via DDP-API proxy is `https://api.digitaldemocracyproject.org/sync/unified` (as of the `/votebot`-prefix removal, this is the only public path — see DDP-API's README).
 
 4. **Venv paths differ:** ddp-sync uses `~/ddp-sync/.venv/`; votebot uses `~/votebot/venv/` (no leading dot).
 

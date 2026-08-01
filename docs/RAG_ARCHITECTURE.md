@@ -151,7 +151,7 @@ Each handler uses `IngestionPipeline` for the chunk -> embed -> upsert flow.
 
 **Sync is triggered via:**
 - DDP-Sync scheduled jobs (automatic, production)
-- DDP-Sync's own on-demand sync endpoint (`POST /ddp-sync/v1/sync/unified`, proxied publicly at `/votebot/sync/unified`) — this route now lives in the ddp-sync repo, not in `src/votebot/`
+- DDP-Sync's own on-demand sync endpoint (`POST /ddp-sync/v1/sync/unified`, proxied publicly at `/sync/unified`) — this route now lives in the ddp-sync repo, not in `src/votebot/`
 - Note: `scripts/sync.py`, `scripts/sync_bills.py`, `scripts/sync_legislators.py`, and `scripts/ingest.py` still exist in this repo's `scripts/` directory but are dead code post-migration — they import `votebot.ingestion`/`votebot.sync`, which were removed. Use the equivalent ddp-sync CLI/API instead.
 
 ---
