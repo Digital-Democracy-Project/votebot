@@ -1,3 +1,4 @@
+<!-- agents-18-functional-test-b -->
 # VoteBot 2.0
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
