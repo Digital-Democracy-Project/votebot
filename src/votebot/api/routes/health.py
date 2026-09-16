@@ -1,10 +1,12 @@
 """Health check endpoints."""
 
+import httpx
 import structlog
 from fastapi import APIRouter, Depends
 
 from votebot.api.schemas.common import HealthResponse
 from votebot.config import Settings, get_settings
+from votebot.services.openstates_client import openstates_base_url
 
 router = APIRouter(tags=["health"])
 logger = structlog.get_logger()
@@ -58,6 +60,20 @@ async def readiness_check(settings: Settings = Depends(get_settings)) -> HealthR
         logger.warning("OpenAI health check failed", error=str(e))
         dependencies["openai"] = "unhealthy"
         overall_status = "degraded"
+
+    # Check DDP OpenStates replica connectivity (via ddp-api's unauthenticated
+    # /openstates/healthz passthrough) -- only meaningful once VOTEBOT-2's
+    # replica routing is enabled; skipped entirely on the public-API path.
+    if settings.use_ddp_openstates_replica:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{openstates_base_url(settings)}/healthz")
+                response.raise_for_status()
+            dependencies["ddp_openstates_replica"] = "healthy"
+        except Exception as e:
+            logger.warning("DDP OpenStates replica health check failed", error=str(e))
+            dependencies["ddp_openstates_replica"] = "unhealthy"
+            overall_status = "degraded"
 
     # Check Redis connectivity (optional)
     try:

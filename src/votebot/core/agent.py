@@ -19,6 +19,7 @@ from votebot.core.prompts import build_system_prompt, format_retrieved_chunks
 from votebot.core.retrieval import RetrievalService
 from votebot.services.bill_votes import BillVotesService
 from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
+from votebot.services.openstates_client import openstates_base_url, openstates_headers
 from votebot.services.web_search import WebSearchService, WebSearchResult
 from votebot.services.webflow_lookup import (
     WebflowLookupService,
@@ -2251,11 +2252,10 @@ class VoteBotAgent:
         logger.info("Looking up legislator info", name=search_name)
 
         try:
-            api_key = self.settings.openstates_api_key.get_secret_value()
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
-                    "https://v3.openstates.org/people",
-                    headers={"x-api-key": api_key},
+                    f"{openstates_base_url(self.settings)}/people",
+                    headers=openstates_headers(self.settings),
                     params={"name": search_name, "per_page": 3},
                 )
 

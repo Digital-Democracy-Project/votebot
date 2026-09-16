@@ -100,6 +100,15 @@ class Settings(BaseSettings):
     congress_api_key: SecretStr = Field(default=SecretStr(""))
     openstates_api_key: SecretStr = Field(default=SecretStr(""))
 
+    # DDP-replica OpenStates routing (VOTEBOT-2): staged rollout flag, off by default
+    # so each environment opts in once its bearer token is provisioned. No default
+    # URL is hardcoded here -- it must be set via DDP_OPENSTATES_API_ROOT in the
+    # real .env for each environment, so a stale/wrong target can't hide behind a
+    # baked-in fallback (the exact class of bug found in ddp-api's own proxy config).
+    use_ddp_openstates_replica: bool = False
+    ddp_openstates_api_root: str = ""
+    ddp_openstates_bearer_token: SecretStr = Field(default=SecretStr(""))
+
     # Webflow CMS
     webflow_votebot_api_key: SecretStr = Field(default=SecretStr(""))  # Read-only (query-time lookups)
     webflow_scheduler_api_key: SecretStr = Field(default=SecretStr(""))  # Read+write (scheduler CMS updates)

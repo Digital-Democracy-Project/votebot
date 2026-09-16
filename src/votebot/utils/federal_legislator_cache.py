@@ -15,6 +15,7 @@ import httpx
 import structlog
 
 from votebot.config import Settings, get_settings
+from votebot.services.openstates_client import openstates_base_url, openstates_headers
 
 logger = structlog.get_logger()
 
@@ -183,24 +184,27 @@ class FederalLegislatorCache:
         """
         logger.info("Refreshing federal legislator cache from OpenStates")
 
-        api_key = self.settings.openstates_api_key.get_secret_value()
-        if not api_key:
+        if self.settings.use_ddp_openstates_replica:
+            if not self.settings.ddp_openstates_bearer_token.get_secret_value():
+                return {"success": False, "error": "DDP OpenStates bearer token not configured"}
+        elif not self.settings.openstates_api_key.get_secret_value():
             return {"success": False, "error": "OpenStates API key not configured"}
 
+        headers = openstates_headers(self.settings)
         legislators: dict[str, dict] = {}
         stats = {"senate": 0, "house": 0, "errors": []}
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Fetch Senate members
             senate_result = await self._fetch_chamber_members(
-                client, api_key, "upper", stats
+                client, headers, "upper", stats
             )
             legislators.update(senate_result)
             stats["senate"] = len(senate_result)
 
             # Fetch House members
             house_result = await self._fetch_chamber_members(
-                client, api_key, "lower", stats
+                client, headers, "lower", stats
             )
             legislators.update(house_result)
             stats["house"] = len(house_result)
@@ -242,7 +246,7 @@ class FederalLegislatorCache:
     async def _fetch_chamber_members(
         self,
         client: httpx.AsyncClient,
-        api_key: str,
+        headers: dict[str, str],
         chamber: str,  # "upper" (Senate) or "lower" (House)
         stats: dict,
     ) -> dict[str, dict]:
@@ -257,14 +261,14 @@ class FederalLegislatorCache:
         while True:
             try:
                 response = await client.get(
-                    "https://v3.openstates.org/people",
+                    f"{openstates_base_url(self.settings)}/people",
                     params={
                         "jurisdiction": "us",
                         "org_classification": chamber,
                         "page": page,
                         "per_page": per_page,
                     },
-                    headers={"X-API-KEY": api_key},
+                    headers=headers,
                 )
                 response.raise_for_status()
                 data = response.json()
