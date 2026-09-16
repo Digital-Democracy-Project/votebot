@@ -10,6 +10,7 @@ import httpx
 import structlog
 
 from votebot.config import Settings, get_settings
+from votebot.services.openstates_client import openstates_base_url, openstates_headers
 
 logger = structlog.get_logger()
 
@@ -79,8 +80,6 @@ class BillVotesService:
     for legislator vote lookups.
     """
 
-    OPENSTATES_API_BASE = "https://v3.openstates.org"
-
     def __init__(self, settings: Settings | None = None):
         """
         Initialize the bill votes service.
@@ -89,7 +88,7 @@ class BillVotesService:
             settings: Application settings
         """
         self.settings = settings or get_settings()
-        self.api_key = self.settings.openstates_api_key.get_secret_value()
+        self.api_base = openstates_base_url(self.settings)
         # Cache for legislator lookups
         self._legislator_cache: dict[str, dict] = {}
 
@@ -184,7 +183,7 @@ class BillVotesService:
         clean_bill_id: str,
     ) -> BillInfoResult | None:
         """Fetch bill info from OpenStates for a specific session."""
-        url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction.lower()}/{session}/{clean_bill_id}"
+        url = f"{self.api_base}/bills/{jurisdiction.lower()}/{session}/{clean_bill_id}"
 
         logger.info(
             "Looking up bill info from OpenStates",
@@ -198,7 +197,7 @@ class BillVotesService:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 headers = {
                     "accept": "application/json",
-                    "x-api-key": self.api_key,
+                    **openstates_headers(self.settings),
                 }
                 # Include votes, sponsorships, and actions
                 params = [
@@ -326,7 +325,7 @@ class BillVotesService:
                 max_pages = 10
 
                 for _ in range(max_pages):
-                    url = f"{self.OPENSTATES_API_BASE}/people"
+                    url = f"{self.api_base}/people"
                     params = {
                         "jurisdiction": jurisdiction.lower(),
                         "org_classification": org_class,
@@ -503,13 +502,13 @@ class BillVotesService:
 
         # OpenStates now supports federal bills (after Plural Policy acquisition)
         # Federal jurisdiction uses 'us' and Congress number as session (e.g., '119')
-        url = f"{self.OPENSTATES_API_BASE}/bills/{jurisdiction.lower()}/{session}/{clean_bill_id}"
+        url = f"{self.api_base}/bills/{jurisdiction.lower()}/{session}/{clean_bill_id}"
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 headers = {
                     "accept": "application/json",
-                    "x-api-key": self.api_key,
+                    **openstates_headers(self.settings),
                 }
                 # Include votes in the response
                 params = [("include", "votes"), ("include", "sponsorships")]
