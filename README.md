@@ -98,6 +98,9 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
 | `CONGRESS_API_KEY` | Congress.gov API key | For federal bills |
 | `OPENSTATES_API_KEY` | OpenStates API key | For state bills |
+| `USE_DDP_OPENSTATES_REPLICA` | Routes OpenStates calls to DDP-API's own proxy instead of the public API (default `false`) | No |
+| `DDP_OPENSTATES_API_ROOT` | Base URL of DDP-API's OpenStates proxy — required if the replica flag above is on; no hardcoded fallback, fails loudly at request time if unset | Only with replica flag |
+| `DDP_OPENSTATES_BEARER_TOKEN` | Bearer token DDP-API's proxy expects (`Authorization: Bearer ...`) — a different auth shape than the public API's `x-api-key`, and the two must never both be sent on the same request | Only with replica flag |
 | `TAVILY_API_KEY` | Tavily API key for web search fallback | For web search |
 | `REDIS_URL` | Redis connection URL (cross-worker handoff state) | For multi-worker |
 | `SLACK_BOT_TOKEN` | Slack Bot Token (xoxb-...) | For handoff |
