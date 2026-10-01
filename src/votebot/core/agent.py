@@ -324,6 +324,7 @@ class VoteBotAgent:
                 "title": page_context.title,
                 "jurisdiction": page_context.jurisdiction,
                 "webflow_id": getattr(page_context, "webflow_id", None),
+                "ocd_bill_id": getattr(page_context, "ocd_bill_id", None),
                 "slug": getattr(page_context, "slug", None),
             }
 

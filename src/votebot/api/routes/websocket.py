@@ -361,12 +361,45 @@ def _check_conversation_boundary(session: dict, page_context_data: dict) -> bool
 
     # Rule 4: Page ID changed within same type (only if previous conversation had a response)
     if old_type and old_type == new_type and new_type != "general":
-        new_id = page_context_data.get("slug") or page_context_data.get("webflow_id") or page_context_data.get("id")
+        new_id = _page_identity(page_context_data)
         old_id = session.get("last_page_context_id")
         if old_id and new_id and old_id != new_id and session.get("conversation_has_response"):
             return True
 
     return False
+
+
+def _page_identity(page_context_data: dict) -> str | None:
+    """Stable identity of the page for conversation-boundary detection.
+
+    `id` alone is not enough: a bill's gov_id ("HB 1") repeats across jurisdictions and sessions,
+    and ddp-next pages carry no slug or webflow_id, so the OpenStates bill id comes before it.
+    """
+    return (
+        page_context_data.get("slug")
+        or page_context_data.get("webflow_id")
+        or page_context_data.get("ocd_bill_id")
+        or page_context_data.get("id")
+    )
+
+
+def _page_context_from_payload(page_context_data: dict) -> PageContext:
+    """Build the retrieval `PageContext` from the widget's `page_context` payload.
+
+    Session can come from "session-code" (Webflow CMS field name) or "session" (returned by
+    /content/resolve). Do NOT use session-year, which is just the calendar year.
+    """
+    return PageContext(
+        type=page_context_data.get("type", "general"),
+        id=page_context_data.get("id"),
+        jurisdiction=page_context_data.get("jurisdiction"),
+        session=page_context_data.get("session") or page_context_data.get("session-code"),
+        title=page_context_data.get("title"),
+        url=page_context_data.get("url"),
+        slug=page_context_data.get("slug"),
+        webflow_id=page_context_data.get("webflow_id"),
+        ocd_bill_id=page_context_data.get("ocd_bill_id"),
+    )
 
 
 async def _emit_conversation_ended(session_id: str, session: dict) -> None:
@@ -687,11 +720,7 @@ async def handle_user_message(
         session["conversation_message_counter"] = session.get("conversation_message_counter", 0) + 1
         session["last_message_time"] = time.time()
         session["last_page_context_type"] = page_context_data.get("type", "general")
-        session["last_page_context_id"] = (
-            page_context_data.get("slug")
-            or page_context_data.get("webflow_id")
-            or page_context_data.get("id")
-        )
+        session["last_page_context_id"] = _page_identity(page_context_data)
 
         conversation_id = _get_conversation_id(session_id, session.get("conversation_counter", 0))
         session_message_index = session["session_message_counter"]
@@ -718,6 +747,7 @@ async def handle_user_message(
                             "title": page_context_data.get("title"),
                             "jurisdiction": page_context_data.get("jurisdiction"),
                             "webflow_id": page_context_data.get("webflow_id"),
+                            "ocd_bill_id": page_context_data.get("ocd_bill_id"),
                             "slug": page_context_data.get("slug"),
                         },
                         entry_referrer=session.get("entry_referrer") if session_message_index == 1 else None,
@@ -757,21 +787,7 @@ async def handle_user_message(
         else:
             conversation_history.append(msg)
 
-    # Build page context
-    # Session can come from:
-    # - "session-code" (Webflow CMS field name)
-    # - "session" (returned by /content/resolve endpoint)
-    # Do NOT use session-year, which is just the calendar year
-    page_context = PageContext(
-        type=page_context_data.get("type", "general"),
-        id=page_context_data.get("id"),
-        jurisdiction=page_context_data.get("jurisdiction"),
-        session=page_context_data.get("session") or page_context_data.get("session-code"),
-        title=page_context_data.get("title"),
-        url=page_context_data.get("url"),
-        slug=page_context_data.get("slug"),
-        webflow_id=page_context_data.get("webflow_id"),
-    )
+    page_context = _page_context_from_payload(page_context_data)
 
     logger.info(
         "Processing WebSocket message",
@@ -779,6 +795,7 @@ async def handle_user_message(
         message_preview=message[:50],
         page_type=page_context.type,
         webflow_id=page_context.webflow_id,
+        ocd_bill_id=page_context.ocd_bill_id,
         slug=page_context.slug,
         bill_id=page_context.id,
         bill_session=page_context.session,

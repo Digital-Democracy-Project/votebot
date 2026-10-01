@@ -41,6 +41,10 @@ class PageContext(BaseModel):
         None,
         description="Webflow CMS item ID for Pinecone filtering",
     )
+    ocd_bill_id: str | None = Field(
+        None,
+        description="OpenStates bill id (bare UUID) for Pinecone filtering on the canonical-id index",
+    )
 
 
 class NavigationContext(BaseModel):
