@@ -248,7 +248,7 @@ Same index and namespace as DDP-Sync (`votebot-large` today; `ddp-knowledge-base
 
 ## Bill versions (`services/bill_versions.py`, VOTEBOT-10)
 
-- **`BillVersionService.get_versions(ocd_bill_id) -> list[BillVersion] | None`** — asks api-v3 for the bill's ordered versions (`/bills/ocd-bill/{uuid}?include=versions`, through `openstates_base_url`/`openstates_headers`), cached 120 s in-process; None when unavailable (never cached) and always None unless `use_ddp_openstates_replica` is on, because the public OpenStates API has none of the DDP version fields.
+- **`BillVersionService.get_versions(ocd_bill_id) -> list[BillVersion] | None`** — asks api-v3 for the bill's ordered versions (`/bills/ocd-bill/{uuid}?include=versions`, through `openstates_base_url`/`openstates_headers`), cached 120 s in-process; None when unavailable (remembered 45 s so a down api-v3 costs one 3 s wait, not one per message) and always None unless `use_ddp_openstates_replica` is on, because the public OpenStates API has none of the DDP version fields.
 - **`BillVersion`** — `document_id` (api-v3's `archived_document_id` as a string, the vectors' `document_id`; None if not archived), `note, date, stage, ordinal`.
 - **`current_version(versions) -> BillVersion | None`** — the latest **classifiable** version (stage not `unknown`), and only if it is archived; if the latest classifiable one has no archived document yet the answer is None, never an older version. api-v3's order (latest last) is trusted, never re-sorted. **Do not store an is_current flag on vectors and do not recompute version order or diffs here**: ordering is `api/version_ordering.py`, diffs are api-v3's stored `diff_from_previous_version`.
 

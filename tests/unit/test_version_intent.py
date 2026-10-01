@@ -19,7 +19,9 @@ def test_the_vocabulary_only_uses_stages_api_v3_actually_emits():
         ("what is in the original version?", "introduced"),
         ("what does the engrossed version say?", "chamber_passage"),
         ("the text as passed the house", "chamber_passage"),
-        ("the enrolled bill", "final_passage"),
+        ("the enrolled version", "final_passage"),
+        ("show me the text as enrolled", "final_passage"),
+        ("the chaptered text", "enacted"),
         ("the bill as enacted", "enacted"),
         ("what did the committee substitute change?", "amendment"),
     ],
@@ -35,6 +37,11 @@ def test_names_a_stage(query, stage):
         "was this bill amended by the committee?",
         "who sponsored the bill?",
         "what does this bill do?",
+        "Is the bill enrolled yet?",  # status questions: a hard version filter would drop the bill text
+        "Has it been engrossed?",
+        "Was this sent to the governor?",
+        "Was it chaptered?",
+        "Has the governor signed it into law?",
     ],
 )
 def test_ordinary_questions_name_no_version(query):

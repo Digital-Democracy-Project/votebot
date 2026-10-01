@@ -1213,9 +1213,10 @@ class RetrievalService:
         """
         Remove duplicate or near-duplicate chunks.
 
-        Uses content hashing to identify duplicates. The key includes the version's
-        `document_id`: bill versions share most of their text, and merging identical passages
-        from different versions would erase which version a passage came from.
+        Uses content hashing to identify duplicates. On the canonical-id index the key includes the
+        version's `document_id`: bill versions share most of their text, and merging identical
+        passages from different versions would erase which version a passage came from. The
+        legacy index keeps its original content-only key.
 
         Args:
             results: List of search results
@@ -1228,7 +1229,8 @@ class RetrievalService:
 
         for result in results:
             # Create a simple hash of the content, scoped to the document (version) it came from
-            content_hash = (result.metadata.get("document_id"), hash(result.content[:500]))
+            document_id = result.metadata.get("document_id") if self._ocd_mode else None
+            content_hash = (document_id, hash(result.content[:500]))
 
             if content_hash not in seen_content:
                 seen_content.add(content_hash)

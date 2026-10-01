@@ -141,13 +141,19 @@ CHANGELOG_KEYWORDS: list[str] = [
 VERSION_STAGE_KEYWORDS: dict[str, list[str]] = {
     "introduced": ["as introduced", "introduced version", "original version", "as filed", "version as filed"],
     "amendment": ["amended version", "substitute version", "committee substitute"],
-    "chamber_passage": [
-        "engrossed", "as passed the house", "as passed the senate",
-        "house-passed version", "senate-passed version",
-    ],
-    "final_passage": ["enrolled", "sent to the governor"],
-    "enacted": ["as enacted", "enacted version", "signed into law", "chaptered"],
+    "chamber_passage": ["as passed the house", "as passed the senate", "house-passed version", "senate-passed version"],
+    "final_passage": [],
+    "enacted": ["as enacted", "enacted version"],
 }
+
+# Single words that are as often a status question ("is it enrolled yet?", "was it chaptered?") as
+# a version request. They select a version only alongside "version", "text", "draft" or "as <word>".
+BARE_VERSION_STAGE_KEYWORDS: dict[str, list[str]] = {
+    "chamber_passage": ["engrossed"],
+    "final_passage": ["enrolled"],
+    "enacted": ["chaptered"],
+}
+_BARE_COMPANIONS = ("version", "text", "draft")
 
 _VERSION_WORDS = ("version", "draft")
 _ISO_DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
@@ -171,11 +177,18 @@ class VersionRequest:
 def detect_version_request(query: str) -> VersionRequest:
     """Stages and dates a query names; anything else leaves retrieval on the current version."""
     lowered = query.lower()
-    stages = tuple(
-        stage
-        for stage, phrases in VERSION_STAGE_KEYWORDS.items()
-        if any(phrase in lowered for phrase in phrases)
-    )
+    named = {
+        stage for stage, phrases in VERSION_STAGE_KEYWORDS.items() if any(p in lowered for p in phrases)
+    }
+    if any(word in lowered for word in _BARE_COMPANIONS):
+        for stage, words in BARE_VERSION_STAGE_KEYWORDS.items():
+            if any(w in lowered for w in words):
+                named.add(stage)
+    else:
+        for stage, words in BARE_VERSION_STAGE_KEYWORDS.items():
+            if any(f"as {w}" in lowered for w in words):
+                named.add(stage)
+    stages = tuple(stage for stage in VERSION_STAGE_KEYWORDS if stage in named)
     dates: list[str] = []
     # A date alone is not a version request: "does it take effect March 4, 2026?" is about the
     # bill's content. It counts only when the query is also about a version or draft.

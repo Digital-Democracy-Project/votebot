@@ -115,9 +115,14 @@ class TestLegacyFormattingIsUnchanged:
 
 class TestPrompt:
     def test_a_bill_page_prompt_requires_the_version_to_be_named(self):
-        prompt = build_system_prompt("bill", {"title": "HB 1"})
+        prompt = build_system_prompt("bill", {"title": "HB 1"}, version_aware=True)
         assert VERSION_CONTEXT_PROMPT in prompt
         assert "Name the version for every claim" in prompt and "**From:** [version] → **To:** [version]" in prompt
+
+    def test_the_legacy_index_prompt_is_unchanged(self):
+        # No version headers exist there, so the version instructions would only confuse the model.
+        legacy = build_system_prompt("bill", {"title": "HB 1"})
+        assert VERSION_CONTEXT_PROMPT not in legacy and "## Bill Versions" not in legacy
 
     def test_the_prompt_says_what_to_do_when_no_version_is_current(self):
         assert "could not be determined" in VERSION_CONTEXT_PROMPT

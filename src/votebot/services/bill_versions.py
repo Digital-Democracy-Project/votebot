@@ -24,6 +24,8 @@ logger = structlog.get_logger()
 
 STAGE_UNKNOWN = "unknown"  # api-v3's label for a version the stage classifier could not place
 CACHE_TTL_SECONDS = 120  # a new version appears at most this late; saves a call per chat message
+FAILURE_TTL_SECONDS = 45  # while api-v3 is down, retry this often rather than on every chat message
+FETCH_TIMEOUT_SECONDS = 3.0  # the lookup runs before retrieval, so it must not hold up the reply
 
 
 @dataclass(frozen=True)
@@ -57,23 +59,27 @@ class BillVersionService:
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
-        self._cache: dict[str, tuple[float, list[BillVersion]]] = {}
+        self._cache: dict[str, tuple[float, list[BillVersion] | None]] = {}  # None = recent failure
 
     async def get_versions(self, ocd_bill_id: str) -> list[BillVersion] | None:
         """Versions in api-v3 order (latest last), or None when they cannot be determined.
 
-        None is never cached, and callers treat it as "no version filter": retrieval then returns
-        the bill's chunks from every version, each labelled with its own version.
+        Callers treat None as "no version filter": retrieval then returns the bill's chunks from
+        every version, each labelled with its own version. A failure is remembered briefly so a
+        down api-v3 does not add a timeout to every message.
         """
         if not self.settings.use_ddp_openstates_replica:
             return None  # the public OpenStates API carries none of the DDP version fields
 
         cached = self._cache.get(ocd_bill_id)
-        if cached and time.monotonic() - cached[0] < CACHE_TTL_SECONDS:
-            return cached[1]
+        if cached:
+            ttl = CACHE_TTL_SECONDS if cached[1] is not None else FAILURE_TTL_SECONDS
+            if time.monotonic() - cached[0] < ttl:
+                return cached[1]
 
         data = await self._fetch(ocd_bill_id)
         if data is None:
+            self._cache[ocd_bill_id] = (time.monotonic(), None)
             return None
         versions = [
             BillVersion(
@@ -91,9 +97,9 @@ class BillVersionService:
         return versions
 
     async def _fetch(self, ocd_bill_id: str) -> dict | None:
-        url = f"{openstates_base_url(self.settings)}/bills/ocd-bill/{ocd_bill_id}"
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            url = f"{openstates_base_url(self.settings)}/bills/ocd-bill/{ocd_bill_id}"
+            async with httpx.AsyncClient(timeout=FETCH_TIMEOUT_SECONDS) as client:
                 response = await client.get(
                     url,
                     headers={"accept": "application/json", **openstates_headers(self.settings)},

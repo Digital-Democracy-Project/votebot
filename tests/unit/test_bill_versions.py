@@ -93,11 +93,20 @@ class TestGetVersions:
         ]
         assert got[0].note == "Introduced" and got[0].date == "2026-01-10"
 
-    async def test_a_failed_lookup_is_none_and_is_retried_next_time(self):
+    async def test_a_failed_lookup_is_none_and_is_not_repeated_on_every_message(self, monkeypatch):
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(bill_versions.time, "monotonic", lambda: clock["now"])
         svc = _service()
         svc._fetch = AsyncMock(side_effect=[None, {"versions": [_api_version(5, "introduced", 0)]}])
         assert await svc.get_versions(BILL) is None
-        assert (await svc.get_versions(BILL))[0].document_id == "5"  # None was not cached
+        assert await svc.get_versions(BILL) is None  # api-v3 is down: no second wait for a timeout
+        assert svc._fetch.await_count == 1
+
+        clock["now"] += bill_versions.FAILURE_TTL_SECONDS + 1
+        assert (await svc.get_versions(BILL))[0].document_id == "5"  # retried once the pause is over
+
+    def test_the_lookup_gives_up_quickly(self):
+        assert bill_versions.FETCH_TIMEOUT_SECONDS <= 3
 
     async def test_cached_briefly_then_refreshed(self, monkeypatch):
         clock = {"now": 1000.0}
@@ -153,6 +162,12 @@ class TestFetch:
 
         monkeypatch.setattr(bill_versions.httpx, "AsyncClient", Boom)
         assert await _service()._fetch(BILL) is None
+
+
+    async def test_a_missing_api_root_degrades_instead_of_raising(self):
+        svc = BillVersionService(Settings(use_ddp_openstates_replica=True, ddp_openstates_api_root=""))
+        assert await svc._fetch(BILL) is None
+        assert await svc.get_versions(BILL) is None
 
 
 @pytest.mark.parametrize("stage", ["introduced", "amendment", "chamber_passage", "final_passage", "enacted"])

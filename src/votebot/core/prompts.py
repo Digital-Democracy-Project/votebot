@@ -216,6 +216,7 @@ def build_system_prompt(
     page_info: dict | None = None,
     include_rag_context: bool = True,
     retrieved_context: str | None = None,
+    version_aware: bool = False,
 ) -> str:
     """
     Build the complete system prompt based on context.
@@ -225,6 +226,7 @@ def build_system_prompt(
         page_info: Additional information about the current page
         include_rag_context: Whether to include RAG context section
         retrieved_context: Retrieved documents to include
+        version_aware: True on the canonical-id index, whose sources are grouped by bill version
 
     Returns:
         Complete system prompt string
@@ -235,7 +237,8 @@ def build_system_prompt(
     if page_type == "bill":
         bill_info = _format_bill_info(page_info) if page_info else "No specific bill selected."
         prompt_parts.append(BILL_CONTEXT_PROMPT.format(bill_info=bill_info))
-        prompt_parts.append(VERSION_CONTEXT_PROMPT)
+        if version_aware:  # the legacy index has no version headers to refer to
+            prompt_parts.append(VERSION_CONTEXT_PROMPT)
     elif page_type == "legislator":
         legislator_info = (
             _format_legislator_info(page_info)

@@ -207,6 +207,12 @@ class TestDeduplicateKeepsTheVersion:
         svc = _svc([])
         assert len(svc._deduplicate([_chunk("103"), _chunk("103")])) == 1
 
+    def test_the_legacy_index_keeps_its_content_only_key(self):
+        from votebot.config import LEGACY_PINECONE_INDEX_NAME
+
+        svc = _service(LEGACY_PINECONE_INDEX_NAME, queries=[], versions=VERSIONS)
+        assert len(svc._deduplicate([_chunk("101"), _chunk("102")])) == 1
+
     def test_chunks_without_a_document_id_still_dedupe_as_before(self):
         from votebot.services.vector_store import SearchResult
 

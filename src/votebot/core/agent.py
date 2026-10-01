@@ -605,6 +605,7 @@ class VoteBotAgent:
             page_info=page_info,
             include_rag_context=True,
             retrieved_context=full_context,
+            version_aware=self.settings.bill_filter_key == "ocd_bill_id",
         )
 
         # Step 7: Build messages
@@ -989,6 +990,7 @@ class VoteBotAgent:
             page_info=page_info,
             include_rag_context=True,
             retrieved_context=full_context,
+            version_aware=self.settings.bill_filter_key == "ocd_bill_id",
         )
 
         # Step 4: Determine if web search should be enabled
