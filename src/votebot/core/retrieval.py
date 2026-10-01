@@ -692,13 +692,16 @@ class RetrievalService:
         if self.config.deduplicate:
             combined = self._deduplicate(combined)
 
-        # If we still don't have results, try without document_type filter
+        # If we still don't have results, try without document_type filter. The version scope
+        # stays: broadening a current-version (or named-version) search to every version would
+        # answer from a version the user did not ask about, with nothing to show it happened.
         if not combined:
             logger.info("No typed results, falling back to unfiltered query")
+            fallback_filter = {**filters, **(version_filter or {})}
             all_results = await self.vector_store.query(
                 query=query,
                 top_k=max_chunks * 2,
-                filter=filters if filters else None,
+                filter=fallback_filter if fallback_filter else None,
             )
             combined = [
                 r for r in all_results if r.score >= self.config.similarity_threshold

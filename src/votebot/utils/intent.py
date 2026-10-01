@@ -149,6 +149,7 @@ VERSION_STAGE_KEYWORDS: dict[str, list[str]] = {
     "enacted": ["as enacted", "enacted version", "signed into law", "chaptered"],
 }
 
+_VERSION_WORDS = ("version", "draft")
 _ISO_DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 _WRITTEN_DATE = re.compile(
     r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b",
@@ -175,12 +176,16 @@ def detect_version_request(query: str) -> VersionRequest:
         for stage, phrases in VERSION_STAGE_KEYWORDS.items()
         if any(phrase in lowered for phrase in phrases)
     )
-    dates = list(_ISO_DATE.findall(query))
-    for month, day, year in _WRITTEN_DATE.findall(query):
-        try:
-            dates.append(datetime.strptime(f"{month[:3].title()} {int(day)} {year}", "%b %d %Y").date().isoformat())
-        except ValueError:
-            continue  # "Feb 31": not a date, so not a request
+    dates: list[str] = []
+    # A date alone is not a version request: "does it take effect March 4, 2026?" is about the
+    # bill's content. It counts only when the query is also about a version or draft.
+    if any(word in lowered for word in _VERSION_WORDS):
+        dates = list(_ISO_DATE.findall(query))
+        for month, day, year in _WRITTEN_DATE.findall(query):
+            try:
+                dates.append(datetime.strptime(f"{month[:3].title()} {int(day)} {year}", "%b %d %Y").date().isoformat())
+            except ValueError:
+                continue  # "Feb 31": not a date, so not a request
     return VersionRequest(stages=stages, dates=tuple(dict.fromkeys(dates)))
 
 

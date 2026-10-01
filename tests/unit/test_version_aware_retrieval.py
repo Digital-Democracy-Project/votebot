@@ -90,6 +90,14 @@ class TestVersionScope:
         assert await _svc([], versions=None)._version_scope(BILL, "what does this bill do?") == (None, {})
         assert await _svc([], versions=[VERSIONS[3]])._version_scope(BILL, "what does this bill do?") == (None, {})
 
+    async def test_an_unarchived_latest_version_does_not_promote_an_older_one(self):
+        versions = [VERSIONS[0], VERSIONS[1], BillVersion(None, "Newest", "2026-06-01", "enacted", 2)]
+        assert await _svc([], versions=versions)._version_scope(BILL, "what does this bill do?") == (None, {})
+
+    async def test_a_date_in_an_ordinary_question_is_not_a_version_request(self):
+        current, flt = await _svc([])._version_scope(BILL, "does this take effect March 4, 2026?")
+        assert (current, flt) == ("103", {"document_id": "103"})
+
 
 class TestRetrieveDefaultsToTheCurrentVersion:
     async def test_a_question_about_a_multi_version_bill_is_answered_from_the_current_version(self):
@@ -123,6 +131,35 @@ class TestRetrieveDefaultsToTheCurrentVersion:
         svc = _service(LEGACY_PINECONE_INDEX_NAME, queries=[], versions=VERSIONS)
         result = await svc.retrieve("what does this bill do?", PageContext(type="bill", webflow_id="wf1"))
         assert svc.bill_versions.asked == [] and result.current_document_id is None
+
+
+class TestFallbackKeepsTheVersionScope:
+    """The 'no typed results' fallback must not widen a version search to every version."""
+
+    async def test_a_current_version_with_no_text_yet_returns_nothing_not_older_versions(self):
+        pool_without_current = [c for c in POOL if c.metadata["document_id"] != "103"]
+        calls: list = []
+
+        def respond(f):
+            calls.append(f)
+            return [c for c in pool_without_current if _matches(c.metadata, f)]
+
+        svc = _service(queries=[], respond=respond, versions=VERSIONS)
+        result = await svc.retrieve("what does this bill do?", _bill_context())
+
+        assert result.chunks == []  # the older versions exist in the index, and must not be served as current
+        assert calls[-1] == {"ocd_bill_id": BILL, "document_id": "103"}  # the fallback kept the scope
+
+    async def test_a_named_version_that_does_not_exist_returns_nothing_not_other_versions(self):
+        calls: list = []
+        result = await _svc(calls).retrieve("show me the bill as enacted", _bill_context())
+        assert result.chunks == []
+        assert calls[-1] == {"ocd_bill_id": BILL, "version_stage": {"$in": ["enacted"]}}
+
+    async def test_with_no_known_current_version_the_fallback_still_stays_on_this_bill(self):
+        calls: list = []
+        await _svc(calls, versions=None).retrieve("what does this bill do?", _bill_context())
+        assert all(f and f.get("ocd_bill_id") == BILL for f in calls if f and f.get("document_type") != "organization")
 
 
 class TestWhatChangedUsesTheDiffDocuments:

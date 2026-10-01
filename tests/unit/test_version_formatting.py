@@ -1,7 +1,12 @@
 """VOTEBOT-10: chunks are grouped by bill version, the current one is marked, and the prompt requires
 every claim to name its version."""
 
-from votebot.core.prompts import VERSION_CONTEXT_PROMPT, build_system_prompt, format_retrieved_chunks
+from votebot.core.prompts import (
+    NO_CURRENT_VERSION_NOTE,
+    VERSION_CONTEXT_PROMPT,
+    build_system_prompt,
+    format_retrieved_chunks,
+)
 
 
 def _text(doc_id, note, date, content, n=0, gov_id="HB 1"):
@@ -44,7 +49,7 @@ class TestGrouping:
 
     def test_nothing_is_marked_when_the_current_version_is_unknown(self):
         out = format_retrieved_chunks([_text("103", "Enrolled", "2026-04-01", "x")])
-        assert "current" not in out
+        assert "· current" not in out
 
     def test_a_later_chunk_of_a_version_joins_its_group_wherever_it_was_ranked(self):
         chunks = [
@@ -66,6 +71,21 @@ class TestGrouping:
     def test_other_chunks_keep_their_own_block_and_get_no_version_header(self):
         out = format_retrieved_chunks([LEGISLATOR])
         assert "### Source 1: OpenStates" in out and "## " not in out.replace("### ", "")
+
+
+class TestNoCurrentVersionNote:
+    def test_versions_with_no_current_marker_come_with_an_explicit_warning(self):
+        out = format_retrieved_chunks([_text("101", "Introduced", "d", "a"), _text("102", "Engrossed", "d", "b")])
+        assert out.startswith(NO_CURRENT_VERSION_NOTE)
+        assert "could not be determined" in out and "name the version for every claim" in out
+
+    def test_no_warning_when_a_current_version_is_known(self):
+        out = format_retrieved_chunks([_text("103", "Enrolled", "d", "a")], current_document_id="103")
+        assert "could not be determined" not in out
+
+    def test_no_warning_when_there_are_no_version_groups(self):
+        assert "could not be determined" not in format_retrieved_chunks([LEGISLATOR])
+        assert "could not be determined" not in format_retrieved_chunks([])
 
 
 class TestDiffHeader:
@@ -98,6 +118,10 @@ class TestPrompt:
         prompt = build_system_prompt("bill", {"title": "HB 1"})
         assert VERSION_CONTEXT_PROMPT in prompt
         assert "Name the version for every claim" in prompt and "**From:** [version] → **To:** [version]" in prompt
+
+    def test_the_prompt_says_what_to_do_when_no_version_is_current(self):
+        assert "could not be determined" in VERSION_CONTEXT_PROMPT
+        assert "do not present any one version as current" in VERSION_CONTEXT_PROMPT
 
     def test_other_pages_do_not_get_it(self):
         for page_type in ("legislator", "organization", "general"):

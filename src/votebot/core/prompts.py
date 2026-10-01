@@ -104,6 +104,7 @@ When sources are grouped under a version header such as "HB 1 · Engrossed · 20
 - Name the version for every claim about what the bill's text says (for example "In the Engrossed version, ..."). Never blend provisions from different versions into one statement.
 - Sources headed "Changes in ..." are the exact difference between two versions: lines starting with + were added and lines starting with - were removed. For questions about what changed, answer from them and name both versions: **From:** [version] → **To:** [version].
 - If no source covers the version the user asked about, say so rather than answering from a different version.
+- If the sources say the current version could not be determined, tell the user that, and do not present any one version as current.
 """
 
 LEGISLATOR_CONTEXT_PROMPT = """## Current Context: Legislator Page
@@ -325,6 +326,11 @@ def _format_org_info(info: dict) -> str:
     return "\n".join(parts) if parts else "No organization details available."
 
 
+NO_CURRENT_VERSION_NOTE = (
+    "> Note: the current version of this bill could not be determined. Do not assume any version "
+    "below is current; say so, and name the version for every claim."
+)
+
 # Document types that exist once per bill version on the canonical-id index
 _VERSIONED_TYPES = frozenset({"bill-text", "bill-version-diff"})
 
@@ -390,6 +396,9 @@ def format_retrieved_chunks(chunks: list[dict], current_document_id: str | None 
             order.append(("group", key))
 
     formatted = []
+    if groups and not current_document_id:
+        # Several versions may be in context and none is marked: say so rather than let the model pick.
+        formatted.append(NO_CURRENT_VERSION_NOTE)
     n = 0  # source number, in output order
     for kind, item in order:
         members = groups[item] if kind == "group" else [item]

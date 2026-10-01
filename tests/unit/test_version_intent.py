@@ -41,10 +41,22 @@ def test_ordinary_questions_name_no_version(query):
     assert not detect_version_request(query)
 
 
-def test_iso_and_written_dates():
-    assert detect_version_request("the text on 2026-03-04").dates == ("2026-03-04",)
+def test_iso_and_written_dates_when_the_query_is_about_a_version():
+    assert detect_version_request("the version from 2026-03-04").dates == ("2026-03-04",)
     assert detect_version_request("the version from March 4, 2026").dates == ("2026-03-04",)
-    assert detect_version_request("as of Mar 4th, 2026").dates == ("2026-03-04",)
+    assert detect_version_request("the draft as of Mar 4th, 2026").dates == ("2026-03-04",)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "does this take effect March 4, 2026?",  # a date inside a question about the bill's content
+        "what is the deadline of 2026-07-01 for?",
+        "the text on 2026-03-04",
+    ],
+)
+def test_a_date_alone_is_not_a_version_request(query):
+    assert not detect_version_request(query)
 
 
 def test_an_impossible_date_is_not_a_request():

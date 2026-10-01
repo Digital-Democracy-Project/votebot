@@ -38,15 +38,17 @@ class BillVersion:
 
 
 def current_version(versions: list[BillVersion] | None) -> BillVersion | None:
-    """The newest version that retrieval can actually answer from.
+    """The bill's current version: the latest classifiable one, and only if it can be filtered on.
 
-    Stage-unknown versions are never current (api-v3 keeps them out of the diff lineage), and a
-    version with no archived document has no text in the index yet, so the newest one that has both
-    wins. `versions` is api-v3's order, latest last; it is not re-sorted here.
+    Stage-unknown versions are never current: the classifier cannot place them in time, which is
+    also why api-v3 keeps them out of the diff lineage. They are skipped, and the latest
+    *classifiable* version is current. If that version has no archived document yet, there is no
+    current version: promoting an older one would label stale text "current" while a newer
+    version exists. `versions` is api-v3's order, latest last; it is not re-sorted here.
     """
     for version in reversed(versions or []):
-        if version.stage != STAGE_UNKNOWN and version.document_id:
-            return version
+        if version.stage != STAGE_UNKNOWN:
+            return version if version.document_id else None
     return None
 
 

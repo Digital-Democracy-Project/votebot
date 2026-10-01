@@ -43,10 +43,18 @@ class TestCurrentVersion:
         versions = [_v("1", "introduced", ordinal=0), _v("2", "unknown", ordinal=None)]
         assert current_version(versions).document_id == "1"
 
-    def test_a_version_not_archived_yet_cannot_be_current(self):
-        # Its text is not in the index, so filtering on it would return nothing.
-        versions = [_v("1", "introduced", ordinal=0), _v(None, "amendment")]
-        assert current_version(versions).document_id == "1"
+    def test_a_latest_version_not_archived_yet_leaves_no_current_version(self):
+        # Its text is not in the index, so filtering on it would return nothing, and promoting the
+        # previous version would label stale text "current" while a newer one exists.
+        assert current_version([_v("1", "introduced", ordinal=0), _v(None, "amendment")]) is None
+
+    def test_an_unarchived_latest_classifiable_version_is_not_skipped_in_favour_of_an_older_one(self):
+        versions = [_v("1", "introduced", ordinal=0), _v(None, "amendment"), _v("9", "unknown", ordinal=None)]
+        assert current_version(versions) is None  # the unknown one is skipped; the unarchived one is the latest
+
+    def test_an_older_unarchived_version_does_not_matter(self):
+        versions = [_v(None, "introduced", ordinal=0), _v("2", "amendment")]
+        assert current_version(versions).document_id == "2"
 
     def test_no_usable_version_means_no_current_version(self):
         assert current_version([_v("1", "unknown", ordinal=None)]) is None
