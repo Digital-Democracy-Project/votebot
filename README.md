@@ -487,9 +487,20 @@ python -m votebot.utils.federal_legislator_cache --show
 | `bill` | CMS summary (description, support/oppose, org positions) | `bill-webflow-{webflow_id}` |
 | `bill-text` | Current legislative text (PDF/HTML) — overwritten on each version | `bill-pdf-{webflow_id}` |
 | `bill-text-history` | Permanent per-version copy of bill text — never overwritten | `bill-text-history-{webflow_id}-{version_date}` |
-| `bill-changelog` | LLM-generated diff between consecutive versions (gpt-4o-mini) | `bill-changelog-{webflow_id}-{version_date}` |
+| `bill-changelog` | LLM-generated diff between consecutive versions (gpt-4o-mini). Legacy index only | `bill-changelog-{webflow_id}-{version_date}` |
+| `bill-version-diff` | Canonical-id index: the exact stored diff between a version and its predecessor (not LLM-written), used for "what changed" questions. Needs `USE_DDP_OPENSTATES_REPLICA` for the current-version lookup (see below) | `bill-version-diff:{ocd_bill_id}:{document_id}` |
 | `bill-votes` | Per-bill vote records with all legislators | `bill-votes-{webflow_id}` |
 | `legislator-votes` | Per-legislator voting history | `legislator-votes-{person_uuid}` |
+
+#### Version-aware answers (canonical-id index only)
+
+On the `ddp-knowledge-base` index every version of a bill is embedded, so retrieval has to say which one it is reading:
+
+- **Current by default.** For a bill page VoteBot asks api-v3 (`/bills/ocd-bill/{uuid}?include=versions`, cached 120 s) which version is current and filters `bill-text` to that version's `document_id`. "Current" is looked up per request, never stored on vectors. It is the newest version that is classifiable (stage not `unknown`) and archived.
+- **Named versions.** A question naming a stage ("as introduced", "the engrossed version", "enrolled", "as enacted") or a date ("March 4, 2026", `2026-03-04`) is answered from those versions instead; stages are api-v3's `introduced / amendment / chamber_passage / final_passage / enacted`.
+- **What changed.** Changelog questions read `bill-version-diff` documents (the current version's, or the named version's), not LLM summaries.
+- **Display.** Chunks are grouped by version under a header like `HB 1 · Engrossed · 2026-03-04 · current`, and the prompt requires every claim to name its version.
+- **Needs `USE_DDP_OPENSTATES_REPLICA=true`.** The version fields exist only on DDP's api-v3. Without it, or if api-v3 cannot be reached, no version filter is applied: the bill's chunks come back from every version, each still labelled with its own.
 
 ### OpenStates Person ID Coverage
 

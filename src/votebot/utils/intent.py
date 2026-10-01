@@ -9,6 +9,8 @@ analytics consistency. New values require a deliberate decision.
 
 import re
 import sys
+from dataclasses import dataclass
+from datetime import datetime
 
 if sys.version_info >= (3, 11):
     from enum import StrEnum
@@ -83,6 +85,7 @@ VALID_RETRIEVAL_SOURCES = frozenset({
     "bill-votes",
     "bill-changelog",
     "bill-text-history",
+    "bill-version-diff",
     "legislator",
     "legislator-votes",
     "organization",
@@ -126,6 +129,60 @@ CHANGELOG_KEYWORDS: list[str] = [
     "between versions", "updated since", "revision",
     "new version", "previous version", "old version", "what's new in",
 ]
+
+# ---------------------------------------------------------------------------
+# Version requests (VOTEBOT-10) — "as introduced", "the engrossed version", a date
+# ---------------------------------------------------------------------------
+
+# How people name a bill version, mapped to api-v3's `version_stage` labels
+# (``version_ordering.note_stage``: introduced, amendment, chamber_passage, final_passage,
+# enacted). Specific phrases only: a bare "introduced" or "amended" is usually a status question
+# ("when was it introduced?"), not a request for that version's text.
+VERSION_STAGE_KEYWORDS: dict[str, list[str]] = {
+    "introduced": ["as introduced", "introduced version", "original version", "as filed", "version as filed"],
+    "amendment": ["amended version", "substitute version", "committee substitute"],
+    "chamber_passage": [
+        "engrossed", "as passed the house", "as passed the senate",
+        "house-passed version", "senate-passed version",
+    ],
+    "final_passage": ["enrolled", "sent to the governor"],
+    "enacted": ["as enacted", "enacted version", "signed into law", "chaptered"],
+}
+
+_ISO_DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_WRITTEN_DATE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class VersionRequest:
+    """Which bill versions a query asks about. Empty means "no particular version"."""
+
+    stages: tuple[str, ...] = ()  # api-v3 `version_stage` labels
+    dates: tuple[str, ...] = ()  # ISO dates, matched against a version's `version_date`
+
+    def __bool__(self) -> bool:
+        return bool(self.stages or self.dates)
+
+
+def detect_version_request(query: str) -> VersionRequest:
+    """Stages and dates a query names; anything else leaves retrieval on the current version."""
+    lowered = query.lower()
+    stages = tuple(
+        stage
+        for stage, phrases in VERSION_STAGE_KEYWORDS.items()
+        if any(phrase in lowered for phrase in phrases)
+    )
+    dates = list(_ISO_DATE.findall(query))
+    for month, day, year in _WRITTEN_DATE.findall(query):
+        try:
+            dates.append(datetime.strptime(f"{month[:3].title()} {int(day)} {year}", "%b %d %Y").date().isoformat())
+        except ValueError:
+            continue  # "Feb 31": not a date, so not a request
+    return VersionRequest(stages=stages, dates=tuple(dict.fromkeys(dates)))
+
 
 # Sub-intent keyword maps per primary intent
 _BILL_SUB_KEYWORDS: dict[str, list[str]] = {

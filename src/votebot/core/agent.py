@@ -528,7 +528,8 @@ class VoteBotAgent:
                     "metadata": chunk.metadata,
                 }
                 for chunk in retrieval_result.chunks
-            ]
+            ],
+            current_document_id=retrieval_result.current_document_id,
         )
 
         # Step 3: If user is disputing/verifying vote info, fetch directly from OpenStates
@@ -879,7 +880,8 @@ class VoteBotAgent:
                     "metadata": chunk.metadata,
                 }
                 for chunk in retrieval_result.chunks
-            ]
+            ],
+            current_document_id=retrieval_result.current_document_id,
         )
 
         # Step 2b: Pre-fetch bill info if query mentions a specific bill

@@ -97,6 +97,15 @@ Bill Details:
 {bill_info}
 """
 
+VERSION_CONTEXT_PROMPT = """## Bill Versions
+
+When sources are grouped under a version header such as "HB 1 · Engrossed · 2026-03-04 · current":
+- The version marked **current** is the one now in effect. Unless the user asks about a different version, answer from the current version.
+- Name the version for every claim about what the bill's text says (for example "In the Engrossed version, ..."). Never blend provisions from different versions into one statement.
+- Sources headed "Changes in ..." are the exact difference between two versions: lines starting with + were added and lines starting with - were removed. For questions about what changed, answer from them and name both versions: **From:** [version] → **To:** [version].
+- If no source covers the version the user asked about, say so rather than answering from a different version.
+"""
+
 LEGISLATOR_CONTEXT_PROMPT = """## Current Context: Legislator Page
 
 You are answering questions about a specific legislator. The user is viewing this legislator's profile page on the Digital Democracy Project website.
@@ -225,6 +234,7 @@ def build_system_prompt(
     if page_type == "bill":
         bill_info = _format_bill_info(page_info) if page_info else "No specific bill selected."
         prompt_parts.append(BILL_CONTEXT_PROMPT.format(bill_info=bill_info))
+        prompt_parts.append(VERSION_CONTEXT_PROMPT)
     elif page_type == "legislator":
         legislator_info = (
             _format_legislator_info(page_info)
@@ -315,12 +325,50 @@ def _format_org_info(info: dict) -> str:
     return "\n".join(parts) if parts else "No organization details available."
 
 
-def format_retrieved_chunks(chunks: list[dict]) -> str:
+# Document types that exist once per bill version on the canonical-id index
+_VERSIONED_TYPES = frozenset({"bill-text", "bill-version-diff"})
+
+
+def _version_group_key(metadata: dict) -> tuple[str, str] | None:
+    """(document type, version document_id) when a chunk belongs to a labelled bill version."""
+    doc_id = metadata.get("document_id")
+    if (
+        metadata.get("document_type") in _VERSIONED_TYPES
+        and doc_id
+        and (metadata.get("version_note") or metadata.get("version_stage"))
+    ):
+        return (metadata["document_type"], str(doc_id))
+    return None
+
+
+def _version_group_header(metadata: dict, current_document_id: str | None) -> str:
+    """e.g. "## HB 1 · Engrossed · 2026-03-04 · current" (diffs: "... · Changes in Engrossed · ... · from Introduced")."""
+    note = metadata.get("version_note") or metadata.get("version_stage") or ""
+    parts = [metadata.get("gov_id") or ""]
+    if metadata.get("document_type") == "bill-version-diff":
+        parts.append(f"Changes in {note}")
+        parts.append(metadata.get("version_date") or "")
+        if metadata.get("from_version_note"):
+            parts.append(f"from {metadata['from_version_note']}")
+    else:
+        parts.extend([note, metadata.get("version_date") or ""])
+    if current_document_id and str(metadata.get("document_id")) == str(current_document_id):
+        parts.append("current")
+    return "## " + " · ".join(p for p in parts if p)
+
+
+def format_retrieved_chunks(chunks: list[dict], current_document_id: str | None = None) -> str:
     """
     Format retrieved chunks for inclusion in the prompt.
 
+    Chunks of a labelled bill version (canonical-id index: `bill-text` and `bill-version-diff`)
+    are grouped under one version header, at the position of the version's first chunk, and the
+    version whose `document_id` is `current_document_id` is marked "current". Every other chunk
+    keeps its own source block.
+
     Args:
         chunks: List of chunk dicts with content and metadata
+        current_document_id: The bill's current version, as resolved at retrieval time
 
     Returns:
         Formatted string of retrieved context
@@ -328,37 +376,61 @@ def format_retrieved_chunks(chunks: list[dict]) -> str:
     if not chunks:
         return "No relevant documents found."
 
-    formatted_chunks = []
-    for i, chunk in enumerate(chunks, 1):
-        metadata = chunk.get("metadata", {})
-        source = metadata.get("source", "Unknown")
-        doc_id = chunk.get("id", f"doc-{i}")
-        content = chunk.get("content", "")
-        doc_type = metadata.get("document_type", "")
-        source_url = metadata.get("url", "")
+    # Output order: a group sits where its first chunk was; later chunks of that version join it.
+    order: list[tuple[str, object]] = []
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for chunk in chunks:
+        key = _version_group_key(chunk.get("metadata", {}))
+        if key is None:
+            order.append(("chunk", chunk))
+        elif key in groups:
+            groups[key].append(chunk)
+        else:
+            groups[key] = [chunk]
+            order.append(("group", key))
 
-        # Build DDP URL if slug is available
-        ddp_url = _build_ddp_url(metadata, doc_type)
+    formatted = []
+    n = 0  # source number, in output order
+    for kind, item in order:
+        members = groups[item] if kind == "group" else [item]
+        if kind == "group":
+            formatted.append(_version_group_header(members[0].get("metadata", {}), current_document_id))
+        for chunk in members:
+            n += 1
+            formatted.append(_format_chunk(n, chunk))
 
-        # Format the chunk header with URLs
-        header_parts = [f"### Source {i}: {source} [{doc_id}]"]
-        if doc_type == "bill-changelog":
-            from_note = metadata.get("version_from_note", "")
-            from_date = metadata.get("version_from_date", "")
-            to_note = metadata.get("version_to_note", "")
-            to_date = metadata.get("version_to_date", "")
-            from_label = f"{from_note} ({from_date})" if from_date else from_note
-            to_label = f"{to_note} ({to_date})" if to_date else to_note
-            if from_label or to_label:
-                header_parts.append(f"**Version Change:** {from_label} → {to_label}")
-        if source_url:
-            header_parts.append(f"**Source URL:** {source_url}")
-        if ddp_url:
-            header_parts.append(f"**DDP URL:** {ddp_url}")
+    return "\n\n".join(formatted)
 
-        formatted_chunks.append("\n".join(header_parts) + f"\n\n{content}")
 
-    return "\n\n".join(formatted_chunks)
+def _format_chunk(i: int, chunk: dict) -> str:
+    """One `### Source N` block: header (source, ids, version change, URLs) plus the content."""
+    metadata = chunk.get("metadata", {})
+    source = metadata.get("source", "Unknown")
+    doc_id = chunk.get("id", f"doc-{i}")
+    content = chunk.get("content", "")
+    doc_type = metadata.get("document_type", "")
+    source_url = metadata.get("url", "")
+
+    # Build DDP URL if slug is available
+    ddp_url = _build_ddp_url(metadata, doc_type)
+
+    # Format the chunk header with URLs
+    header_parts = [f"### Source {i}: {source} [{doc_id}]"]
+    if doc_type == "bill-changelog":
+        from_note = metadata.get("version_from_note", "")
+        from_date = metadata.get("version_from_date", "")
+        to_note = metadata.get("version_to_note", "")
+        to_date = metadata.get("version_to_date", "")
+        from_label = f"{from_note} ({from_date})" if from_date else from_note
+        to_label = f"{to_note} ({to_date})" if to_date else to_note
+        if from_label or to_label:
+            header_parts.append(f"**Version Change:** {from_label} → {to_label}")
+    if source_url:
+        header_parts.append(f"**Source URL:** {source_url}")
+    if ddp_url:
+        header_parts.append(f"**DDP URL:** {ddp_url}")
+
+    return "\n".join(header_parts) + f"\n\n{content}"
 
 
 def _build_ddp_url(metadata: dict, doc_type: str) -> str | None:

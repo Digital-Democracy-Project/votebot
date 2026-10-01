@@ -21,10 +21,25 @@ def _settings(index: str) -> Settings:
     return Settings(pinecone_index_name=index, _env_file=None)
 
 
-def _service(index: str = NEW_INDEX, queries: list | None = None, respond=None) -> RetrievalService:
+class _FakeVersions:
+    """Stands in for BillVersionService: returns the given versions (None = api-v3 cannot say)."""
+
+    def __init__(self, versions=None):
+        self.versions = versions
+        self.asked: list[str] = []
+
+    async def get_versions(self, ocd_bill_id):
+        self.asked.append(ocd_bill_id)
+        return self.versions
+
+
+def _service(
+    index: str = NEW_INDEX, queries: list | None = None, respond=None, versions=None
+) -> RetrievalService:
     """A RetrievalService with a recording fake vector store (no network)."""
     svc = RetrievalService.__new__(RetrievalService)
     svc.settings = _settings(index)
+    svc.bill_versions = _FakeVersions(versions)
     svc.config = RetrievalConfig(max_chunks=10, similarity_threshold=0.1, deduplicate=False)
     calls = queries if queries is not None else []
 

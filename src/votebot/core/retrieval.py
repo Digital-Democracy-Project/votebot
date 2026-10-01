@@ -7,8 +7,10 @@ import structlog
 
 from votebot.api.schemas.chat import PageContext
 from votebot.config import Settings, get_settings
+from votebot.services.bill_versions import BillVersionService, current_version
 from votebot.services.vector_store import SearchResult, VectorStoreService
 from votebot.services.webflow_lookup import WebflowLookupService
+from votebot.utils.intent import detect_version_request
 
 logger = structlog.get_logger()
 
@@ -71,6 +73,9 @@ class RetrievalResult:
     query_used: str
     filters_applied: dict
     total_retrieved: int
+    # Canonical-id index only: the `document_id` of the bill's current version, so the prompt
+    # builder can mark that version "current". Looked up per request, never stored on vectors.
+    current_document_id: str | None = None
 
 
 @dataclass
@@ -103,6 +108,7 @@ class RetrievalService:
         """
         self.settings = settings or get_settings()
         self.vector_store = VectorStoreService(self.settings)
+        self.bill_versions = BillVersionService(self.settings)
         self.config = RetrievalConfig(
             max_chunks=self.settings.max_retrieval_chunks,
             similarity_threshold=self.settings.similarity_threshold,
@@ -125,6 +131,30 @@ class RetrievalService:
         if not self._ocd_mode and filters.get("slug"):  # ocd-keyed vectors carry no slug
             return {"slug": filters["slug"]}
         return {}
+
+    async def _version_scope(self, ocd_bill_id: str, query: str) -> tuple[str | None, dict]:
+        """(current version's document_id, metadata filter for the bill's versioned documents).
+
+        The filter keeps a normal question on the CURRENT version, so one version of the text is
+        in context instead of every version blended together. A query that names a stage ("as
+        introduced", "the engrossed version") or a date asks for those versions instead. If
+        api-v3 cannot say which version is current, no version filter is applied: the bill's
+        chunks come back from every version, each labelled with its own.
+        """
+        current = current_version(await self.bill_versions.get_versions(ocd_bill_id))
+        current_id = current.document_id if current else None
+
+        requested = detect_version_request(query)
+        if requested:
+            version_filter: dict = {}
+            if requested.stages:
+                version_filter["version_stage"] = {"$in": list(requested.stages)}
+            if requested.dates:
+                version_filter["version_date"] = {"$in": list(requested.dates)}
+            return current_id, version_filter
+        if current_id:
+            return current_id, {"document_id": current_id}
+        return None, {}
 
     async def retrieve(
         self,
@@ -223,12 +253,19 @@ class RetrievalService:
         )
 
         # For bill queries, use multi-phase retrieval to prioritize legislative text
+        current_document_id = None
         if effective_context.type == "bill":
+            version_filter: dict = {}
+            if self._ocd_mode:
+                current_document_id, version_filter = await self._version_scope(
+                    effective_context.ocd_bill_id, query
+                )
             final_results = await self._retrieve_bill_with_text_priority(
                 query=query,
                 filters=filters,
                 max_chunks=max_chunks,
                 page_context=effective_context,
+                version_filter=version_filter,
             )
         elif effective_context.type == "organization" or self._is_organization_query(query):
             # Organization-focused retrieval: prioritize org documents
@@ -281,6 +318,7 @@ class RetrievalService:
             query_used=query,
             filters_applied=filters,
             total_retrieved=len(final_results),
+            current_document_id=current_document_id,
         )
 
     async def _retrieve_bill_with_text_priority(
@@ -289,6 +327,7 @@ class RetrievalService:
         filters: dict,
         max_chunks: int,
         page_context: PageContext | None = None,
+        version_filter: dict | None = None,
     ) -> list[SearchResult]:
         """
         Retrieve bill content with priority for actual legislative text.
@@ -305,12 +344,14 @@ class RetrievalService:
             filters: Base filters (webflow_id or ocd_bill_id)
             max_chunks: Maximum chunks to return
             page_context: Page context with bill info for enhanced history search
+            version_filter: Canonical-id index only. Metadata filter selecting which version(s) of
+                the bill's text (and, for "what changed", diffs) to retrieve; see `_version_scope`
 
         Returns:
             List of SearchResult prioritizing legislative text
         """
         # Phase 1: Get legislative text chunks (document_type="bill-text")
-        text_filters = {**filters, "document_type": "bill-text"}
+        text_filters = {**filters, **(version_filter or {}), "document_type": "bill-text"}
         text_results = await self.vector_store.query(
             query=query,
             top_k=max_chunks,
@@ -606,16 +647,21 @@ class RetrievalService:
                 vote_query_preview=vote_query[:50],
             )
 
-        # Phase 5: Changelog — version transition summaries (changelog intent only)
+        # Phase 5: what changed between versions (changelog intent only)
         changelog_results = []
-        if is_changelog_query and filters.get("webflow_id"):
+        changelog_filter = None
+        if is_changelog_query and self._ocd_mode:
+            # Canonical-id index: the change is api-v3's stored diff, embedded verbatim as one
+            # `bill-version-diff` document per version (labelled with both versions), under the
+            # same version scope as the text: the current version's diff unless a version is named.
+            changelog_filter = {**filters, **(version_filter or {}), "document_type": "bill-version-diff"}
+        elif is_changelog_query and filters.get("webflow_id"):
+            changelog_filter = {"document_type": "bill-changelog", "webflow_id": filters["webflow_id"]}
+        if changelog_filter:
             changelog_results = await self.vector_store.query(
                 query=query,
                 top_k=3,
-                filter={
-                    "document_type": "bill-changelog",
-                    "webflow_id": filters["webflow_id"],
-                },
+                filter=changelog_filter,
             )
             changelog_results = [
                 r for r in changelog_results if r.score >= self.config.similarity_threshold
@@ -1164,7 +1210,9 @@ class RetrievalService:
         """
         Remove duplicate or near-duplicate chunks.
 
-        Uses content hashing to identify duplicates.
+        Uses content hashing to identify duplicates. The key includes the version's
+        `document_id`: bill versions share most of their text, and merging identical passages
+        from different versions would erase which version a passage came from.
 
         Args:
             results: List of search results
@@ -1176,8 +1224,8 @@ class RetrievalService:
         deduplicated = []
 
         for result in results:
-            # Create a simple hash of the content
-            content_hash = hash(result.content[:500])
+            # Create a simple hash of the content, scoped to the document (version) it came from
+            content_hash = (result.metadata.get("document_id"), hash(result.content[:500]))
 
             if content_hash not in seen_content:
                 seen_content.add(content_hash)
