@@ -38,23 +38,24 @@ The single retrieval orchestrator. **Do not add raw Pinecone calls outside this 
     - Phase 3: removed (stale bill-history)
     - Phase 4a: org positions (`bill` + `organization`)
     - Phase 4b: vote records (`bill-votes`, `legislator-votes`)
-    - Phase 5: changelog (`bill-changelog` + webflow_id, **only on changelog intent**)
+    - Phase 5: what changed, **only on changelog intent**. Legacy index: `bill-changelog` + webflow_id. Canonical-id index (VOTEBOT-10): `bill-version-diff` (api-v3's stored `diff_from_previous_version`, embedded verbatim) under the same version scope as the text
   - `_retrieve_organization_priority(query, filters, max_chunks) -> list[SearchResult]`
   - `_build_filters(page_context, query) -> dict` — builds Pinecone filter from page context; use this, never build filters inline. A bill is pinned by `webflow_id` on the legacy index and by `ocd_bill_id` on the canonical-id index (VOTEBOT-8)
+  - `_version_scope(ocd_bill_id, query) -> (current_document_id, version_filter)` — canonical-id index only. "Current" is **looked up** (via `BillVersionService`), never stored on vectors. Default filter `{"document_id": <current>}`; a query naming a stage/date gets `version_stage`/`version_date` `$in` filters instead; unknown current → no version filter (all versions, each labelled, and the formatter says no version is current). Applied to `bill-text`, `bill-version-diff` **and the "no typed results" fallback** — a version search is never widened to every version. A date counts as a version request only in a query that also says "version" or "draft"
   - `_ocd_mode` (property) — True when `settings.bill_filter_key == "ocd_bill_id"`. **The one switch**: it follows the index name, so there is no second setting to forget on rollback
   - `_identity_filter(filters) -> dict` — the bill-pinning part of a built filter, for follow-up queries on other document types (votes). Use it instead of reading `filters["webflow_id"]` directly
   - `_legislative_scope(page_context) -> dict` — `jurisdiction` (upper-case code) + `session_code` for a general page that names them; canonical-id index only. Governs `bill-text`/`bill-votes` **only**: the scoped query returns that jurisdiction's, and the unscoped query excludes those two types (`$nin`), so other jurisdictions' bills stay out while legislators/organizations (no `session_code`) stay in
   - `_lookup_ocd_bill_context(bill_info, page_context) -> PageContext | None` — canonical-id counterpart of `_lookup_bill_slug`: a bill named on a general page, found by `gov_id` + jurisdiction (+ session). **Declines to guess** when the name matches more than one bill (every session has its own "HB 1"; session codes do not sort reliably as text, e.g. "2026D" after "2026")
-  - `_deduplicate(results) -> list[SearchResult]`
+  - `_deduplicate(results) -> list[SearchResult]` — the key is `(metadata["document_id"], hash(content[:500]))`: bill versions share most of their text, and merging identical passages across versions would erase which version they came from
   - `retrieve_for_bill(query, bill_id, jurisdiction) -> RetrievalResult`
   - `retrieve_for_legislator(query, legislator_id, jurisdiction) -> RetrievalResult`
   - `retrieve_general(query, jurisdiction) -> RetrievalResult`
-- **`RetrievalResult`** — `chunks, query_used, filters_applied, total_retrieved`
+- **`RetrievalResult`** — `chunks, query_used, filters_applied, total_retrieved, current_document_id` (the bill's current version on the canonical-id index, for the prompt builder to mark "current"; None otherwise)
 - **`RetrievalConfig`** — `max_chunks, similarity_threshold, use_hybrid_search, deduplicate`
 - **`ExtractedBillInfo`** — `bill_prefix, bill_number, jurisdiction`. Properties: `bill_id`, `slug_pattern`
 - **`HybridRetrievalService`** — subclass of `RetrievalService`; keyword search stub, not yet implemented
 
-**Retrieval isolation rule**: `bill-text-history` and `bill-changelog` are invisible to all existing phases by design (explicit `document_type` filters). Only Phase 5 queries `bill-changelog`, and only on changelog intent. Never add unfiltered fallback queries that could surface these types in normal responses.
+**Retrieval isolation rule**: `bill-text-history`, `bill-changelog` and `bill-version-diff` are invisible to all existing phases by design (explicit `document_type` filters). Only Phase 5 queries `bill-changelog` (legacy index) or `bill-version-diff` (canonical-id index), and only on changelog intent. Never add unfiltered fallback queries that could surface these types in normal responses.
 
 ## Intent classification (`utils/intent.py`)
 
@@ -63,7 +64,8 @@ Single source of truth for intent taxonomy and retrieval vocabulary.
 - **`PrimaryIntent`** StrEnum — `BILL, LEGISLATOR, ORGANIZATION, GENERAL, OUT_OF_SCOPE`
 - **`SubIntent`** StrEnum — `SUMMARY, SUPPORT_OPPOSITION, VOTE_HISTORY, STATUS, EXPLANATION, COMPARISON, CHANGELOG, VOTING_RECORD, CONTACT, BIO, DDP_SCORE, SPONSORED_BILLS, POSITIONS, INFO, BILL_ALIGNMENT, NAVIGATION, HOW_TO_VOTE, ABOUT_DDP, ISSUE_AREA, TEXT_EDITING, GREETING, OFF_TOPIC, META, CIVIC_ACTION, UNKNOWN`
 - **`CHANGELOG_KEYWORDS: list[str]`** — canonical keyword list for changelog intent detection. **Single source of truth** — imported by `retrieval.py` for Phase 5 detection. `retrieval.py` extends it with `["amendment", "amended"]` for broader retrieval recall without polluting analytics.
-- **`VALID_RETRIEVAL_SOURCES: frozenset`** — controlled vocabulary for `document_type` values. Add new document types here AND in ddp-sync's document type table. Values: `bill, bill-text, bill-history, bill-votes, bill-changelog, bill-text-history, legislator, legislator-votes, organization, training`
+- **`VERSION_STAGE_KEYWORDS`, `VersionRequest(stages, dates)`, `detect_version_request(query)`** (VOTEBOT-10) — how users name a bill version ("as introduced", "the engrossed version", a date), mapped to api-v3's `version_stage` labels (`introduced, amendment, chamber_passage, final_passage, enacted`; never `unknown`). Specific phrases only: a bare "introduced"/"amended" is a status question, and a date alone ("does it take effect March 4?") is not a version request. Extend the vocabulary here, not inline in retrieval
+- **`VALID_RETRIEVAL_SOURCES: frozenset`** — controlled vocabulary for `document_type` values. Add new document types here AND in ddp-sync's document type table. Values: `bill, bill-text, bill-history, bill-votes, bill-changelog, bill-text-history, bill-version-diff, legislator, legislator-votes, organization, training`
 - **`classify_primary_intent(page_type, message) -> str`**
 - **`classify_sub_intent(primary_intent, message) -> str`**
 - **`normalize_retrieval_sources(raw_sources) -> list[str]`** — maps unknown types to `"unknown"` with a warning; don't skip this
@@ -96,12 +98,13 @@ Single source of truth for intent taxonomy and retrieval vocabulary.
 - **`SYSTEM_PROMPT_BASE`** — base system prompt. Contains the bullet-per-line instruction. **Do not duplicate formatting rules inline.**
 - **`BILL_CONTEXT_PROMPT`** — bill page context; includes changelog guidance ("cite version transition explicitly; say so if no changelog available")
 - **`LEGISLATOR_CONTEXT_PROMPT`**, **`ORGANIZATION_CONTEXT_PROMPT`**, **`GENERAL_CONTEXT_PROMPT`** — context-specific prompt sections
+- **`VERSION_CONTEXT_PROMPT`** (VOTEBOT-10) — bill pages only, appended after `BILL_CONTEXT_PROMPT`: answer from the version marked current unless another is asked for, name the version for every claim, answer "what changed" from "Changes in ..." sources naming both versions, and say so if the asked-for version is not in the sources
 - **`RAG_CONTEXT_TEMPLATE`** — wrapper for retrieved context injected into the prompt
 - **`CITATION_INSTRUCTION`** / **`ENHANCED_CITATION_INSTRUCTION`** — citation formatting rules; `ENHANCED_CITATION_INSTRUCTION` gated on `settings.enhanced_citation_prompt`
 - **`HUMAN_HANDOFF_PROMPT`** — human handoff detection instructions; always appended last in `build_system_prompt`
 - **`CONFIDENCE_SCORING_PROMPT`** — confidence rubric text. Defined but **currently unused** — not appended anywhere in `build_system_prompt`. Confidence is instead computed by `_calculate_confidence`/`calculate_confidence` heuristics, not by prompting the LLM.
 - **`build_system_prompt(page_type, page_info, include_rag_context, retrieved_context) -> str`** — assembles the full system prompt: `SYSTEM_PROMPT_BASE` + context-specific prompt + optional `RAG_CONTEXT_TEMPLATE` + citation instruction + `HUMAN_HANDOFF_PROMPT`. Always use this, never concatenate prompts manually
-- **`format_retrieved_chunks(chunks: list[dict]) -> str`** — formats retrieved chunks for RAG injection. Adds `**Version Change:** from → to` header for `bill-changelog` chunks. **Use this, don't write inline formatters.**
+- **`format_retrieved_chunks(chunks: list[dict], current_document_id: str | None = None) -> str`** — formats retrieved chunks for RAG injection. Adds `**Version Change:** from → to` header for `bill-changelog` chunks (legacy). Chunks of a labelled bill version (`bill-text`/`bill-version-diff` with `document_id` and `version_note`/`version_stage`) are **grouped under one header** such as `## HB 1 · Engrossed · 2026-03-04 · current` (diffs: `## HB 1 · Changes in Engrossed · 2026-03-04 · from Introduced`), the group sitting where its first chunk ranked. When version groups are present but no version is current, a `NO_CURRENT_VERSION_NOTE` leads the context. Callers pass `retrieval_result.current_document_id`. **Use this, don't write inline formatters.**
 - **`_build_ddp_url(metadata, doc_type) -> str | None`** — builds DDP citation URL from slug in metadata
 
 ## Webflow runtime lookup (`services/webflow_lookup.py`)
@@ -233,14 +236,21 @@ Same index and namespace as DDP-Sync (`votebot-large` today; `ddp-knowledge-base
 | `document_type` | Retrieved by | Notes |
 |---|---|---|
 | `bill` | Phase 2 (summary), Phase 4a (org) | CMS summary chunks |
-| `bill-text` | Phase 1 | Current legislative text; overwritten each version by DDP-Sync |
+| `bill-text` | Phase 1 | Legacy index: current legislative text, overwritten each version by DDP-Sync. Canonical-id index: **one document per version** (`bill-text:{ocd_bill_id}:{document_id}`), filtered to the current version by default |
 | `bill-text-history` | **Never retrieved by VoteBot** | Permanent historical text; stored for future use |
 | `bill-changelog` | Phase 5 (changelog intent only) | LLM-generated diffs; requires `webflow_id` filter |
+| `bill-version-diff` | Phase 5 (changelog intent only; canonical-id index) | api-v3's stored diff against the previous version, embedded verbatim, labelled with `from_version_note`/`from_version_date`/`from_document_id`; replaces `bill-changelog`. None for `unknown`-stage versions |
 | `bill-votes` | Phase 4b | Vote records per bill |
 | `legislator` | Standard retrieval | Legislator profiles |
 | `legislator-votes` | Phase 4b | Reverse index: per-legislator voting history |
 | `organization` | Phase 4a, org retrieval | Org profiles with bill positions |
 | `training` | General retrieval | Behaviour customisation docs |
+
+## Bill versions (`services/bill_versions.py`, VOTEBOT-10)
+
+- **`BillVersionService.get_versions(ocd_bill_id) -> list[BillVersion] | None`** — asks api-v3 for the bill's ordered versions (`/bills/ocd-bill/{uuid}?include=versions`, through `openstates_base_url`/`openstates_headers`), cached 120 s in-process; None when unavailable (remembered 45 s so a down api-v3 costs one 3 s wait, not one per message) and always None unless `use_ddp_openstates_replica` is on, because the public OpenStates API has none of the DDP version fields.
+- **`BillVersion`** — `document_id` (api-v3's `archived_document_id` as a string, the vectors' `document_id`; None if not archived), `note, date, stage, ordinal`.
+- **`current_version(versions) -> BillVersion | None`** — the latest **classifiable** version (stage not `unknown`), and only if it is archived; if the latest classifiable one has no archived document yet the answer is None, never an older version. api-v3's order (latest last) is trusted, never re-sorted. **Do not store an is_current flag on vectors and do not recompute version order or diffs here**: ordering is `api/version_ordering.py`, diffs are api-v3's stored `diff_from_previous_version`.
 
 ## Content resolution route (`api/routes/content.py`)
 

@@ -528,7 +528,8 @@ class VoteBotAgent:
                     "metadata": chunk.metadata,
                 }
                 for chunk in retrieval_result.chunks
-            ]
+            ],
+            current_document_id=retrieval_result.current_document_id,
         )
 
         # Step 3: If user is disputing/verifying vote info, fetch directly from OpenStates
@@ -604,6 +605,7 @@ class VoteBotAgent:
             page_info=page_info,
             include_rag_context=True,
             retrieved_context=full_context,
+            version_aware=self.settings.bill_filter_key == "ocd_bill_id",
         )
 
         # Step 7: Build messages
@@ -879,7 +881,8 @@ class VoteBotAgent:
                     "metadata": chunk.metadata,
                 }
                 for chunk in retrieval_result.chunks
-            ]
+            ],
+            current_document_id=retrieval_result.current_document_id,
         )
 
         # Step 2b: Pre-fetch bill info if query mentions a specific bill
@@ -987,6 +990,7 @@ class VoteBotAgent:
             page_info=page_info,
             include_rag_context=True,
             retrieved_context=full_context,
+            version_aware=self.settings.bill_filter_key == "ocd_bill_id",
         )
 
         # Step 4: Determine if web search should be enabled
