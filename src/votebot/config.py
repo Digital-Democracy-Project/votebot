@@ -7,6 +7,11 @@ from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# The original index, keyed by Webflow item id. Every other index is the canonical-id index
+# (PLAN-enterprise-search.md 5.6: `ddp-knowledge-base`), keyed by the OpenStates bill id.
+LEGACY_PINECONE_INDEX_NAME = "votebot-large"
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -75,7 +80,8 @@ class Settings(BaseSettings):
     # Pinecone
     pinecone_api_key: SecretStr = Field(default=SecretStr(""))
     pinecone_environment: str = "us-east-1"
-    pinecone_index_name: str = "votebot-large"
+    # Also decides how bills are identified in retrieval filters: see `bill_filter_key`.
+    pinecone_index_name: str = LEGACY_PINECONE_INDEX_NAME
     pinecone_namespace: str = "default"
 
     # Redis (for caching and session storage)
@@ -109,6 +115,11 @@ class Settings(BaseSettings):
     ddp_openstates_api_root: str = ""
     ddp_openstates_bearer_token: SecretStr = Field(default=SecretStr(""))
 
+    # ddp-broker-py (VOTEBOT-8): /content/resolve uses its public bill endpoints to turn a ddp-next
+    # bill URL into an OpenStates bill id. Empty by default (no hardcoded target); only the
+    # ddp-next URL forms need it, the Webflow path does not.
+    ddp_broker_api_root: str = ""
+
     # Webflow CMS
     webflow_votebot_api_key: SecretStr = Field(default=SecretStr(""))  # Read-only (query-time lookups)
     webflow_scheduler_api_key: SecretStr = Field(default=SecretStr(""))  # Read+write (scheduler CMS updates)
@@ -135,6 +146,17 @@ class Settings(BaseSettings):
     slack_bot_token: SecretStr = Field(default=SecretStr(""))
     slack_app_token: SecretStr = Field(default=SecretStr(""))
     slack_support_channel: str = "#votebot-support"
+
+    @property
+    def bill_filter_key(self) -> Literal["webflow_id", "ocd_bill_id"]:
+        """Metadata key that pins a bill in retrieval filters, chosen by the index.
+
+        Derived from `pinecone_index_name` rather than being a second setting, so rolling back
+        to the legacy index is one change and the filter key can never disagree with the index.
+        """
+        if self.pinecone_index_name == LEGACY_PINECONE_INDEX_NAME:
+            return "webflow_id"
+        return "ocd_bill_id"
 
 
 @lru_cache

@@ -40,7 +40,11 @@ The single retrieval orchestrator. **Do not add raw Pinecone calls outside this 
     - Phase 4b: vote records (`bill-votes`, `legislator-votes`)
     - Phase 5: changelog (`bill-changelog` + webflow_id, **only on changelog intent**)
   - `_retrieve_organization_priority(query, filters, max_chunks) -> list[SearchResult]`
-  - `_build_filters(page_context, query) -> dict` — builds Pinecone filter from page context; use this, never build filters inline
+  - `_build_filters(page_context, query) -> dict` — builds Pinecone filter from page context; use this, never build filters inline. A bill is pinned by `webflow_id` on the legacy index and by `ocd_bill_id` on the canonical-id index (VOTEBOT-8)
+  - `_ocd_mode` (property) — True when `settings.bill_filter_key == "ocd_bill_id"`. **The one switch**: it follows the index name, so there is no second setting to forget on rollback
+  - `_identity_filter(filters) -> dict` — the bill-pinning part of a built filter, for follow-up queries on other document types (votes). Use it instead of reading `filters["webflow_id"]` directly
+  - `_legislative_scope(page_context) -> dict` — `jurisdiction` (upper-case code) + `session_code` for a general page that names them; canonical-id index only, applied to `bill-text`/`bill-votes` only
+  - `_lookup_ocd_bill_context(bill_info, page_context) -> PageContext | None` — canonical-id counterpart of `_lookup_bill_slug`: a bill named on a general page, found by `gov_id` + jurisdiction (+ session)
   - `_deduplicate(results) -> list[SearchResult]`
   - `retrieve_for_bill(query, bill_id, jurisdiction) -> RetrievalResult`
   - `retrieve_for_legislator(query, legislator_id, jurisdiction) -> RetrievalResult`
@@ -212,7 +216,7 @@ Singleton: `get_redis_store() -> RedisStore`. All methods no-op gracefully when 
 
 ## API schemas (`api/schemas/chat.py`)
 
-- **`PageContext`** — `type: "bill"|"legislator"|"organization"|"general"`, `id, jurisdiction, session, title, url, slug, webflow_id`. The filter source for retrieval — always pass through rather than building filters from raw message text. (Note the `session` field — legislative session, e.g. `"2025"`/`"119"` — is easy to miss.)
+- **`PageContext`** — `type: "bill"|"legislator"|"organization"|"general"`, `id, jurisdiction, session, title, url, slug, webflow_id, ocd_bill_id`. `ocd_bill_id` is the bare OpenStates UUID (no `ocd-bill/` prefix, matching the vectors' metadata). The filter source for retrieval — always pass through rather than building filters from raw message text. (Note the `session` field — legislative session, e.g. `"2025"`/`"119"` — is easy to miss.)
 - **`NavigationContext`** — `previous_pages: list[str], time_on_page, scroll_depth` — optional navigation signal for intent disambiguation
 - **`ClientMetadata`** — `client_id, client_version, user_agent, platform, entry_referrer, page_url` — optional client/analytics metadata
 - **`ChatRequest`** — `message, session_id, human_active, page_context, navigation_context, client_metadata, conversation_history, button`
@@ -224,7 +228,7 @@ Singleton: `get_redis_store() -> RedisStore`. All methods no-op gracefully when 
 
 ## Pinecone document types (controlled vocabulary)
 
-Same index (`votebot-large`) and namespace as DDP-Sync. VoteBot is **read-only** — it never writes to Pinecone directly; all writes go through DDP-Sync.
+Same index and namespace as DDP-Sync (`votebot-large` today; `ddp-knowledge-base`, keyed by `ocd_bill_id`, once `PINECONE_INDEX_NAME` points at it — PLAN-enterprise-search.md 5.6). VoteBot is **read-only** — it never writes to Pinecone directly; all writes go through DDP-Sync. Vectors on the canonical-id index carry `ocd_bill_id` (bare UUID), `jurisdiction` (upper-case code), `session_code`, `gov_id`, `url`/`source_url` and, for versions, `document_id`, `version_note`, `version_date`, `version_stage`, `version_ordinal`; they carry **no** `slug` or `webflow_id`.
 
 | `document_type` | Retrieved by | Notes |
 |---|---|---|
@@ -237,6 +241,10 @@ Same index (`votebot-large`) and namespace as DDP-Sync. VoteBot is **read-only**
 | `legislator-votes` | Phase 4b | Reverse index: per-legislator voting history |
 | `organization` | Phase 4a, org retrieval | Org profiles with bill positions |
 | `training` | General retrieval | Behaviour customisation docs |
+
+## Content resolution route (`api/routes/content.py`)
+
+`GET /content/resolve?url=` turns a DDP URL into the page context the widget sends back on every message. Two paths, chosen by URL shape: ddp-next bill URLs (`/bills/{broker_id}`, `/bills/{jurisdiction}/{session}/{gov_id}`) go through ddp-broker-py (`_match_ddp_next_bill`, `resolve_ddp_next_bill`, `_broker_get`) and return `ocd_bill_id`; everything else is the Webflow CMS path (`fetch_webflow_item_by_slug`) returning `webflow_id`. **ddp-broker-py has no bill-detail endpoint** — use its `/api/bills/{id}/scorecard/` and `/api/bills/resolve/`. The websocket route builds `PageContext` from the payload in one place (`_page_context_from_payload`); a new page-context key must be added there or it is silently dropped.
 
 ## Feature flags (config.py `Settings`)
 
@@ -254,6 +262,8 @@ Same index (`votebot-large`) and namespace as DDP-Sync. VoteBot is **read-only**
 | `quick_action_buttons_enabled` | `false` | Summary/Pros&Cons/Status buttons + Redis cache |
 | `enhanced_citation_prompt` | `false` | Stricter citation instruction variant |
 | `query_log_enabled` | `true` | JSONL event logging (`QueryLogger.log_event`) |
+| `pinecone_index_name` | `"votebot-large"` | Which index is read **and**, via `bill_filter_key`, how a bill is pinned in filters (`votebot-large` → `webflow_id`, anything else → `ocd_bill_id`). Rollback is this one value |
+| `ddp_broker_api_root` | `""` | ddp-broker-py base URL for `/content/resolve` on ddp-next URLs; empty → 503 for those URLs only |
 
 ---
 

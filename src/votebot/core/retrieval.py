@@ -108,6 +108,24 @@ class RetrievalService:
             similarity_threshold=self.settings.similarity_threshold,
         )
 
+    @property
+    def _ocd_mode(self) -> bool:
+        """True when the configured index is keyed by `ocd_bill_id` rather than `webflow_id`.
+
+        One setting decides both (`Settings.bill_filter_key`, derived from the index name), so
+        rolling back to the legacy index needs no second change.
+        """
+        return self.settings.bill_filter_key == "ocd_bill_id"
+
+    def _identity_filter(self, filters: dict) -> dict:
+        """The part of `filters` that pins a bill, for follow-up queries on other document types."""
+        key = self.settings.bill_filter_key
+        if filters.get(key):
+            return {key: filters[key]}
+        if not self._ocd_mode and filters.get("slug"):  # ocd-keyed vectors carry no slug
+            return {"slug": filters["slug"]}
+        return {}
+
     async def retrieve(
         self,
         query: str,
@@ -135,7 +153,13 @@ class RetrievalService:
 
         # For general queries, try to extract bill info from query and upgrade context
         effective_context = page_context
-        if page_context.type == "general":
+        if page_context.type == "general" and self._ocd_mode:
+            bill_info = self._extract_bill_from_query(query)
+            if bill_info:
+                upgraded = await self._lookup_ocd_bill_context(bill_info, page_context)
+                if upgraded:
+                    effective_context = upgraded
+        elif page_context.type == "general":
             bill_info = self._extract_bill_from_query(query)
             if bill_info:
                 logger.info(
@@ -177,6 +201,17 @@ class RetrievalService:
                     url=effective_context.url,
                 )
 
+        # A bill page with no ocd_bill_id cannot be isolated in a canonical-id index. Searching
+        # without the filter would answer about whichever bills match the words, so return no
+        # context (the agent falls back to its live OpenStates tool) and say so loudly.
+        if effective_context.type == "bill" and self._ocd_mode and not effective_context.ocd_bill_id:
+            logger.warning(
+                "Bill page context has no ocd_bill_id; skipping retrieval rather than searching every bill",
+                slug=effective_context.slug,
+                webflow_id=effective_context.webflow_id,
+            )
+            return RetrievalResult(chunks=[], query_used=query, filters_applied={}, total_retrieved=0)
+
         # Build filters based on effective context
         filters = self._build_filters(effective_context, query)
 
@@ -209,6 +244,18 @@ class RetrievalService:
                 top_k=max_chunks * 2,
                 filter=filters if filters else None,
             )
+
+            # General pages that name a jurisdiction (and session): put that jurisdiction's bill
+            # text and votes first. Only those two types are scoped, because legislators and
+            # organizations carry no session_code and must not be hidden by it.
+            scope = self._legislative_scope(effective_context)
+            if scope:
+                scoped = await self.vector_store.query(
+                    query=query,
+                    top_k=max_chunks,
+                    filter={**scope, "document_type": {"$in": ["bill-text", "bill-votes"]}},
+                )
+                results = scoped + results
 
             # Filter by similarity threshold
             filtered_results = [
@@ -244,13 +291,16 @@ class RetrievalService:
         """
         Retrieve bill content with priority for actual legislative text.
 
-        Phase 1: Get bill-text (PDF/legislative text) with webflow_id filter
-        Phase 2: Get bill summaries with webflow_id filter
+        Phase 1: Get bill-text (PDF/legislative text) with the bill identity filter
+        Phase 2: Get bill summaries with the bill identity filter
         Phase 3: Get bill-history (no webflow_id in metadata) using semantic search
+
+        The identity filter is `webflow_id` on the legacy index and `ocd_bill_id` on the
+        canonical-id index (see `Settings.bill_filter_key`).
 
         Args:
             query: The search query
-            filters: Base filters (webflow_id)
+            filters: Base filters (webflow_id or ocd_bill_id)
             max_chunks: Maximum chunks to return
             page_context: Page context with bill info for enhanced history search
 
@@ -519,12 +569,8 @@ class RetrievalService:
                 if bill_id or bill_title:
                     vote_query = f"{bill_id} {bill_title} vote voting record".strip()
 
-            vote_filters = {"document_type": "bill-votes"}
             # Apply filters to get the correct bill's votes
-            if filters.get("webflow_id"):
-                vote_filters["webflow_id"] = filters["webflow_id"]
-            elif filters.get("slug"):
-                vote_filters["slug"] = filters["slug"]
+            vote_filters = {"document_type": "bill-votes", **self._identity_filter(filters)}
 
             # Always request at least 5 vote chunks for vote queries
             vote_top_k = max(5, max_chunks)
@@ -1011,8 +1057,13 @@ class RetrievalService:
         """
         filters = {}
 
+        if page_context.type == "bill" and self._ocd_mode:
+            # Canonical-id index: every document of a bill carries its ocd_bill_id, and nothing
+            # else identifies it (no slug, no webflow_id), so there is deliberately no fallback.
+            if page_context.ocd_bill_id:
+                filters["ocd_bill_id"] = page_context.ocd_bill_id
         # For bills, use webflow_id as the filter (present in both summary and PDF chunks)
-        if page_context.type == "bill":
+        elif page_context.type == "bill":
             if page_context.webflow_id:
                 filters["webflow_id"] = page_context.webflow_id
             # Fallback to slug if no webflow_id (only matches summary chunks, not PDFs)
@@ -1037,11 +1088,66 @@ class RetrievalService:
             "Built retrieval filters",
             page_type=page_context.type,
             webflow_id=page_context.webflow_id,
+            ocd_bill_id=page_context.ocd_bill_id,
             slug=page_context.slug,
             filters=filters,
         )
 
         return filters
+
+    def _legislative_scope(self, page_context: PageContext) -> dict:
+        """Jurisdiction and session filter for a general page that names them (canonical-id index only).
+
+        Vectors there carry the upper-case jurisdiction code as `jurisdiction` and the legislative
+        session as `session_code`. Empty on the legacy index, where `jurisdiction` is a Webflow id.
+        """
+        if not self._ocd_mode or page_context.type != "general" or not page_context.jurisdiction:
+            return {}
+        scope = {"jurisdiction": page_context.jurisdiction.upper()}
+        if page_context.session:
+            scope["session_code"] = page_context.session
+        return scope
+
+    async def _lookup_ocd_bill_context(
+        self, bill_info: ExtractedBillInfo, page_context: PageContext
+    ) -> PageContext | None:
+        """Canonical-id counterpart of `_lookup_bill_slug`: find the bill a general-page query names.
+
+        Looks the bill up by its identifier (`gov_id`, e.g. "HB 363") within a jurisdiction, and a
+        session when the page names one; without a jurisdiction the identifier is ambiguous
+        across states, so no guess is made. Returns a bill `PageContext`, or None if not found.
+        """
+        jurisdiction = bill_info.jurisdiction or page_context.jurisdiction
+        if not jurisdiction:
+            return None
+        lookup = {
+            "document_type": "bill-text",
+            "gov_id": f"{bill_info.bill_prefix} {bill_info.bill_number}",
+            "jurisdiction": jurisdiction.upper(),
+        }
+        if page_context.session:
+            lookup["session_code"] = page_context.session
+
+        results = await self.vector_store.query(
+            query=f"{bill_info.bill_prefix} {bill_info.bill_number}", top_k=10, filter=lookup
+        )
+        matches = [r for r in results if r.metadata.get("ocd_bill_id")]
+        if not matches:
+            return None
+        # Several sessions can share an identifier; prefer the most recent one.
+        best = max(matches, key=lambda r: str(r.metadata.get("session_code", "")))
+        logger.info(
+            "Upgraded to bill context from query extraction (ocd_bill_id)",
+            gov_id=lookup["gov_id"],
+            ocd_bill_id=best.metadata["ocd_bill_id"],
+        )
+        return PageContext(
+            type="bill",
+            ocd_bill_id=best.metadata["ocd_bill_id"],
+            title=lookup["gov_id"],
+            jurisdiction=lookup["jurisdiction"],
+            session=best.metadata.get("session_code") or page_context.session,
+        )
 
     def _deduplicate(self, results: list[SearchResult]) -> list[SearchResult]:
         """

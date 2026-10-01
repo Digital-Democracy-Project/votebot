@@ -1,7 +1,7 @@
 """Content resolution endpoint for chat widget context."""
 
 import re
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 import structlog
@@ -12,7 +12,12 @@ from votebot.config import get_settings
 logger = structlog.get_logger()
 router = APIRouter(prefix="/content", tags=["content"])
 
-# URL patterns for DDP content
+# ddp-next bill URLs (VOTEBOT-8). A Webflow bill slug is never all digits, so a numeric single
+# segment is a ddp-broker-py bill id; the three-segment form is the bill's natural key.
+DDP_NEXT_BILL_BY_ID = re.compile(r"^/bills/(\d+)/?$")
+DDP_NEXT_BILL_BY_KEY = re.compile(r"^/bills/([A-Za-z]{2})/([^/]+)/([^/]+)/?$")
+
+# URL patterns for DDP content (Webflow-hosted pages; kept until Webflow is retired)
 DDP_PATTERNS = {
     "bill": re.compile(r"^/bills/([^/]+)/?$"),
     "legislator": re.compile(r"^/legislators/([^/]+)/?$"),
@@ -27,8 +32,10 @@ async def resolve_content(
     """
     Resolve a DDP URL to content metadata for the chat widget.
 
-    Parses the URL to determine content type and slug, then fetches
-    metadata from Webflow CMS.
+    ddp-next bill URLs (`/bills/{broker_id}` or `/bills/{jurisdiction}/{session}/{gov_id}`) are
+    resolved through ddp-broker-py to the bill's OpenStates id, which is what retrieval filters
+    on once VoteBot reads the canonical-id index. Every other URL is parsed for content type
+    and slug and looked up in the Webflow CMS, exactly as before.
 
     Args:
         url: Full DDP URL (e.g., https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025)
@@ -41,6 +48,10 @@ async def resolve_content(
     # Parse URL
     parsed = urlparse(url)
     path = parsed.path
+
+    next_bill = _match_ddp_next_bill(path)
+    if next_bill:
+        return await resolve_ddp_next_bill(url, next_bill)
 
     # Determine content type and extract slug
     content_type = None
@@ -147,6 +158,85 @@ async def resolve_content(
         }
 
     return {"type": "general", "url": url}
+
+
+def _match_ddp_next_bill(path: str) -> dict | None:
+    """Recognise a ddp-next bill URL path; None for anything else (including Webflow slugs)."""
+    match = DDP_NEXT_BILL_BY_ID.match(path)
+    if match:
+        return {"broker_id": int(match.group(1))}
+    match = DDP_NEXT_BILL_BY_KEY.match(path)
+    if match:
+        return {
+            "jurisdiction": match.group(1),
+            "session": unquote(match.group(2)),
+            "gov_id": unquote(match.group(3)),
+        }
+    return None
+
+
+async def _broker_get(client: httpx.AsyncClient, url: str, params: dict | None = None) -> dict:
+    """GET a ddp-broker-py JSON endpoint; raises httpx.HTTPStatusError on 4xx/5xx."""
+    response = await client.get(url, params=params)
+    response.raise_for_status()
+    return response.json()
+
+
+async def resolve_ddp_next_bill(url: str, key: dict) -> dict:
+    """Resolve a ddp-next bill URL to the page context the widget sends back with each message.
+
+    ddp-broker-py has no bill-detail endpoint, so this uses the two public ones it does have:
+    `/api/bills/{id}/scorecard/` (broker id -> jurisdiction, session, gov_id) and
+    `/api/bills/resolve/` (jurisdiction, session, gov_id -> OpenStates bill id, bare UUID).
+    """
+    root = get_settings().ddp_broker_api_root.rstrip("/")
+    if not root:
+        raise HTTPException(
+            status_code=503,
+            detail="ddp-broker-py is not configured (DDP_BROKER_API_ROOT); cannot resolve ddp-next bill URLs",
+        )
+
+    title = None
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            if "broker_id" in key:
+                scorecard = await _broker_get(client, f"{root}/api/bills/{key['broker_id']}/scorecard/")
+                meta = scorecard.get("bill") or {}
+                key = {
+                    "jurisdiction": meta.get("jurisdictionIso2"),
+                    "session": (meta.get("session") or {}).get("code"),
+                    "gov_id": meta.get("govId"),
+                }
+                title = meta.get("title")
+                if not all(key.values()):
+                    raise HTTPException(status_code=502, detail="Broker scorecard is missing bill identity fields")
+            resolved = await _broker_get(client, f"{root}/api/bills/resolve/", params=key)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Bill not found: {url}")
+        logger.error("Broker rejected bill lookup", url=url, status=e.response.status_code)
+        raise HTTPException(status_code=502, detail="Failed to resolve bill via ddp-broker-py")
+    except httpx.RequestError as e:
+        logger.error("Broker unreachable", url=url, error=str(e))
+        raise HTTPException(status_code=502, detail="Failed to reach ddp-broker-py")
+
+    ocd_bill_id = resolved.get("bill_openstates_id")
+    if not ocd_bill_id:
+        raise HTTPException(status_code=404, detail=f"Bill not found: {url}")
+
+    payload = {
+        "type": "bill",
+        "id": key["gov_id"],
+        "ocd_bill_id": str(ocd_bill_id),
+        "gov_id": key["gov_id"],
+        "jurisdiction": key["jurisdiction"].upper(),
+        "session": key["session"],
+        "url": url,
+        "ddp_url": url,
+    }
+    if title:
+        payload["title"] = title
+    return payload
 
 
 async def fetch_webflow_item_by_slug(

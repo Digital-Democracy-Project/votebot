@@ -88,7 +88,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `OPENAI_API_KEY` | OpenAI API key | Yes |
 | `PINECONE_API_KEY` | Pinecone API key | Yes |
 | `PINECONE_ENVIRONMENT` | Pinecone environment (default: us-east-1) | Yes |
-| `PINECONE_INDEX_NAME` | Pinecone index name (default: votebot-large) | Yes |
+| `PINECONE_INDEX_NAME` | Pinecone index name (default: `votebot-large`). **Also decides how bills are filtered in retrieval:** the legacy `votebot-large` index is keyed by `webflow_id`; any other index (e.g. `ddp-knowledge-base`) is keyed by `ocd_bill_id`. Switching the index, or rolling back, is this one setting. | Yes |
 | `PINECONE_NAMESPACE` | Pinecone namespace (default: default) | No |
 | `API_KEY` | API key for authentication | Yes |
 | `WEBFLOW_VOTEBOT_API_KEY` | Webflow CMS API key (read-only, used at query time by `/content/resolve` and runtime CMS lookups) | Yes |
@@ -96,6 +96,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `WEBFLOW_BILLS_COLLECTION_ID` | Webflow bills collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
 | `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
 | `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
+| `DDP_BROKER_API_ROOT` | Base URL of ddp-broker-py. `/content/resolve` uses its public bill endpoints to turn a ddp-next bill URL into an OpenStates bill id. No code default; unset means ddp-next URLs return 503 (Webflow URLs are unaffected) | For ddp-next bill URLs |
 | `CONGRESS_API_KEY` | Congress.gov API key | For federal bills |
 | `OPENSTATES_API_KEY` | OpenStates API key | For state bills |
 | `USE_DDP_OPENSTATES_REPLICA` | Routes OpenStates calls to DDP-API's own proxy instead of the public API (default `false`) | No |
@@ -181,7 +182,12 @@ GET /votebot/v1/content/resolve?url={ddp_url}
 
 Resolve a DDP URL to content metadata for the chat widget.
 
-**Example:**
+Two kinds of bill URL are understood:
+
+- **ddp-next** (`/bills/{broker_id}` or `/bills/{jurisdiction}/{session}/{gov_id}`): resolved through ddp-broker-py (`DDP_BROKER_API_ROOT`) to the bill's OpenStates id. ddp-broker-py has no bill-detail endpoint, so this uses its public `/api/bills/{id}/scorecard/` (broker id to jurisdiction, session and gov_id) and `/api/bills/resolve/` (those three to the bare OpenStates UUID). The result is the page context the widget sends back with each message; retrieval filters on its `ocd_bill_id` when the index is the canonical-id one (see `PINECONE_INDEX_NAME`). Errors: 404 unknown bill, 502 broker problem, 503 `DDP_BROKER_API_ROOT` unset.
+- **Webflow** (`/bills/{slug}`): looked up in the Webflow CMS as before, returning `webflow_id`. Kept until Webflow is retired, and it is what a rollback to `votebot-large` relies on.
+
+**Example (Webflow):**
 ```bash
 curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025"
 ```
@@ -201,6 +207,24 @@ curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=htt
   "webflow_id": "6512abc123..."
 }
 ```
+
+**Example (ddp-next) and response:**
+```bash
+curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=https://digitaldemocracyproject.org/bills/fl/2026/HB%20123"
+```
+```json
+{
+  "type": "bill",
+  "id": "HB 123",
+  "ocd_bill_id": "a3f7c0d1-1111-4222-8333-444455556666",
+  "gov_id": "HB 123",
+  "jurisdiction": "FL",
+  "session": "2026",
+  "url": "https://digitaldemocracyproject.org/bills/fl/2026/HB%20123",
+  "ddp_url": "https://digitaldemocracyproject.org/bills/fl/2026/HB%20123"
+}
+```
+`title` is included when the URL used a broker id (the scorecard carries it). `source_url` is not returned: neither broker endpoint has it, and the citation URL comes from the vectors' own metadata.
 
 ### Feature Flags
 
