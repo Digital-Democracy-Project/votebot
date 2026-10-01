@@ -238,22 +238,24 @@ class RetrievalService:
                 max_chunks=max_chunks,
             )
         else:
-            # Standard retrieval for non-bill queries
+            # Standard retrieval for non-bill queries.
+            # A general page that names a jurisdiction (and session) gets that jurisdiction's bill
+            # text and votes, and no other jurisdiction's. Only those two types are scoped:
+            # legislators and organizations carry no session_code and must stay retrievable, so
+            # the unscoped query simply leaves the two bill types to the scoped one.
+            scope = self._legislative_scope(effective_context)
+            bill_types = ["bill-text", "bill-votes"]
+            base_filter = {**filters, "document_type": {"$nin": bill_types}} if scope else filters
             results = await self.vector_store.query(
                 query=query,
                 top_k=max_chunks * 2,
-                filter=filters if filters else None,
+                filter=base_filter if base_filter else None,
             )
-
-            # General pages that name a jurisdiction (and session): put that jurisdiction's bill
-            # text and votes first. Only those two types are scoped, because legislators and
-            # organizations carry no session_code and must not be hidden by it.
-            scope = self._legislative_scope(effective_context)
             if scope:
                 scoped = await self.vector_store.query(
                     query=query,
                     top_k=max_chunks,
-                    filter={**scope, "document_type": {"$in": ["bill-text", "bill-votes"]}},
+                    filter={**scope, "document_type": {"$in": bill_types}},
                 )
                 results = scoped + results
 
@@ -1114,8 +1116,8 @@ class RetrievalService:
         """Canonical-id counterpart of `_lookup_bill_slug`: find the bill a general-page query names.
 
         Looks the bill up by its identifier (`gov_id`, e.g. "HB 363") within a jurisdiction, and a
-        session when the page names one; without a jurisdiction the identifier is ambiguous
-        across states, so no guess is made. Returns a bill `PageContext`, or None if not found.
+        session when the page names one. Without a jurisdiction, or when the identifier matches more
+        than one bill, no guess is made. Returns a bill `PageContext`, or None.
         """
         jurisdiction = bill_info.jurisdiction or page_context.jurisdiction
         if not jurisdiction:
@@ -1132,10 +1134,19 @@ class RetrievalService:
             query=f"{bill_info.bill_prefix} {bill_info.bill_number}", top_k=10, filter=lookup
         )
         matches = [r for r in results if r.metadata.get("ocd_bill_id")]
-        if not matches:
+        bill_ids = {r.metadata["ocd_bill_id"] for r in matches}
+        if len(bill_ids) != 1:
+            if bill_ids:
+                # Every session has its own "HB 1". Session codes do not order reliably as text
+                # (a special session "2026D" sorts after "2026"), so guessing could answer about
+                # the wrong bill; a page that supplies its session removes the ambiguity.
+                logger.info(
+                    "Bill named in query matches several bills; not guessing",
+                    gov_id=lookup["gov_id"],
+                    candidates=len(bill_ids),
+                )
             return None
-        # Several sessions can share an identifier; prefer the most recent one.
-        best = max(matches, key=lambda r: str(r.metadata.get("session_code", "")))
+        best = matches[0]
         logger.info(
             "Upgraded to bill context from query extraction (ocd_bill_id)",
             gov_id=lookup["gov_id"],

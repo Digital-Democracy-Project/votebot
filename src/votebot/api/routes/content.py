@@ -1,6 +1,7 @@
 """Content resolution endpoint for chat widget context."""
 
 import re
+import uuid
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -220,14 +221,19 @@ async def resolve_ddp_next_bill(url: str, key: dict) -> dict:
         logger.error("Broker unreachable", url=url, error=str(e))
         raise HTTPException(status_code=502, detail="Failed to reach ddp-broker-py")
 
-    ocd_bill_id = resolved.get("bill_openstates_id")
-    if not ocd_bill_id:
-        raise HTTPException(status_code=404, detail=f"Bill not found: {url}")
+    # A 200 that does not carry a valid bare UUID breaks the broker's contract: a bad gateway, not
+    # "not found" (a real miss is the 404 above). An id that does not match the vectors' metadata
+    # would otherwise just retrieve nothing, silently.
+    try:
+        ocd_bill_id = str(uuid.UUID(str(resolved.get("bill_openstates_id"))))
+    except ValueError:
+        logger.error("Broker returned no valid bill_openstates_id", url=url)
+        raise HTTPException(status_code=502, detail="ddp-broker-py returned an invalid bill id")
 
     payload = {
         "type": "bill",
         "id": key["gov_id"],
-        "ocd_bill_id": str(ocd_bill_id),
+        "ocd_bill_id": ocd_bill_id,
         "gov_id": key["gov_id"],
         "jurisdiction": key["jurisdiction"].upper(),
         "session": key["session"],

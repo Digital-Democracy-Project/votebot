@@ -130,11 +130,22 @@ class TestBrokerFailures:
             await content.resolve_content(url=self.URL)
         assert err.value.status_code == 502
 
-    async def test_an_answer_without_an_id_is_404(self, monkeypatch):
-        monkeypatch.setattr(content, "_broker_get", AsyncMock(return_value={}))
+    @pytest.mark.parametrize(
+        "answer",
+        [{}, {"bill_openstates_id": None}, {"bill_openstates_id": ""}, {"bill_openstates_id": "  "},
+         {"bill_openstates_id": "ocd-bill/not-a-bare-uuid"}],
+    )
+    async def test_a_200_without_a_valid_bare_uuid_is_a_bad_gateway_not_a_miss(self, monkeypatch, answer):
+        # A real miss is the broker's own 404; a 200 that cannot be used breaks its contract.
+        monkeypatch.setattr(content, "_broker_get", AsyncMock(return_value=answer))
         with pytest.raises(HTTPException) as err:
             await content.resolve_content(url=self.URL)
-        assert err.value.status_code == 404
+        assert err.value.status_code == 502
+
+    async def test_the_id_is_normalised_to_the_lower_case_form_the_vectors_use(self, monkeypatch):
+        monkeypatch.setattr(content, "_broker_get", AsyncMock(return_value={"bill_openstates_id": BILL.upper()}))
+        result = await content.resolve_content(url=self.URL)
+        assert result["ocd_bill_id"] == BILL
 
     async def test_unconfigured_broker_is_503_not_a_silent_fallback(self, monkeypatch):
         monkeypatch.setattr(content, "get_settings", lambda: _settings(broker=""))

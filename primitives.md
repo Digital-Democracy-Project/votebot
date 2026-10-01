@@ -43,8 +43,8 @@ The single retrieval orchestrator. **Do not add raw Pinecone calls outside this 
   - `_build_filters(page_context, query) -> dict` — builds Pinecone filter from page context; use this, never build filters inline. A bill is pinned by `webflow_id` on the legacy index and by `ocd_bill_id` on the canonical-id index (VOTEBOT-8)
   - `_ocd_mode` (property) — True when `settings.bill_filter_key == "ocd_bill_id"`. **The one switch**: it follows the index name, so there is no second setting to forget on rollback
   - `_identity_filter(filters) -> dict` — the bill-pinning part of a built filter, for follow-up queries on other document types (votes). Use it instead of reading `filters["webflow_id"]` directly
-  - `_legislative_scope(page_context) -> dict` — `jurisdiction` (upper-case code) + `session_code` for a general page that names them; canonical-id index only, applied to `bill-text`/`bill-votes` only
-  - `_lookup_ocd_bill_context(bill_info, page_context) -> PageContext | None` — canonical-id counterpart of `_lookup_bill_slug`: a bill named on a general page, found by `gov_id` + jurisdiction (+ session)
+  - `_legislative_scope(page_context) -> dict` — `jurisdiction` (upper-case code) + `session_code` for a general page that names them; canonical-id index only. Governs `bill-text`/`bill-votes` **only**: the scoped query returns that jurisdiction's, and the unscoped query excludes those two types (`$nin`), so other jurisdictions' bills stay out while legislators/organizations (no `session_code`) stay in
+  - `_lookup_ocd_bill_context(bill_info, page_context) -> PageContext | None` — canonical-id counterpart of `_lookup_bill_slug`: a bill named on a general page, found by `gov_id` + jurisdiction (+ session). **Declines to guess** when the name matches more than one bill (every session has its own "HB 1"; session codes do not sort reliably as text, e.g. "2026D" after "2026")
   - `_deduplicate(results) -> list[SearchResult]`
   - `retrieve_for_bill(query, bill_id, jurisdiction) -> RetrievalResult`
   - `retrieve_for_legislator(query, legislator_id, jurisdiction) -> RetrievalResult`

@@ -46,6 +46,20 @@ def _hit(doc_type: str, **metadata) -> SearchResult:
     )
 
 
+def _matches(metadata: dict, flt: dict) -> bool:
+    """Pinecone's metadata filter semantics for the operators this code uses: equality, $in, $nin."""
+    for key, want in (flt or {}).items():
+        have = metadata.get(key)
+        if isinstance(want, dict):
+            if "$in" in want and have not in want["$in"]:
+                return False
+            if "$nin" in want and have in want["$nin"]:
+                return False
+        elif have != want:
+            return False
+    return True
+
+
 class TestBillFilterKey:
     def test_legacy_index_filters_by_webflow_id(self):
         assert _settings(LEGACY_PINECONE_INDEX_NAME).bill_filter_key == "webflow_id"
@@ -164,10 +178,7 @@ class TestRetrieveOnCanonicalIndex:
 
         def respond(f):
             if "gov_id" in f:
-                return [
-                    _hit("bill-text", ocd_bill_id=BILL, session_code="2025", gov_id="HB 363"),
-                    _hit("bill-text", ocd_bill_id="older", session_code="2024", gov_id="HB 363"),
-                ]
+                return [_hit("bill-text", ocd_bill_id=BILL, session_code="2025", gov_id="HB 363")]
             return [_hit(f["document_type"], ocd_bill_id=f["ocd_bill_id"])] if f.get("ocd_bill_id") else []
 
         svc = _service(queries=calls, respond=respond)
@@ -175,8 +186,41 @@ class TestRetrieveOnCanonicalIndex:
 
         lookup = next(f for f in calls if f and "gov_id" in f)
         assert lookup == {"document_type": "bill-text", "gov_id": "HB 363", "jurisdiction": "FL"}
-        assert result.filters_applied == {"ocd_bill_id": BILL}  # the most recent session won
+        assert result.filters_applied == {"ocd_bill_id": BILL}
         assert result.chunks
+
+    async def test_a_bill_matching_several_sessions_is_not_guessed(self):
+        # Every session has its own "HB 363", and "2026D" sorts after "2026" as text, so picking
+        # one would risk answering about the wrong bill.
+        calls: list = []
+
+        def respond(f):
+            if f and "gov_id" in f:
+                return [
+                    _hit("bill-text", ocd_bill_id=BILL, session_code="2026", gov_id="HB 363"),
+                    _hit("bill-text", ocd_bill_id="special", session_code="2026D", gov_id="HB 363"),
+                ]
+            return []
+
+        svc = _service(queries=calls, respond=respond)
+        result = await svc.retrieve("What does Florida HB 363 do?", PageContext(type="general"))
+        assert result.filters_applied == {}  # stayed a general query, no bill chosen
+        assert not any(f and f.get("ocd_bill_id") for f in calls)
+
+    async def test_a_page_that_names_its_session_disambiguates_the_bill(self):
+        calls: list = []
+
+        def respond(f):
+            if "gov_id" in f:
+                assert f["session_code"] == "2026"  # the lookup is narrowed to the page's session
+                return [_hit("bill-text", ocd_bill_id=BILL, session_code="2026", gov_id="HB 363")]
+            return [_hit(f["document_type"], ocd_bill_id=f["ocd_bill_id"])] if f.get("ocd_bill_id") else []
+
+        svc = _service(queries=calls, respond=respond)
+        result = await svc.retrieve(
+            "What does Florida HB 363 do?", PageContext(type="general", session="2026")
+        )
+        assert result.filters_applied == {"ocd_bill_id": BILL}
 
     async def test_named_bill_without_any_jurisdiction_is_not_guessed(self):
         calls: list = []
@@ -203,6 +247,23 @@ class TestRetrieveOnCanonicalIndex:
         }
         # The scoped bill text leads, and the unscoped query still runs so legislators survive.
         assert [c.metadata["document_type"] for c in result.chunks] == ["bill-text", "legislator"]
+
+    async def test_other_jurisdictions_bill_text_is_kept_out_of_a_scoped_general_page(self):
+        pool = [
+            _hit("bill-text", ocd_bill_id=BILL, jurisdiction="FL", session_code="2026"),
+            _hit("bill-text", ocd_bill_id="tx-bill", jurisdiction="TX", session_code="2026"),
+            _hit("bill-votes", ocd_bill_id="tx-votes", jurisdiction="TX", session_code="2026"),
+            _hit("legislator", legislator_id="p1", jurisdiction="FL"),
+            _hit("organization", organization_id="o1"),
+        ]
+        # A store that honours the filter exactly as Pinecone does.
+        svc = _service(respond=lambda f: [c for c in pool if _matches(c.metadata, f)])
+
+        result = await svc.retrieve("housing", PageContext(type="general", jurisdiction="FL", session="2026"))
+
+        ids = [c.metadata.get("ocd_bill_id") or c.metadata.get("legislator_id") or c.metadata.get("organization_id")
+               for c in result.chunks]
+        assert ids == [BILL, "p1", "o1"]  # FL bill text first; legislators and orgs survive; TX bills are out
 
     async def test_general_page_without_scope_issues_one_query(self):
         calls: list = []

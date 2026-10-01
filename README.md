@@ -184,7 +184,7 @@ Resolve a DDP URL to content metadata for the chat widget.
 
 Two kinds of bill URL are understood:
 
-- **ddp-next** (`/bills/{broker_id}` or `/bills/{jurisdiction}/{session}/{gov_id}`): resolved through ddp-broker-py (`DDP_BROKER_API_ROOT`) to the bill's OpenStates id. ddp-broker-py has no bill-detail endpoint, so this uses its public `/api/bills/{id}/scorecard/` (broker id to jurisdiction, session and gov_id) and `/api/bills/resolve/` (those three to the bare OpenStates UUID). The result is the page context the widget sends back with each message; retrieval filters on its `ocd_bill_id` when the index is the canonical-id one (see `PINECONE_INDEX_NAME`). Errors: 404 unknown bill, 502 broker problem, 503 `DDP_BROKER_API_ROOT` unset.
+- **ddp-next** (`/bills/{broker_id}` or `/bills/{jurisdiction}/{session}/{gov_id}`): resolved through ddp-broker-py (`DDP_BROKER_API_ROOT`) to the bill's OpenStates id. ddp-broker-py has no bill-detail endpoint, so this uses its public `/api/bills/{id}/scorecard/` (broker id to jurisdiction, session and gov_id) and `/api/bills/resolve/` (those three to the bare OpenStates UUID). The result is the page context the widget sends back with each message; retrieval filters on its `ocd_bill_id` when the index is the canonical-id one (see `PINECONE_INDEX_NAME`). Errors: 404 unknown bill (the broker said so), 502 broker problem or a broker answer without a valid bare UUID, 503 `DDP_BROKER_API_ROOT` unset.
 - **Webflow** (`/bills/{slug}`): looked up in the Webflow CMS as before, returning `webflow_id`. Kept until Webflow is retired, and it is what a rollback to `votebot-large` relies on.
 
 **Example (Webflow):**
