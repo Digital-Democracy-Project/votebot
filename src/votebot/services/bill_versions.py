@@ -39,6 +39,22 @@ class BillVersion:
     ordinal: int | None
 
 
+@dataclass(frozen=True)
+class VersionDiff:
+    """The stored diff of one version against the one before it, as api-v3 reports it."""
+
+    document_id: str
+    note: str
+    date: str
+    stage: str
+    from_note: str | None  # the previous classifiable version
+    from_document_id: str | None
+    text: str
+
+
+MAX_DIFF_VERSIONS = 3  # a named stage ("the amendments") can match several versions
+
+
 def current_version(versions: list[BillVersion] | None) -> BillVersion | None:
     """The bill's current version: the latest classifiable one, and only if it can be filtered on.
 
@@ -81,7 +97,13 @@ class BillVersionService:
         if data is None:
             self._cache[ocd_bill_id] = (time.monotonic(), None)
             return None
-        versions = [
+        versions = self._parse_versions(data)
+        self._cache[ocd_bill_id] = (time.monotonic(), versions)
+        return versions
+
+    @staticmethod
+    def _parse_versions(data: dict) -> list[BillVersion]:
+        return [
             BillVersion(
                 document_id=(
                     str(v["archived_document_id"]) if v.get("archived_document_id") is not None else None
@@ -93,8 +115,53 @@ class BillVersionService:
             )
             for v in data.get("versions") or []
         ]
-        self._cache[ocd_bill_id] = (time.monotonic(), versions)
-        return versions
+
+    async def get_diffs(
+        self, ocd_bill_id: str, stages: tuple[str, ...] = (), dates: tuple[str, ...] = ()
+    ) -> list[VersionDiff] | None:
+        """What changed in a version, read live from api-v3's stored `diff_from_previous_version`.
+
+        Diffs are not embedded (the index holds version text only), so a "what changed" question
+        reads them here. The current version's diff by default, or the versions a question names by
+        stage and/or date. api-v3 stores a diff only for a bill's latest version and the one before
+        it, so an older named version may have none (it is then simply absent). Not cached: diffs
+        can be large and the question is rare. None when api-v3 cannot be asked or has no answer.
+        """
+        if not self.settings.use_ddp_openstates_replica:
+            return None
+        data = await self._fetch(ocd_bill_id)
+        if data is None:
+            return None
+        raw = [r for r in data.get("versions") or [] if isinstance(r, dict)]
+        versions = self._parse_versions({"versions": raw})
+        lineage = [(v, r) for v, r in zip(versions, raw, strict=True) if v.stage != STAGE_UNKNOWN and v.document_id]
+        if stages or dates:
+            chosen = [
+                i for i, (v, _) in enumerate(lineage)
+                if (not stages or v.stage in stages) and (not dates or v.date in dates)
+            ]
+        else:
+            current = current_version(versions)
+            chosen = [i for i, (v, _) in enumerate(lineage) if current and v.document_id == current.document_id]
+        diffs = []
+        for i in chosen[:MAX_DIFF_VERSIONS]:
+            version, record = lineage[i]
+            text = record.get("diff_from_previous_version")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            previous = lineage[i - 1][0] if i > 0 else None
+            diffs.append(
+                VersionDiff(
+                    document_id=version.document_id,
+                    note=version.note,
+                    date=version.date,
+                    stage=version.stage,
+                    from_note=previous.note if previous else None,
+                    from_document_id=previous.document_id if previous else None,
+                    text=text,
+                )
+            )
+        return diffs
 
     async def _fetch(self, ocd_bill_id: str) -> dict | None:
         try:

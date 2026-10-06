@@ -38,7 +38,7 @@ The single retrieval orchestrator. **Do not add raw Pinecone calls outside this 
     - Phase 3: removed (stale bill-history)
     - Phase 4a: org positions (`bill` + `organization`)
     - Phase 4b: vote records (`bill-votes`, `legislator-votes`)
-    - Phase 5: what changed, **only on changelog intent**. Legacy index: `bill-changelog` + webflow_id. Canonical-id index (VOTEBOT-10): `bill-version-diff` (api-v3's stored `diff_from_previous_version`, embedded verbatim) under the same version scope as the text
+    - Phase 5: what changed, **only on changelog intent**. Legacy index: `bill-changelog` + webflow_id. Canonical-id index: **no search**: `_live_version_diffs(ocd_bill_id, query)` reads api-v3's stored `diff_from_previous_version` live (`BillVersionService.get_diffs`) under the same version scope as the text (current version, or the stage/date a query names), as synthetic `bill-version-diff` chunks (`source: "OpenStates (live)"`, labelled with both versions, capped at `DIFF_MAX_CHARS` per version) that `format_retrieved_chunks` groups as before
   - `_retrieve_organization_priority(query, filters, max_chunks) -> list[SearchResult]`
   - `_build_filters(page_context, query) -> dict` — builds Pinecone filter from page context; use this, never build filters inline. A bill is pinned by `webflow_id` on the legacy index and by `ocd_bill_id` on the canonical-id index (VOTEBOT-8). An organization is pinned by `webflow_id`/`slug` on the legacy index and by `broker_org_id` (an all-digit `page_context.id`, else the broker `slug`) on the canonical-id one (VOTEBOT-15, SYNC-91)
   - `_version_scope(ocd_bill_id, query) -> (current_document_id, version_filter)` — canonical-id index only. "Current" is **looked up** (via `BillVersionService`), never stored on vectors. Default filter `{"document_id": <current>}`; a query naming a stage/date gets `version_stage`/`version_date` `$in` filters instead; unknown current → no version filter (all versions, each labelled, and the formatter says no version is current). Applied to `bill-text`, `bill-version-diff` **and the "no typed results" fallback** — a version search is never widened to every version. A date counts as a version request only in a query that also says "version" or "draft"
@@ -55,7 +55,7 @@ The single retrieval orchestrator. **Do not add raw Pinecone calls outside this 
 - **`ExtractedBillInfo`** — `bill_prefix, bill_number, jurisdiction`. Properties: `bill_id`, `slug_pattern`
 - **`HybridRetrievalService`** — subclass of `RetrievalService`; keyword search stub, not yet implemented
 
-**Retrieval isolation rule**: `bill-text-history`, `bill-changelog` and `bill-version-diff` are invisible to all existing phases by design (explicit `document_type` filters). Only Phase 5 queries `bill-changelog` (legacy index) or `bill-version-diff` (canonical-id index), and only on changelog intent. Never add unfiltered fallback queries that could surface these types in normal responses.
+**Retrieval isolation rule**: `bill-text-history` and `bill-changelog` are invisible to all existing phases by design (explicit `document_type` filters). Only Phase 5 queries `bill-changelog` (legacy index), and only on changelog intent; on the canonical-id index `bill-version-diff` is not in the index at all and Phase 5 reads it live from api-v3. Never add unfiltered fallback queries that could surface these types in normal responses.
 
 ## Intent classification (`utils/intent.py`)
 
@@ -130,6 +130,14 @@ Bidirectional CMS fetch used at query time for RAG augmentation/verification. Al
 - **`LegislatorDetailsResult`** — `name, party, chamber, district, jurisdiction, score, slug, openstates_id, found` (field is `score`, not `ddp_score`; no `webflow_id` field — use `slug`)
 - **`OrgDetailsResult`** — `name, org_type, website, description, slug, found`
 - **Module-level formatters** (imported by `core/agent.py` for context injection, labeled "Authoritative Source — Webflow CMS"): `format_org_positions_context(BillOrgPositionsResult)`, `format_org_bill_positions_context(OrgBillPositionsResult)`, `format_bill_verification_context(BillDetailsResult)`, `format_legislator_verification_context(LegislatorDetailsResult)`, `format_org_verification_context(OrgDetailsResult)` — all return `""` when `result.found` is `False`
+
+## Legislators and version diffs, live from api-v3 (`services/legislators.py`, `services/bill_versions.py`, VOTEBOT-15)
+
+Canonical-id index: legislators and version diffs are not embedded (SYNC-94; 2026-10-05), so both are read from api-v3 through `openstates_base_url`/`openstates_headers`.
+
+- **`LegislatorLookupService`** — `find_by_id(person_id)`, `find_by_name(name, jurisdiction=None)` over `GET /people` (`include=offices&include=links`); None on any problem. `Legislator` (`current` = has a current role), `format_legislators(people, asked)` (one profile, or a "several match, ask which" list; current members preferred over former).
+- **`VoteBotAgent._legislator_context_from_api_v3(message, page_context)`** — legislator page: by `ocd-person/...` id, else title + jurisdiction; bill page: a name in the message; other pages only with a cue word (`LEGISLATOR_CUES`). Used by both the streaming and non-streaming paths on the canonical index; the legacy index keeps `_prefetch_legislator_info`. `_candidate_person_name(message)` is the shared name guess.
+- **`BillVersionService.get_diffs(ocd_bill_id, stages=(), dates=()) -> list[VersionDiff] | None`** — stored `diff_from_previous_version` for the current version (default) or the named stage/date, with the predecessor's label; not cached; at most `MAX_DIFF_VERSIONS`. api-v3 stores diffs only for the latest version and the one before it.
 
 ## Broker lookups and links to our pages (`services/broker_lookup.py`, `utils/ddp_urls.py`, VOTEBOT-15)
 
@@ -250,7 +258,7 @@ Same index and namespace as DDP-Sync (`votebot-large` today; `ddp-knowledge-base
 | `bill-text` | Phase 1 | Legacy index: current legislative text, overwritten each version by DDP-Sync. Canonical-id index: **one document per version** (`bill-text:{ocd_bill_id}:{document_id}`), filtered to the current version by default |
 | `bill-text-history` | **Never retrieved by VoteBot** | Permanent historical text; stored for future use |
 | `bill-changelog` | Phase 5 (changelog intent only) | LLM-generated diffs; requires `webflow_id` filter |
-| `bill-version-diff` | Phase 5 (changelog intent only; canonical-id index) | api-v3's stored diff against the previous version, embedded verbatim, labelled with `from_version_note`/`from_version_date`/`from_document_id`; replaces `bill-changelog`. None for `unknown`-stage versions |
+| `bill-version-diff` | **Not embedded** (2026-10-05); Phase 5 reads it live (changelog intent only; canonical-id index) | api-v3's stored diff against the previous version, labelled with `from_version_note`/`from_document_id`; replaces `bill-changelog`. Only the latest version and the one before it have one; none for `unknown`-stage versions |
 | `bill-votes` | Phase 4b | Vote records per bill |
 | `legislator` | Standard retrieval | Legislator profiles |
 | `legislator-votes` | Phase 4b | Reverse index: per-legislator voting history |

@@ -52,6 +52,11 @@ CODES_THAT_ARE_WORDS = frozenset({"us", "ma", "al"})
 # can be filled by one session's and never see the other's, defeating the ambiguity check.
 BILL_LOOKUP_TOP_K = 100
 
+# A live "what changed" diff is cut to this much per version, in chunks of this size, so a whole-bill
+# rewrite cannot flood the prompt.
+DIFF_MAX_CHARS = 12000
+DIFF_CHUNK_CHARS = 4000
+
 
 @dataclass
 class ExtractedBillInfo:
@@ -660,10 +665,10 @@ class RetrievalService:
         changelog_results = []
         changelog_filter = None
         if is_changelog_query and self._ocd_mode:
-            # Canonical-id index: the change is api-v3's stored diff, embedded verbatim as one
-            # `bill-version-diff` document per version (labelled with both versions), under the
-            # same version scope as the text: the current version's diff unless a version is named.
-            changelog_filter = {**filters, **(version_filter or {}), "document_type": "bill-version-diff"}
+            # Canonical-id index: diffs are not embedded; the change is api-v3's stored diff, read
+            # live under the same version scope as the text (the current version's diff unless a
+            # version is named) and labelled with both versions.
+            changelog_results = await self._live_version_diffs(filters.get("ocd_bill_id"), query)
         elif is_changelog_query and filters.get("webflow_id"):
             changelog_filter = {"document_type": "bill-changelog", "webflow_id": filters["webflow_id"]}
         if changelog_filter:
@@ -1166,6 +1171,53 @@ class RetrievalService:
         )
 
         return filters
+
+    async def _live_version_diffs(self, ocd_bill_id: str | None, query: str) -> list[SearchResult]:
+        """The stored diffs for a "what changed" question, as `bill-version-diff` chunks.
+
+        Read from api-v3 (nothing is searched in the index). Long diffs are cut to
+        `DIFF_MAX_CHARS` per version, in chunks, with a note saying so. Any failure is no chunks:
+        the answer then says it cannot show the change, as the prompt already requires.
+        """
+        if not ocd_bill_id:
+            return []
+        requested = detect_version_request(query)
+        try:
+            diffs = await self.bill_versions.get_diffs(
+                ocd_bill_id,
+                stages=tuple(requested.stages) if requested else (),
+                dates=tuple(requested.dates) if requested else (),
+            )
+        except Exception as e:  # noqa: BLE001 -- a lookup problem must cost the diff, not the answer
+            logger.warning("Could not read version diffs from api-v3", ocd_bill_id=ocd_bill_id, error=str(e))
+            return []
+        chunks: list[SearchResult] = []
+        for diff in diffs or []:
+            text = diff.text
+            truncated = len(text) > DIFF_MAX_CHARS
+            if truncated:
+                text = text[:DIFF_MAX_CHARS] + f"\n[Diff truncated: first {DIFF_MAX_CHARS} of {len(diff.text)} characters]"
+            pieces = [text[i : i + DIFF_CHUNK_CHARS] for i in range(0, len(text), DIFF_CHUNK_CHARS)]
+            for n, piece in enumerate(pieces):
+                chunks.append(
+                    SearchResult(
+                        id=f"bill-version-diff:{ocd_bill_id}:{diff.document_id}-live-{n}",
+                        content=piece,
+                        score=1.0,
+                        metadata={
+                            "document_type": "bill-version-diff",
+                            "source": "OpenStates (live)",
+                            "ocd_bill_id": ocd_bill_id,
+                            "document_id": diff.document_id,
+                            "version_note": diff.note,
+                            "version_date": diff.date,
+                            "version_stage": diff.stage,
+                            **({"from_version_note": diff.from_note} if diff.from_note else {}),
+                            **({"from_document_id": diff.from_document_id} if diff.from_document_id else {}),
+                        },
+                    )
+                )
+        return chunks
 
     def _link_to_ddp_pages(self, chunks: list[SearchResult]) -> list[SearchResult]:
         """Point bill chunks at their page on our site (canonical-id index, `DDP_SITE_BASE_URL` set).

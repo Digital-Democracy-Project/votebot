@@ -26,6 +26,7 @@ from votebot.services.broker_lookup import (
     format_org_details,
 )
 from votebot.services.bill_votes import BillVotesService
+from votebot.services.legislators import LegislatorLookupService, format_legislators
 from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
 from votebot.services.openstates_client import openstates_base_url, openstates_headers
 from votebot.services.web_search import WebSearchService, WebSearchResult
@@ -44,6 +45,14 @@ from votebot.utils.intent import (
 )
 
 logger = structlog.get_logger()
+
+
+# A word that says the message is about a legislator, so a name in it is worth looking up.
+LEGISLATOR_CUES = re.compile(
+    r"(?<!\w)(senators?|sen\.|representatives?|reps?\.|congress(?:man|men|woman|women|person|people)|legislators?|"
+    r"assembly(?:man|woman|member)s?|delegates?|lawmakers?|speaker)(?!\w)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -101,6 +110,7 @@ class VoteBotAgent:
         self.bill_votes = BillVotesService(self.settings)
         self.webflow_lookup = WebflowLookupService(self.settings)
         self.broker_lookup = BrokerLookupService(self.settings)
+        self.legislators = LegislatorLookupService(self.settings)
 
     def _normalize_button(self, button: str | None) -> str | None:
         """Apply the feature flag and validate the button type.
@@ -627,6 +637,11 @@ class VoteBotAgent:
         # 4. vote_verification_context (OpenStates votes)
         # 5. retrieved_context (RAG results)
         full_context = retrieved_context
+        if self.settings.bill_filter_key == "ocd_bill_id":
+            # Legislators are not in the canonical-id index: their facts come live from api-v3
+            legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
+            if legislator_info_context:
+                full_context = f"{legislator_info_context}\n\n{full_context}"
         if vote_verification_context:
             # Put verification context first - it's the authoritative source
             full_context = f"{vote_verification_context}\n\n{full_context}"
@@ -947,10 +962,12 @@ class VoteBotAgent:
 
         # Step 2c: Pre-fetch legislator info if query mentions a person on a bill page
         legislator_info_context = ""
-        if page_context and page_context.type == "bill":
+        if self.settings.bill_filter_key == "ocd_bill_id":
+            legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
+        elif page_context and page_context.type == "bill":
             legislator_info_context = await self._prefetch_legislator_info(message)
-            if legislator_info_context:
-                logger.info("Pre-fetched legislator info for streaming")
+        if legislator_info_context:
+            logger.info("Pre-fetched legislator info for streaming")
 
         # Step 2d: If user is disputing/verifying vote info, fetch directly from OpenStates
         vote_verification_context = ""
@@ -2322,6 +2339,50 @@ class VoteBotAgent:
 
         return None
 
+    @staticmethod
+    def _candidate_person_name(message: str) -> str | None:
+        """A person's name guessed from a message: its capitalised words that are not common ones
+        (e.g. "How did Ashley Moody vote?" -> "Ashley Moody"), or None."""
+        common_words = {
+            "how", "did", "what", "about", "the", "this", "vote", "on", "and",
+            "senator", "rep", "representative", "congressman", "congresswoman",
+            "she", "he", "they", "is", "a", "us", "u.s."
+        }
+        name_parts = [w for w in message.split() if len(w) > 1 and w[0].isupper() and w.lower() not in common_words]
+        return " ".join(name_parts) or None
+
+    async def _legislator_context_from_api_v3(self, message: str, page_context: PageContext | None) -> str:
+        """Legislator facts read live from api-v3 (canonical-id index: legislators are not embedded).
+
+        A legislator page is answered about its legislator: by OpenStates person id when
+        `page_context.id` is one ("ocd-person/..."), else by the page's title (the name). On other
+        pages a name in the message is looked up on a bill page (as before) or when the message
+        has a legislator cue ("senator", "representative", ...), so an ordinary question that happens
+        to contain a capitalised word is not sent to api-v3. Several matches are listed for the
+        model to ask which one; a failure or a slow api-v3 costs the context, never the answer.
+        """
+        page_type = page_context.type if page_context else "general"
+
+        async def lookup() -> str:
+            if page_type == "legislator":
+                person_id = page_context.id if (page_context.id or "").startswith("ocd-person/") else None
+                if person_id:
+                    person = await self.legislators.find_by_id(person_id)
+                    return format_legislators([person] if person else None)
+                name, jurisdiction = page_context.title, page_context.jurisdiction
+            else:
+                wanted = page_type == "bill" or LEGISLATOR_CUES.search(message)
+                name, jurisdiction = (self._candidate_person_name(message) if wanted else None), None
+            if not name:
+                return ""
+            return format_legislators(await self.legislators.find_by_name(name, jurisdiction), asked=name)
+
+        try:
+            return await asyncio.wait_for(lookup(), BUDGET_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning("Legislator lookup took too long; answering without it")
+            return ""
+
     async def _prefetch_legislator_info(self, message: str) -> str:
         """
         Pre-fetch legislator info from OpenStates when a name is mentioned.
@@ -2337,26 +2398,9 @@ class VoteBotAgent:
         """
         import httpx
 
-        # Extract potential name from message
-        common_words = {
-            "how", "did", "what", "about", "the", "this", "vote", "on", "and",
-            "senator", "rep", "representative", "congressman", "congresswoman",
-            "she", "he", "they", "is", "a", "us", "u.s."
-        }
-
-        # Get capitalized words that might be names
-        words = message.split()
-        name_parts = []
-        for w in words:
-            # Keep capitalized words that aren't common
-            if len(w) > 1 and w[0].isupper() and w.lower() not in common_words:
-                name_parts.append(w)
-
-        if not name_parts:
+        search_name = self._candidate_person_name(message)
+        if not search_name:
             return ""
-
-        # Construct search name (e.g., "Ashley Moody")
-        search_name = " ".join(name_parts)
 
         logger.info("Looking up legislator info", name=search_name)
 
