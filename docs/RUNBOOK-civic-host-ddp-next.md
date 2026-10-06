@@ -367,7 +367,7 @@ organizations from the broker, and the console shows no CORS error. In `docker l
   pressure appears, an answer comes from the wrong index, or Slack/Webflow activity shows up on the new copy.
 - **Rollback**: point the new site's `wsUrl` back to the old copy and purge the cache. Nothing on the old server
   was changed, so there is nothing to restore. To remove the new copy entirely: `docker compose -f
-  /opt/votebot-ddp-next/docker-compose.yml down`, revert the broker nginx change and recreate nginx (3.7).
+  infrastructure/docker/docker-compose.prod.yml down`, revert the broker nginx change and recreate nginx (3.7).
 
 ## 8. Checklist for the ticket
 
