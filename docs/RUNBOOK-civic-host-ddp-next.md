@@ -9,12 +9,26 @@ Two decisions are pending with Ramon and are written up with a recommendation, n
 [a second instance](#3-second-instance-on-ddp-knowledge-base-decision-pending-ramon) and
 [rate limiting](#4-rate-limiting-decision-pending-ramon).
 
-## 0. Order of work
+## 0. Order of work and ground rules
 
 1. Section 1 (read-only checks). Stop and report if anything differs from what section 2 assumes.
 2. Section 2 (changes to the existing instance), one at a time, each followed by its check.
-3. Sections 3 and 4 only after Ramon decides.
+3. Sections 3 and 4 **only after Ramon's decision line in that section is filled in**. Until then they are
+   "do not execute".
 4. Run `scripts/smoke_ws.py` (README, "WebSocket Smoke Test") against each endpoint you changed.
+
+Ground rules for every change on the host:
+
+- **Back up first, with a timestamp**, and keep the backup name in the ticket:
+  `sudo cp -a /etc/nginx/sites-enabled/<file> /etc/nginx/<file>.bak-$(date +%Y%m%d-%H%M)`, and
+  `cp -a ~/votebot/.env ~/votebot/.env.bak-$(date +%Y%m%d-%H%M)`.
+- **`sudo nginx -t` before every `sudo systemctl reload nginx`**, and after the reload re-check that the existing
+  production routes of 1.1 still answer from :8000. A reload with a bad config keeps the old one, but a good
+  config with a wrong `location` does not announce itself.
+- **Abort and roll back** (restore the backups, `nginx -t`, reload/restart, re-run 1.1's curls) if: a previously
+  working route in 1.1 changes status, `journalctl -u votebot` shows errors after a restart that were not there
+  before, the service does not come back within a minute, or free memory/swap drops as in 3.1.
+- The prod agent (or whoever runs this) may abort at any point; report what was and was not changed.
 
 ## 1. Read-only checks
 
@@ -120,7 +134,9 @@ origin check on `/ws/chat`; only `/content/resolve` and `/features` are.
 ALLOWED_ORIGINS=["https://digitaldemocracyproject.org","https://votebot.digitaldemocracyproject.org","https://digital-democracy-project.webflow.io","https://dev.digitaldemocracyproject.org"]
 ```
 
-(If the existing `.env` already sets it, start from its value, not from this one.) Restart, then check:
+(If the existing `.env` already sets it, start from its value, not from this one.) At cutover add the new site's
+production origin (exact scheme and host, **to be supplied by NEXT-36 / Ramon; none is guessed here**) and keep the
+Webflow origins listed until Webflow is retired, so old and new coexist. Restart, then check:
 
 ```bash
 curl -si -H 'Origin: https://dev.digitaldemocracyproject.org' https://api.digitaldemocracyproject.org/votebot/v1/features | grep -i access-control
@@ -133,7 +149,9 @@ is guessed here), no trailing slash needed. It must serve the public `GET /api/b
 `GET /api/bills/resolve/`. Check before relying on it:
 
 ```bash
-curl -s "$DDP_BROKER_API_ROOT/api/bills/resolve/?jurisdiction=FL&session=2026&gov_id=HB%201"   # a UUID, or a 404 for an unknown bill
+# GET, public, no auth. Expect 200 {"bill_openstates_id": "<bare uuid>"}, or 404 {"detail": "Bill not found"}
+curl -s -w '\n%{http_code}\n' "$DDP_BROKER_API_ROOT/api/bills/resolve/?jurisdiction=FL&session=2026&gov_id=HB%201"
+curl -s -o /dev/null -w '%{http_code}\n' "$DDP_BROKER_API_ROOT/api/bills/<a real broker bill id>/scorecard/"   # 200
 ```
 
 Then `GET /votebot/v1/content/resolve?url=https://dev.digitaldemocracyproject.org/explore/FL/2026/HB%201`
@@ -155,9 +173,23 @@ Rollback for any of 2.1 to 2.3: restore the previous `.env` line / file and rest
 
 ## 3. Second instance on `ddp-knowledge-base` (decision pending Ramon)
 
+**Decision (record here, and do not execute this section until it is filled in):** ______ (Ramon), date ______.
+
 **Recommendation: yes.** ddp-next and acceptance testing use the new index while the production instance stays
 on `votebot-large` for Webflow, so the cutover (SYNC-92) is a switch of one nginx path or one `.env` line, with
-the production instance as the untouched rollback.
+the production instance as the rollback. "Untouched" means its code, config and index are not changed; it still
+shares the host (CPU, memory, nginx, Redis server), which is what 3.1 guards.
+
+### 3.1 Preflight (read-only) and worker count
+
+```bash
+free -m; swapon --show; df -h / ~/votebot; nproc; ps -o pid,rss,cmd -C uvicorn      # RSS per worker
+```
+
+Start the second instance with **one uvicorn worker** (`--workers 1`) even if production runs two: acceptance
+traffic is small, and a second pair of workers on a small host is the likeliest way this change hurts
+production. Abort if available memory after starting it is under about 20% or swap is growing. Raise the count
+only at cutover if load needs it.
 
 Design, using the existing code and config only (no code change):
 
@@ -181,6 +213,12 @@ Webflow), and a trap for anything that must differ: set those explicitly in `.en
 (`SLACK_APP_TOKEN=` overrides production's token, an absent line does not). After starting, read the effective
 values from the startup log, not from the file.
 
+What VoteBot writes to outside itself, so what sharing credentials can affect: Slack (handoff threads) and its
+own log files. Pinecone is read-only from VoteBot, `WEBFLOW_SCHEDULER_API_KEY` is not read by any VoteBot code path
+(README), and Webflow is only read at query time. Redis: the only pub/sub channels are `votebot:agent_events`
+(each worker delivers an event only for a session it owns, so a foreign instance's events are ignored) and
+`votebot:cache:invalidate` (idempotent deletes of slug keys); neither is isolated by db number and neither needs to be.
+
 Unit sketch (fill `<...>` from `systemctl cat votebot`; do not invent values):
 
 ```ini
@@ -201,10 +239,19 @@ SyslogIdentifier=votebot-next
 WantedBy=multi-user.target
 ```
 
-nginx, added to the `api.digitaldemocracyproject.org` server block, ddp-next only. A path prefix needs no DNS or
-certificate work, and the widget derives its HTTP base from `wsUrl` by cutting at `/ws`
-(`chat-widget/src/widget.js`, `resolveContextFromUrl`), so `wsUrl: 'wss://api.digitaldemocracyproject.org/next/ws/chat'`
-makes `/content/resolve` and `/features` go to `/next/votebot/v1/...`:
+nginx, added to the `api.digitaldemocracyproject.org` server block, ddp-next only (backup and `nginx -t` per
+section 0). A path prefix needs no DNS or certificate work, and the widget derives its HTTP base from `wsUrl` by
+cutting at `/ws` (`chat-widget/src/widget.js`, `resolveContextFromUrl`), so
+`wsUrl: 'wss://api.digitaldemocracyproject.org/next/ws/chat'` makes `/content/resolve` and `/features` go to
+`/next/votebot/v1/...`. Because `proxy_pass` has a URI part (`/`), nginx replaces the matched `/next/` with `/`:
+
+| Public URL | Port 8002 receives |
+|---|---|
+| `wss://api.../next/ws/chat?session_id=x` | `/ws/chat?session_id=x` |
+| `https://api.../next/votebot/v1/content/resolve?url=...` | `/votebot/v1/content/resolve?url=...` |
+| `https://api.../next/votebot/v1/features` | `/votebot/v1/features` |
+| anything not under `/next/` | unchanged: port 8000 |
+
 
 ```nginx
 location /next/ {
@@ -228,10 +275,20 @@ Verify, in order:
 ```bash
 sudo systemctl enable --now votebot-next
 journalctl -u votebot-next -n 40 --no-pager | grep -E 'VoteBot started'      # bill_filter_key=ocd_bill_id
+ss -ltnp | grep -E ':800[0-2]'                                               # 8002 is votebot-next only, 8000 unchanged
+# the effective environment of the running process (names and emptiness only, never print the tokens)
+sudo tr '\0' '\n' < /proc/$(systemctl show -p MainPID --value votebot-next)/environ \
+  | sed -E 's/^(SLACK_[A-Z_]+|[A-Z_]*(KEY|TOKEN))=.+/\1=<set>/' | grep -E '^(PINECONE_INDEX_NAME|REDIS_URL|QUERY_LOG_DIR|SLACK_[A-Z_]+|[A-Z_]*(KEY|TOKEN))='
 curl -s http://127.0.0.1:8002/votebot/v1/health/ready
 curl -s https://api.digitaldemocracyproject.org/next/votebot/v1/features
 python scripts/smoke_ws.py --url wss://api.digitaldemocracyproject.org/next/ws/chat --cases <real cases> --retrieval
 ```
+
+Prove which instance answered (a 200 alone does not): after a `/next/` request, `journalctl -u votebot-next -n 20`
+shows it and `journalctl -u votebot -n 20` does not. Then one browser check: open a page on the dev origin whose
+widget uses the `/next/` `wsUrl`, send a message, and confirm in the browser console/network tab that the
+`/content/resolve` call passes CORS and the socket opens, and that `journalctl -u votebot-next` logged it. There
+must be no Slack activity from this instance (its logs show no "Slack service started").
 
 `--retrieval` reads the index from the machine running the script, so run it on this host with `.env.next`
 loaded (it prints which index it used). **Prerequisite:** the index must contain embedded bills (SYNC-83,
@@ -250,26 +307,44 @@ unit stay available until the soak ends. Success criteria and rollback triggers 
 VoteBot's WebSocket has no limit of its own (no auth, no per-session or per-IP cap; session ids are chosen by
 the caller) and the new site is public. Every message costs OpenAI and Pinecone calls.
 
-**Recommendation: yes, at nginx, on connections only, now.** It is two directives, needs no code and no new
-service, and bounds the cheapest abuse (opening many sockets, hammering `/content/resolve`):
+**Decision (record here, and do not execute this section until it is filled in):** ______ (Ramon), date ______.
+
+**Recommendation: yes, at nginx, on the WebSocket handshake only, now.** Two things are limited: how often a
+client may open a socket (`limit_req` counts the upgrade request) and how many sockets it may hold open
+(`limit_conn`). No code, no new service. It is scoped to the WebSocket locations only, **not** to `/votebot/`,
+`/next/` as a whole or the widget file, so the widget's HTTP calls and static asset are never throttled:
 
 ```nginx
 # http { } level
-limit_req_zone  $binary_remote_addr zone=votebot_conn:10m rate=30r/m;   # new connections per client
+limit_req_zone  $binary_remote_addr zone=votebot_new:10m  rate=30r/m;   # new sockets per client
 limit_conn_zone $binary_remote_addr zone=votebot_open:10m;
+limit_req_status  429;
+limit_conn_status 429;
 
-# in the /ws/chat (and /next/) location
-limit_req  zone=votebot_conn burst=10 nodelay;
+# production: inside the existing `location /ws/chat { ... }`
+limit_req  zone=votebot_new burst=10 nodelay;    # nodelay: over the burst is rejected at once, never queued
 limit_conn votebot_open 10;
-limit_req_status 429;
+
+# second instance: its own exact location for the socket (listed before `location /next/`)
+location = /next/ws/chat {
+    proxy_pass http://127.0.0.1:8002/ws/chat;
+    # ...the same proxy_http_version / Upgrade / Connection / Host / X-Forwarded-* / proxy_read_timeout lines as /next/
+    limit_req  zone=votebot_new burst=10 nodelay;
+    limit_conn votebot_open 10;
+}
 ```
 
 Caveats to settle first:
 
 - **Client IP.** If the API sits behind Cloudflare, `$binary_remote_addr` is Cloudflare's address unless nginx
-  uses `real_ip` (`set_real_ip_from <Cloudflare ranges>; real_ip_header CF-Connecting-IP;`). Check `nginx -T`
-  for it; without it a limit applies to everyone at once. This is the first thing to verify.
-- **Messages on an open socket are not limited by this.** One connection can send many messages. Capping those
+  uses `real_ip` (`set_real_ip_from <each current Cloudflare range, IPv4 and IPv6, from cloudflare.com/ips>;
+  real_ip_header CF-Connecting-IP;`). Check `nginx -T` for it; without it the limit applies to everyone behind an
+  edge at once. Trust only those ranges, or a client can spoof the header and pick its own bucket. This is the
+  first thing to verify.
+- **Check after enabling:** open sockets normally from one browser (fine), then from a shell open 12 handshakes in
+  a minute (the extra ones get 429), and from a second network a normal connection still works. To disable:
+  remove the four lines, `nginx -t`, reload; VoteBot is not restarted.
+- **Messages on an open socket are not limited by this** (the limits above act on the handshake). One connection can send many messages. Capping those
   needs an application-level limit (a per-session or per-IP counter in `handle_user_message`, Redis-backed
   because of the two workers). That is real code, so it is deliberately **not** proposed here; open a ticket if
   logs (`QueryLogger`, per-visitor counts) show it is needed.
