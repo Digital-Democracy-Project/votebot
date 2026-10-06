@@ -43,11 +43,16 @@ def _raw(name="Ashley Moody", party="Republican", **extra):
     }
 
 
-def _service(monkeypatch, handler) -> LegislatorLookupService:
+def _service(monkeypatch, handler, **settings_overrides) -> LegislatorLookupService:
     monkeypatch.setattr(
         legislators_module.httpx, "AsyncClient", lambda **kw: REAL_CLIENT(transport=httpx.MockTransport(handler), **kw)
     )
-    settings = Settings(use_ddp_openstates_replica=True, ddp_openstates_api_root="https://api.test", _env_file=None)
+    settings = Settings(
+        use_ddp_openstates_replica=True,
+        ddp_openstates_api_root="https://api.test",
+        _env_file=None,
+        **settings_overrides,
+    )
     return LegislatorLookupService(settings)
 
 
@@ -105,6 +110,26 @@ class TestLookupService:
             raise httpx.ConnectError("down")
 
         assert await _service(monkeypatch, down).find_by_name("X") is None
+
+
+class TestAuthHeaderOnTheWire:
+    """A real call site sends exactly the shape DDP_OPENSTATES_AUTH_HEADER selects (api-v3 refuses Bearer)."""
+
+    async def test_x_api_key_mode_sends_only_x_api_key(self, monkeypatch):
+        from pydantic import SecretStr
+
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(200, json={"results": [_raw()]})
+
+        service = _service(
+            monkeypatch, handler, ddp_openstates_auth_header="x-api-key", ddp_openstates_bearer_token=SecretStr("api-v3-key")
+        )
+        await service.find_by_name("Moody")
+        assert seen[0].headers["x-api-key"] == "api-v3-key"
+        assert "authorization" not in seen[0].headers
 
 
 class TestMatchTotals:
