@@ -28,6 +28,10 @@
  *     }
  *   };
  * </script>
+ *
+ * A ddp-next bill page adds ocd_bill_id (the OpenStates bill UUID), plus session and url:
+ *     pageContext: { type: 'bill', id: 'HB 219', jurisdiction: 'FL', session: '2026',
+ *                    ocd_bill_id: '<uuid>' }
  */
 
 (function() {
@@ -322,6 +326,30 @@
     }
 
     /**
+     * Normalize an explicitly configured pageContext to the backend schema.
+     * Webflow field names are mapped (billId, jurisdictionIso2, sessionCode, session-code).
+     * ddp-next fields pass through when set: a bill page on the canonical index needs
+     * ocd_bill_id, or retrieval finds nothing. Unset ones are left out, so a Webflow embed
+     * sends the same payload as before.
+     * @param {Object} ctx - The configured pageContext
+     * @returns {Object} Page context in the shape the server reads
+     */
+    function normalizePageContext(ctx) {
+        var normalized = {
+            type: ctx.type,
+            title: ctx.title || null,
+            slug: ctx.slug || null,
+            id: ctx.id || ctx.billId || null,
+            jurisdiction: ctx.jurisdiction || ctx.jurisdictionIso2 || null,
+            session: ctx.session || ctx.sessionCode || ctx['session-code'] || null
+        };
+        ['ocd_bill_id', 'webflow_id', 'url'].forEach(function(key) {
+            if (ctx[key]) normalized[key] = ctx[key];
+        });
+        return normalized;
+    }
+
+    /**
      * Resolve the final page context from URL params, config, or auto-detection.
      * Priority: URL params > explicit config > autoDetect > general
      * @returns {Object|Promise<Object>} Final page context (may be a promise if ddp_url needs resolution)
@@ -339,16 +367,7 @@
 
         // 2. If explicit pageContext provided, use it (mobile app / Webflow embed mode)
         if (config.pageContext && config.pageContext.type) {
-            var ctx = config.pageContext;
-            // Normalize Webflow field names to backend schema
-            var normalized = {
-                type: ctx.type,
-                title: ctx.title || null,
-                slug: ctx.slug || null,
-                id: ctx.id || ctx.billId || null,
-                jurisdiction: ctx.jurisdiction || ctx.jurisdictionIso2 || null,
-                session: ctx.session || ctx.sessionCode || null
-            };
+            var normalized = normalizePageContext(config.pageContext);
             console.log('[DDPChat] Using explicit pageContext:', normalized);
             return normalized;
         }
@@ -372,6 +391,8 @@
         if (!oldCtx || !newCtx) return true;
         if (oldCtx.type !== newCtx.type) return true;
         if (newCtx.type !== 'general') {
+            // ddp-next pages have no slug, and a bill's id ("HB 1") repeats across states and sessions
+            if (oldCtx.ocd_bill_id && newCtx.ocd_bill_id) return oldCtx.ocd_bill_id !== newCtx.ocd_bill_id;
             if (oldCtx.slug && newCtx.slug) return oldCtx.slug !== newCtx.slug;
             if (oldCtx.id && newCtx.id) return oldCtx.id !== newCtx.id;
             if (oldCtx.webflow_id && newCtx.webflow_id) return oldCtx.webflow_id !== newCtx.webflow_id;

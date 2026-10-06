@@ -42,6 +42,16 @@ npm run build
 
 Output: `dist/ddp-chat.min.js`
 
+The built file is committed (`git add -f chat-widget/dist/ddp-chat.min.js`; `dist/` is gitignored). Without `npm install` the build skips terser, which is how the committed file has been produced, so it stays readable in diffs.
+
+### Tests
+
+```bash
+npm test
+```
+
+Runs `test/page-context.test.js` (page-context normalization and change detection) on Node's built-in test runner; no dependencies.
+
 ### Local Testing
 
 1. Start VoteBot server:
@@ -82,6 +92,21 @@ Pass the context explicitly when you know what content the user is viewing:
 </script>
 <script src="https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js" async></script>
 ```
+
+A ddp-next bill page (canonical index) must also pass the bill's OpenStates UUID, or retrieval finds nothing:
+
+```javascript
+pageContext: {
+    type: 'bill',
+    id: 'HB 219',
+    jurisdiction: 'FL',
+    session: '2026',            // or 'session-code' (Webflow's name); both are accepted
+    ocd_bill_id: '<bare OpenStates bill UUID>',
+    url: 'https://digitaldemocracyproject.org/explore/FL/2026/HB%20219'
+}
+```
+
+`ocd_bill_id`, `webflow_id` and `url` are passed through when set. Navigating between two bills is detected by `ocd_bill_id` when both pages have one, so pages without a slug still start a fresh session. `setPageContext()` sends the object you give it unchanged.
 
 **Welcome message:** "Welcome! I can answer detailed questions about **One Big Beautiful Bill Act (HR 1)**. You can also ask me about other bills, legislators, or Digital Democracy Project in general."
 
@@ -213,6 +238,8 @@ pageContext: {
     id: 'FL-HB-1234',
     title: 'Education Funding Act',
     jurisdiction: 'FL',
+    session: '2026',
+    ocd_bill_id: '<bare OpenStates bill UUID>',  // ddp-next bills
     url: 'https://example.com/bill/123'
 }
 ```
@@ -345,6 +372,16 @@ nohup sh -c 'PYTHONPATH=src uvicorn votebot.main:app --host 127.0.0.1 --port 800
 | WebSocket endpoint | wss://api.digitaldemocracyproject.org/ws/chat |
 | Content resolve API | https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url={URL} |
 
+### How a change reaches production
+
+What is known from the repo and past deploys:
+
+1. Edit `src/`, run `npm run build`, commit the source and `dist/ddp-chat.min.js` (`git add -f`), and push.
+2. Someone with host access updates the checkout on the EC2 host (`~/votebot`, a manual pull; there is no CI) and copies the bundle to `/var/www/votebot/`, as in Step 2 above.
+3. Purge the Cloudflare cache for `ddp-chat.min.js`; the file is cached and an old bundle keeps being served otherwise.
+
+**Not documented anywhere in this repo:** how `https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js` maps to a file on that host (which nginx `location` or `alias`, and from which directory). The votebot README says the `/votebot` alias in ddp-api was removed, so older descriptions of the widget going through ddp-api may be stale. VOTEBOT-14 includes reading the live nginx config; fill in the exact path here when it has.
+
 ### Production Checklist
 
 - [ ] Widget built with `npm run build`
@@ -406,7 +443,7 @@ dist/
 The `build.js` script:
 1. Reads CSS and inlines it as a JavaScript string
 2. Concatenates all JS modules in dependency order
-3. Minifies with terser
+3. Minifies with terser (only if `npm install` has been run)
 4. Outputs single file to `dist/ddp-chat.min.js`
 
 ### Testing Changes
