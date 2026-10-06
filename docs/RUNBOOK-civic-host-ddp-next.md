@@ -213,12 +213,27 @@ health check fails with `DisallowedHost` because Django rejects requests address
 `sudo install -d -o 1000 -g 1000 /opt/votebot-logs/queries`. Deploying is the same routine as the other projects:
 `cd /opt/votebot && git pull --ff-only`, `docker compose -f infrastructure/docker/docker-compose.prod.yml build`, then `... up -d`.
 
+**Preflight, before the first `up`** (each answers yes/no; stop on a no): no container already named `votebot-ddp-next` or
+`votebot-redis` (`docker ps -a --filter name=votebot`); the network exists (`docker network ls | grep ddp-broker-py_default`);
+`/opt/votebot/.env` exists, is mode 600, and has every key filled (check by name only: `grep -c '^NAME=.' /opt/votebot/.env`);
+`/opt/votebot-logs/queries` exists and is owned by uid 1000, and a write as that user works
+(`sudo -u '#1000' touch /opt/votebot-logs/queries/.t && sudo rm /opt/votebot-logs/queries/.t`); `free -m` shows at least
+about 600 MB available and `df -h /` has room. VoteBot also logs an ERROR at startup ("Query log directory is NOT writable")
+if the log directory is wrong, but it keeps answering: look for that line.
+
+**Rollback tag.** `build` overwrites the image `votebot-ddp-next:local`, so before every rebuild tag the running one with its
+commit: `docker tag votebot-ddp-next:local votebot-ddp-next:<sha of the running commit>`. Rolling back is then: retag that
+image as `:local` and `up -d`, or `git checkout <previous sha>`, rebuild and `up -d`. Record the known-good SHA in the ticket.
+
 VoteBot has a Redis of its own (never the broker's, never the host's 6379): only a button cache and a handoff map
 live in it, so no persistence. **One worker, on purpose**: a session's chat history is kept in the memory of the
 worker that served it, and the image's default command runs one. Restarting the container ends open chats and their
 history: expected, and the widget reconnects.
 
 ### 3.5 Start it and verify it INSIDE the Docker network, before any nginx change
+
+(Redis restarting or evicting keys loses only cached quick-action answers, which are regenerated on demand, and open
+human-handoff thread mappings; chat history lives in VoteBot's own memory and is lost only when VoteBot restarts.)
 
 ```bash
 docker compose -f infrastructure/docker/docker-compose.prod.yml up -d
