@@ -62,8 +62,8 @@ DIFF_UNAVAILABLE_NOTE = (
     "changed between versions; tell the user you could not retrieve it just now."
 )
 DIFF_NONE_NOTE = (
-    "No stored comparison exists for the requested version (the live records keep one only for a bill's "
-    "latest version and the one before it). Say so; do not infer what changed."
+    "No stored comparison exists for the requested version in the live records (it may be the bill's first "
+    "version, or the version before it has no saved text). Say so; do not infer what changed."
 )
 
 
@@ -239,6 +239,11 @@ class RetrievalService:
                         original_context="general",
                     )
 
+        # Legislators are not embedded in the canonical-id index (their facts come live from api-v3,
+        # see the agent): nothing to search, and no Webflow lookup to resolve an id with.
+        if effective_context.type == "legislator" and self._ocd_mode:
+            return RetrievalResult(chunks=[], query_used=query, filters_applied={}, total_retrieved=0)
+
         # For legislator pages with slug but no OpenStates ID, resolve via Webflow CMS
         if (
             effective_context.type == "legislator"
@@ -309,7 +314,8 @@ class RetrievalService:
             # legislators and organizations carry no session_code and must stay retrievable, so
             # the unscoped query simply leaves the two bill types to the scoped one.
             scope = self._legislative_scope(effective_context)
-            bill_types = ["bill-text", "bill-votes"]
+            bill_types = ["bill-text", "bill-votes"]  # kept out of the unscoped query either way
+            scoped_types = ["bill-text"] if self._ocd_mode else bill_types  # votes are not embedded there: do not ask
             base_filter = {**filters, "document_type": {"$nin": bill_types}} if scope else filters
             results = await self.vector_store.query(
                 query=query,
@@ -320,7 +326,7 @@ class RetrievalService:
                 scoped = await self.vector_store.query(
                     query=query,
                     top_k=max_chunks,
-                    filter={**scope, "document_type": {"$in": bill_types}},
+                    filter={**scope, "document_type": {"$in": scoped_types}},
                 )
                 results = scoped + results
 
@@ -611,8 +617,12 @@ class RetrievalService:
                 except Exception as e:
                     logger.warning("Failed to lookup legislator in cache", error=str(e))
 
+        # Votes (bill-votes, legislator-votes) are not embedded in the canonical-id index; they are read
+        # live by the agent's bill lookup, so neither is searched there.
+        votes_embedded = not self._ocd_mode
+
         # If we have a legislator person ID, query for their legislator-votes document directly
-        if legislator_person_id:
+        if legislator_person_id and votes_embedded:
             person_uuid = legislator_person_id.replace("ocd-person/", "")
             doc_id_prefix = f"legislator-votes-{person_uuid}"
 
@@ -634,7 +644,7 @@ class RetrievalService:
             )
 
         # For vote queries OR legislator follow-ups on bill pages, get vote data
-        if is_vote_query or is_legislator_followup:
+        if (is_vote_query or is_legislator_followup) and votes_embedded:
             vote_query = query
             if page_context:
                 bill_id = page_context.id or ""

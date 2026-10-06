@@ -172,7 +172,9 @@ class TestRetrieveOnCanonicalIndex:
         result = await svc.retrieve("how did senators vote on this bill?", ctx)
 
         scoped = [f for f in calls if f and f.get("document_type") in {"bill-text", "bill", "bill-votes"}]
-        assert {f["document_type"] for f in scoped} >= {"bill-text", "bill-votes"}
+        assert {f["document_type"] for f in scoped} >= {"bill-text"}
+        # Votes are not embedded in the canonical-id index (read live instead): they are not searched.
+        assert not any(f and f.get("document_type") in ("bill-votes", "legislator-votes") for f in calls)
         assert all(f.get("ocd_bill_id") == BILL and "webflow_id" not in f for f in scoped)
         assert result.filters_applied == {"ocd_bill_id": BILL}
 
@@ -258,7 +260,7 @@ class TestRetrieveOnCanonicalIndex:
         assert scoped == {
             "jurisdiction": "FL",
             "session_code": "2026",
-            "document_type": {"$in": ["bill-text", "bill-votes"]},
+            "document_type": {"$in": ["bill-text"]},
         }
         # The scoped bill text leads, and the unscoped query still runs so legislators survive.
         assert [c.metadata["document_type"] for c in result.chunks] == ["bill-text", "legislator"]
@@ -300,3 +302,33 @@ class TestLegacyIndexIsUntouched:
         await svc.retrieve("summarize", PageContext(type="bill", webflow_id="wf1", ocd_bill_id=BILL))
         typed = [f for f in calls if f and f.get("document_type") == "bill-text"]
         assert typed and all(f.get("webflow_id") == "wf1" and "ocd_bill_id" not in f for f in typed)
+
+
+class TestNoSearchesForWhatIsNotEmbedded:
+    """Votes (bill-votes, legislator-votes) and legislators are not embedded in the canonical-id index
+    (they are read live), so nothing searches for them there; the legacy index is untouched."""
+
+    async def test_a_legislator_page_searches_nothing_and_never_asks_webflow(self):
+        calls: list = []
+        svc = _service(queries=calls)  # no Webflow service on this object: a call to it would raise
+        result = await svc.retrieve("What party are they in?", PageContext(type="legislator", slug="jane-doe"))
+        assert calls == [] and result.chunks == []
+
+    async def test_a_legislator_follow_up_on_a_bill_page_does_not_search_legislator_votes(self):
+        calls: list = []
+        svc = _service(queries=calls, respond=lambda f: [_hit(f["document_type"], ocd_bill_id=BILL)])
+        await svc.retrieve("how about Rick Scott?", PageContext(type="bill", ocd_bill_id=BILL))
+        assert not any(f and f.get("document_type") in ("legislator-votes", "bill-votes", "legislator") for f in calls)
+
+    async def test_a_vote_question_on_a_general_page_only_scopes_bill_text(self):
+        calls: list = []
+        svc = _service(queries=calls)
+        await svc.retrieve("how did florida vote on housing?", PageContext(type="general", jurisdiction="FL", session="2026"))
+        scoped = [f for f in calls if f and "session_code" in f]
+        assert scoped and all(f["document_type"] == {"$in": ["bill-text"]} for f in scoped)
+
+    async def test_the_legacy_index_still_searches_votes_and_scopes_both_types(self):
+        calls: list = []
+        svc = _service(LEGACY_PINECONE_INDEX_NAME, queries=calls, respond=lambda f: [_hit(f["document_type"], webflow_id="wf1")])
+        await svc.retrieve("how did senators vote on this bill?", PageContext(type="bill", webflow_id="wf1"))
+        assert any(f and f.get("document_type") == "bill-votes" for f in calls)

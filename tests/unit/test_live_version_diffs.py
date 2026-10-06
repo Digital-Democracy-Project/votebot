@@ -1,7 +1,7 @@
 """VOTEBOT-15: "what changed" is read live from api-v3's stored diff, because diffs are not embedded.
 
-api-v3 stores `diff_from_previous_version` only for a bill's latest version and the one before it,
-on the single-bill detail call (`include=versions`). These tests run the real `BillVersionService`
+api-v3 carries `diff_from_previous_version` on every classifiable version (OPEN-118), on the
+single-bill detail call (`include=versions`). These tests run the real `BillVersionService`
 selection and the real retrieval phase; only the HTTP fetch is replaced.
 """
 
@@ -171,7 +171,7 @@ class TestRetrievalPhaseFive:
 
     async def test_no_stored_diff_is_said_differently_from_an_outage(self):
         result = await _retrieval().retrieve("what changed in the introduced version?", _bill())
-        assert result.notes == [DIFF_NONE_NOTE] and "latest version and the one before it" in DIFF_NONE_NOTE
+        assert result.notes == [DIFF_NONE_NOTE] and "first version" in DIFF_NONE_NOTE
 
     async def test_an_ordinary_question_adds_no_notes(self):
         assert (await _retrieval().retrieve("what does this bill do?", _bill())).notes == []

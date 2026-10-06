@@ -218,14 +218,20 @@ class TestAgentContext:
         assert await agent._legislator_context_from_api_v3("hi", page) == UNAVAILABLE
 
     async def test_a_slow_api_v3_costs_the_profile_and_the_model_is_told(self, monkeypatch):
-        monkeypatch.setattr("votebot.core.agent.BUDGET_SECONDS", 0.05)
+        import time
+
+        monkeypatch.setattr("votebot.core.agent._enrichment_budget_left", lambda: 0.05)
         agent = _agent()
+        person = Legislator(PERSON_ID, "Ashley Moody", "Republican", "Senator", "Senate", "FL", "United States", True)
 
         async def slow(*a, **k):
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
+            return PeopleMatch([person], 1)  # VALID data, late: without the timeout this would be the profile
 
         agent.legislators.find_by_name = slow
-        assert await agent._legislator_context_from_api_v3("Senator Moody", PageContext(type="bill", id="HB 1")) == UNAVAILABLE
+        started = time.monotonic()
+        text = await agent._legislator_context_from_api_v3("Senator Moody", PageContext(type="bill", id="HB 1"))
+        assert text == UNAVAILABLE and time.monotonic() - started < 1.5
 
     def test_cue_words(self):
         for text in ("Sen. Smith", "the Representative", "Rep. Jones", "Congresswoman X", "lawmakers", "Senators from FL"):
@@ -236,6 +242,37 @@ class TestAgentContext:
     def test_the_name_guess_is_shared_with_the_legacy_lookup(self):
         assert VoteBotAgent._candidate_person_name("How did Ashley Moody vote on it?") == "Ashley Moody"
         assert VoteBotAgent._candidate_person_name("how did she vote?") is None
+
+
+class TestNameGuard:
+    """A guess at a name costs a live call, so ordinary bill-page messages must not make one."""
+
+    @pytest.mark.parametrize("message", [
+        "Summarize this bill", "Why was it amended in Florida?", "Explain HB 363 to me", "What does AARP think of it?",
+        "What is the status?", "Is Texas considering this too?", "Does Congress have to pass this?",
+    ])
+    def test_ordinary_messages_yield_no_name(self, message):
+        assert VoteBotAgent._legislator_name_in(message, require_cue=False) is None
+
+    @pytest.mark.parametrize(("message", "expected"), [
+        ("How did Ashley Moody vote?", "Ashley Moody"),
+        ("Did Rick Scott support it?", "Rick Scott"),
+        ("Tell Ashley Moody what you think", "Ashley Moody"),
+        ("Who is Senator Moody?", "Moody"),
+        ("What did Rep. Smith say?", "Smith"),
+    ])
+    def test_names_are_found(self, message, expected):
+        assert VoteBotAgent._legislator_name_in(message, require_cue=False) == expected
+
+    def test_other_pages_need_a_cue_even_for_a_full_name(self):
+        assert VoteBotAgent._legislator_name_in("How did Ashley Moody vote?", require_cue=True) is None
+        assert VoteBotAgent._legislator_name_in("How did Senator Ashley Moody vote?", require_cue=True) == "Ashley Moody"
+
+    async def test_an_ordinary_bill_page_message_makes_no_live_call(self):
+        agent = _agent()
+        for message in ("Summarize this bill", "Why was it amended in Florida?"):
+            assert await agent._legislator_context_from_api_v3(message, PageContext(type="bill", id="HB 1")) == ""
+        agent.legislators.find_by_name.assert_not_called()
 
 
 class TestReachesThePrompt:

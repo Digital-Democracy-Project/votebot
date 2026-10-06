@@ -137,7 +137,7 @@ Canonical-id index: legislators and version diffs are not embedded (SYNC-94; 202
 
 - **`LegislatorLookupService`** — `find_by_id(person_id)`, `find_by_name(name, jurisdiction=None)` over `GET /people` (`include=offices&include=links`); None on any problem. `Legislator` (`current` = has a current role), `format_legislators(people, asked)` (one profile, or a "several match, ask which" list; current members preferred over former).
 - **`VoteBotAgent._legislator_context_from_api_v3(message, page_context)`** — legislator page: by `ocd-person/...` id, else title + jurisdiction; bill page: a name in the message; other pages only with a cue word (`LEGISLATOR_CUES`). Used by both the streaming and non-streaming paths on the canonical index; the legacy index keeps `_prefetch_legislator_info`. `_candidate_person_name(message)` is the shared name guess.
-- **`BillVersionService.get_diffs(ocd_bill_id, stages=(), dates=()) -> list[VersionDiff] | None`** — stored `diff_from_previous_version` for the current version (default) or the named stage/date, with the predecessor's label; not cached; every matching version is returned and retrieval's `DIFF_MAX_CHARS` budget (shared by all of them) decides what fits, saying how many were omitted. api-v3 stores diffs only for the latest version and the one before it.
+- **`BillVersionService.get_diffs(ocd_bill_id, stages=(), dates=()) -> list[VersionDiff] | None`** — stored `diff_from_previous_version` for the current version (default) or the named stage/date, with the predecessor's label; not cached; every matching version is returned and retrieval's `DIFF_MAX_CHARS` budget (shared by all of them) decides what fits, saying how many were omitted. Since OPEN-118 api-v3 carries a diff for every classifiable version; one is missing mainly for a bill's first version, an unarchived predecessor, or a missing row.
 
 ## Broker lookups and links to our pages (`services/broker_lookup.py`, `utils/ddp_urls.py`, VOTEBOT-15)
 
@@ -258,7 +258,7 @@ Same index and namespace as DDP-Sync (`votebot-large` today; `ddp-knowledge-base
 | `bill-text` | Phase 1 | Legacy index: current legislative text, overwritten each version by DDP-Sync. Canonical-id index: **one document per version** (`bill-text:{ocd_bill_id}:{document_id}`), filtered to the current version by default |
 | `bill-text-history` | **Never retrieved by VoteBot** | Permanent historical text; stored for future use |
 | `bill-changelog` | Phase 5 (changelog intent only) | LLM-generated diffs; requires `webflow_id` filter |
-| `bill-version-diff` | **Not embedded** (2026-10-05); Phase 5 reads it live (changelog intent only; canonical-id index) | api-v3's stored diff against the previous version, labelled with `from_version_note`/`from_document_id`; replaces `bill-changelog`. Only the latest version and the one before it have one; none for `unknown`-stage versions |
+| `bill-version-diff` | **Not embedded** (2026-10-05); Phase 5 reads it live (changelog intent only; canonical-id index) | api-v3's stored diff against the previous version, labelled with `from_version_note`/`from_document_id`; replaces `bill-changelog`. Every classifiable version has one (OPEN-118) except a bill's first and any whose predecessor is not archived; none for `unknown`-stage versions |
 | `bill-votes` | Phase 4b | Vote records per bill |
 | `legislator` | Standard retrieval | Legislator profiles |
 | `legislator-votes` | Phase 4b | Reverse index: per-legislator voting history |

@@ -224,7 +224,7 @@ class TestFormatting:
         assert format_bill_org_positions(None) == ""
 
     def test_org_positions_link_to_our_pages_only_with_a_base_url(self):
-        rows = [BillPositionOfOrg("HB 219", "Fees", "FL", "2026", "support"), BillPositionOfOrg("SB 2", "Tax", "FL", "2026", "oppose")]
+        rows = [BillPositionOfOrg(1, "HB 219", "Fees", "FL", "2026", "support"), BillPositionOfOrg(2, "SB 2", "Tax", "FL", "2026", "oppose")]
         linked = format_org_bill_positions(OrgDetails("AARP"), OrgBillPositions(rows), SITE)
         assert "- [HB 219 Fees](https://site.test/explore/FL/2026/HB%20219)" in linked and "### Bills Opposed" in linked
         plain = format_org_bill_positions(OrgDetails("AARP"), OrgBillPositions(rows), "")
@@ -250,7 +250,7 @@ def _agent(index: str = NEW_INDEX, base: str = SITE) -> VoteBotAgent:
     a.broker_lookup = SimpleNamespace(
         get_bill_org_positions=AsyncMock(return_value=BillOrgPositions([OrgPositionOnBill("AARP", "support")])),
         get_org_bill_positions=AsyncMock(
-            return_value=OrgBillPositions([BillPositionOfOrg("HB 1", "T", "FL", "2026", "support")])
+            return_value=OrgBillPositions([BillPositionOfOrg(1, "HB 1", "T", "FL", "2026", "support")])
         ),
         get_org_details=AsyncMock(return_value=OrgDetails("AARP", "Nonprofit")),
     )
@@ -267,14 +267,14 @@ class TestAgentEnrichments:
         ctx = PageContext(type="bill", id="HB 219", jurisdiction="FL", session="2026", ocd_bill_id=BILL)
         text = await agent._prefetch_bill_org_positions(ctx)
         assert "AARP" in text
-        agent.broker_lookup.get_bill_org_positions.assert_awaited_once_with("FL", "2026", "HB 219")
+        assert agent.broker_lookup.get_bill_org_positions.await_args.args[:3] == ("FL", "2026", "HB 219")
         agent.webflow_lookup.get_bill_org_positions.assert_not_called()
 
     async def test_org_page_bills_come_from_the_broker_and_link_to_our_pages(self):
         agent = _agent()
         text = await agent._prefetch_org_bill_positions(PageContext(type="organization", id="42"))
         assert "[HB 1 T](https://site.test/explore/FL/2026/HB%201)" in text and "AARP" in text
-        agent.broker_lookup.get_org_bill_positions.assert_awaited_once_with("42")
+        assert agent.broker_lookup.get_org_bill_positions.await_args.args[0] == "42"
         agent.webflow_lookup.get_org_bill_positions.assert_not_called()
 
     async def test_an_org_page_without_a_broker_id_looks_nothing_up(self):
@@ -287,7 +287,7 @@ class TestAgentEnrichments:
         assert "AARP" in await agent._verify_from_webflow(PageContext(type="organization", id="42"))
         assert await agent._verify_from_webflow(PageContext(type="bill", id="HB 1")) == ""
         assert await agent._verify_from_webflow(PageContext(type="legislator", id="x")) == ""
-        agent.broker_lookup.get_org_details.assert_awaited_once_with("42")
+        assert agent.broker_lookup.get_org_details.await_args.args[0] == "42"
 
     async def test_the_legacy_index_still_uses_webflow(self):
         agent = _agent(LEGACY_PINECONE_INDEX_NAME)
@@ -299,15 +299,106 @@ class TestAgentEnrichments:
 
 
 class TestTimeBudget:
-    async def _slow(self, *a, **k):
-        await asyncio.sleep(5)
+    """The slow stubs return VALID data after a delay, so these pass only if the timeout really fires:
+    with the budget removed they would return the formatted positions instead of nothing."""
+
+    @staticmethod
+    def _slow(value):
+        async def slow(*a, **k):
+            await asyncio.sleep(3)
+            return value
+
+        return slow
 
     async def test_a_slow_broker_costs_the_enrichment_not_the_answer(self, monkeypatch):
-        monkeypatch.setattr("votebot.core.agent.BUDGET_SECONDS", 0.05)
+        import time
+
+        monkeypatch.setattr("votebot.core.agent._enrichment_budget_left", lambda: 0.05)
         agent = _agent()
         agent.broker_lookup = SimpleNamespace(
-            get_bill_org_positions=self._slow, get_org_bill_positions=self._slow, get_org_details=self._slow
+            get_bill_org_positions=self._slow(BillOrgPositions([OrgPositionOnBill("AARP", "support")])),
+            get_org_bill_positions=self._slow(OrgBillPositions([BillPositionOfOrg(1, "HB 1", "T", "FL", "2026", "support")])),
+            get_org_details=self._slow(OrgDetails("AARP")),
         )
+        started = time.monotonic()
         assert await agent._prefetch_bill_org_positions(PageContext(type="bill", id="HB 1", jurisdiction="FL", session="2026")) == ""
         assert await agent._prefetch_org_bill_positions(PageContext(type="organization", id="42")) == ""
         assert await agent._verify_from_webflow(PageContext(type="organization", id="42")) == ""
+        assert time.monotonic() - started < 1.5  # three lookups, none waited for its 3 s
+
+
+class TestOnePerMessageBudget:
+    def test_the_budget_left_shrinks_with_the_deadline_and_has_a_floor(self):
+        import time
+
+        from votebot.core import agent as agent_module
+
+        token = agent_module._enrichment_deadline.set(None)
+        try:
+            assert agent_module._enrichment_budget_left() == agent_module.BUDGET_SECONDS + 1.0
+            agent_module._enrichment_deadline.set(time.monotonic() + 4)
+            assert 4.5 < agent_module._enrichment_budget_left() <= 5.0
+            agent_module._enrichment_deadline.set(time.monotonic() - 10)  # already past: a short floor, not zero
+            assert 1.0 < agent_module._enrichment_budget_left() <= 1.2
+        finally:
+            agent_module._enrichment_deadline.reset(token)
+
+    async def test_each_message_starts_one_budget_shared_by_its_lookups(self):
+        import time
+
+        from tests.unit.test_agent_stream_votes_flag import _agent as stream_agent
+        from votebot.core import agent as agent_module
+
+        seen = []
+        agent = stream_agent("", should_use_tool=False)
+        original = agent.retrieval.retrieve
+
+        async def spy(**kwargs):
+            seen.append(agent_module._enrichment_deadline.get())
+            return await original(**kwargs)
+
+        agent.retrieval = SimpleNamespace(retrieve=spy)
+        before = time.monotonic()
+        async for _ in agent.process_message_stream(message="hi", session_id="s", page_context=PageContext(type="general")):
+            pass
+        assert seen[0] is not None and before + agent_module.BUDGET_SECONDS - 0.5 < seen[0] < time.monotonic() + agent_module.BUDGET_SECONDS
+
+    async def test_the_services_stop_at_the_deadline_and_keep_what_they_have(self, monkeypatch):
+        import time
+
+        calls = []
+
+        def handler(request):
+            calls.append(request.url.params["page"])
+            return _json({"results": [{"bill_id": 1, "gov_id": "HB 1", "bill_title": "T", "jurisdiction_iso2": "FL",
+                                       "session_code": "2026", "position": "support"}], "next": "more"})
+
+        _mock_broker(monkeypatch, handler)
+        result = await _service_with_root().get_org_bill_positions("42", deadline=time.monotonic() - 1)
+        assert calls == ["1"]  # page 1 was read, then it stopped instead of discarding everything
+        assert [r.gov_id for r in result.positions] == ["HB 1"] and result.complete is False
+
+
+class TestOneRowPerBill:
+    def _row(self, bill_id, position, gov_id="HB 1", title="T"):
+        return {"bill_id": bill_id, "gov_id": gov_id, "bill_title": title, "jurisdiction_iso2": "FL",
+                "session_code": "2026", "position": position}
+
+    async def _positions(self, monkeypatch, rows):
+        _mock_broker(monkeypatch, lambda r: _json({"results": rows, "next": None}))
+        return await _service_with_root().get_org_bill_positions("42")
+
+    async def test_a_bill_with_positions_on_several_versions_is_listed_once(self, monkeypatch):
+        result = await self._positions(monkeypatch, [self._row(1, "support"), self._row(1, "support"), self._row(2, "support", "HB 2")])
+        assert [(r.bill_id, r.position) for r in result.positions] == [(1, "support"), (2, "support")]
+
+    async def test_a_changed_stance_keeps_the_last_row_and_never_both(self, monkeypatch):
+        result = await self._positions(monkeypatch, [self._row(1, "support"), self._row(2, "support", "HB 2"), self._row(1, "oppose")])
+        assert {(r.bill_id, r.position) for r in result.positions} == {(2, "support"), (1, "oppose")}
+        text = format_org_bill_positions(OrgDetails("AARP"), result, "")
+        assert text.count("HB 1") == 1
+
+    async def test_rows_without_a_bill_id_are_matched_by_jurisdiction_session_and_identifier(self, monkeypatch):
+        rows = [self._row(None, "support"), self._row(None, "oppose")]
+        result = await self._positions(monkeypatch, rows)
+        assert [(r.gov_id, r.position) for r in result.positions] == [("HB 1", "oppose")]

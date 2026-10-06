@@ -1,6 +1,7 @@
 """Single conversational agent for VoteBot."""
 
 import asyncio
+import contextvars
 import re
 import time
 from dataclasses import dataclass, field
@@ -46,6 +47,34 @@ from votebot.utils.intent import (
 
 logger = structlog.get_logger()
 
+
+# When the enrichment lookups of the message being processed (broker, legislators) must be done by
+# (a `time.monotonic()` value): ONE budget per message, not one per lookup.
+_enrichment_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar("enrichment_deadline", default=None)
+
+
+def _enrichment_budget_left() -> float:
+    """Seconds the next enrichment lookup may take. The services stop themselves at the deadline and
+    return what they have; this is the hard stop a second later."""
+    deadline = _enrichment_deadline.get()
+    return BUDGET_SECONDS + 1.0 if deadline is None else max(0.1, deadline - time.monotonic()) + 1.0
+
+
+# Words that are not part of a person's name even when capitalised: US states (a "Why Florida?" is not a person).
+US_STATES = frozenset(
+    "alabama alaska arizona arkansas california colorado connecticut delaware florida georgia hawaii idaho illinois "
+    "indiana iowa kansas kentucky louisiana maine maryland massachusetts michigan minnesota mississippi missouri "
+    "montana nebraska nevada ohio oklahoma oregon pennsylvania tennessee texas utah vermont virginia wisconsin "
+    "wyoming congress senate house".split()
+)
+
+# Capitalised words that are titles or question words, never part of a name ("Rep. Smith", "Who Moody")
+NAME_STOPWORDS = frozenset(
+    "who whom whose what which when where why how is are was were did does do can could would should will tell show "
+    "explain give list find senator sen rep reps representative representatives congressman congressmen congresswoman "
+    "congressperson legislator legislators delegate speaker assemblyman assemblywoman assemblymember lawmaker mr mrs "
+    "ms dr hon".split()
+)
 
 # A word that says the message is about a legislator, so a name in it is worth looking up.
 LEGISLATOR_CUES = re.compile(
@@ -508,6 +537,7 @@ class VoteBotAgent:
             AgentResult with the response and metadata
         """
         _start_time = time.perf_counter()
+        _enrichment_deadline.set(time.monotonic() + BUDGET_SECONDS)  # one budget for this message's lookups
 
         # Normalize button — feature flag off OR unknown type means "no button"
         effective_button = self._normalize_button(button)
@@ -849,6 +879,7 @@ class VoteBotAgent:
             StreamChunkData objects with text fragments
         """
         _start_time = time.perf_counter()
+        _enrichment_deadline.set(time.monotonic() + BUDGET_SECONDS)  # one budget for this message's lookups
 
         # Normalize button — feature flag off OR unknown type means "no button"
         effective_button = self._normalize_button(button)
@@ -1996,13 +2027,14 @@ class VoteBotAgent:
         if not org_id:
             logger.debug("No broker organization id in page_context for org bill lookup")
             return ""
+        deadline = _enrichment_deadline.get()
         try:
             org, positions = await asyncio.wait_for(
                 asyncio.gather(
-                    self.broker_lookup.get_org_details(org_id),
-                    self.broker_lookup.get_org_bill_positions(org_id),
+                    self.broker_lookup.get_org_details(org_id, deadline),
+                    self.broker_lookup.get_org_bill_positions(org_id, deadline),
                 ),
-                BUDGET_SECONDS,
+                _enrichment_budget_left(),
             )
         except asyncio.TimeoutError:
             logger.warning("Broker org positions took too long; answering without them", org_id=org_id)
@@ -2015,9 +2047,9 @@ class VoteBotAgent:
         try:
             positions = await asyncio.wait_for(
                 self.broker_lookup.get_bill_org_positions(
-                    page_context.jurisdiction, page_context.session, page_context.id
+                    page_context.jurisdiction, page_context.session, page_context.id, _enrichment_deadline.get()
                 ),
-                BUDGET_SECONDS,
+                _enrichment_budget_left(),
             )
         except asyncio.TimeoutError:
             logger.warning("Broker bill positions took too long; answering without them")
@@ -2355,6 +2387,31 @@ class VoteBotAgent:
         name_parts = [w for w in message.split() if len(w) > 1 and w[0].isupper() and w.lower() not in common_words]
         return " ".join(name_parts) or None
 
+    @classmethod
+    def _legislator_name_in(cls, message: str, require_cue: bool) -> str | None:
+        """A name in the message worth a live `/people` lookup, or None.
+
+        The capitalised words of a message are only a guess at a name ("Summarize this bill" gives
+        "Summarize"), and each guess costs a live call, so: acronyms (HB, AARP), state names, titles
+        and question words are dropped, and unless the message has a legislator cue ("senator",
+        "representative"...) the name must be at least two words ("How did Ashley Moody vote?").
+        `require_cue` demands the cue.
+        """
+        cued = bool(LEGISLATOR_CUES.search(message))
+        if require_cue and not cued:
+            return None
+        guess = cls._candidate_person_name(message)
+        if not guess:
+            return None
+        tokens = [t.strip("?.,!;:()\"'") for t in guess.split()]
+        tokens = [t for t in tokens if t and not t.isupper() and t.lower() not in US_STATES | NAME_STOPWORDS]
+        first_word = message.split()[0].strip("?.,!") if message.split() else ""
+        if not cued and len(tokens) >= 3 and tokens[0] == first_word:
+            tokens = tokens[1:]  # "Tell Ashley Moody ..." -> "Ashley Moody"
+        if len(tokens) < (1 if cued else 2):
+            return None
+        return " ".join(tokens)
+
     async def _legislator_context_from_api_v3(self, message: str, page_context: PageContext | None) -> str:
         """Legislator facts read live from api-v3 (canonical-id index: legislators are not embedded).
 
@@ -2375,8 +2432,9 @@ class VoteBotAgent:
                     return format_legislators(match) if match is not None else UNAVAILABLE
                 name, jurisdiction = page_context.title, page_context.jurisdiction
             else:
-                wanted = page_type == "bill" or LEGISLATOR_CUES.search(message)
-                name, jurisdiction = (self._candidate_person_name(message) if wanted else None), None
+                # A bill page may name a legislator without a cue word ("How did Ashley Moody vote?"),
+                # other pages need the cue; see _legislator_name_in
+                name, jurisdiction = self._legislator_name_in(message, require_cue=page_type != "bill"), None
             if not name:
                 return ""
             match = await self.legislators.find_by_name(name, jurisdiction)
@@ -2384,7 +2442,7 @@ class VoteBotAgent:
             return format_legislators(match, asked=name) if match is not None else UNAVAILABLE
 
         try:
-            return await asyncio.wait_for(lookup(), BUDGET_SECONDS)
+            return await asyncio.wait_for(lookup(), _enrichment_budget_left())
         except asyncio.TimeoutError:
             logger.warning("Legislator lookup took too long; telling the model it is unavailable")
             return UNAVAILABLE
@@ -2566,7 +2624,10 @@ class VoteBotAgent:
                 return ""
             try:
                 return format_org_details(
-                    await asyncio.wait_for(self.broker_lookup.get_org_details(org_id), BUDGET_SECONDS)
+                    await asyncio.wait_for(
+                        self.broker_lookup.get_org_details(org_id, _enrichment_deadline.get()),
+                        _enrichment_budget_left(),
+                    )
                 )
             except asyncio.TimeoutError:
                 return ""

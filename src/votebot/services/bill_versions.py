@@ -121,9 +121,10 @@ class BillVersionService:
 
         Diffs are not embedded (the index holds version text only), so a "what changed" question
         reads them here. The current version's diff by default, or the versions a question names by
-        stage and/or date. api-v3 stores a diff only for a bill's latest version and the one before
-        it, so an older named version may have none (it is then simply absent). Not cached: diffs
-        can be large and the question is rare. None when api-v3 cannot be asked or has no answer.
+        stage and/or date. Since OPEN-118 api-v3 carries a diff for every classifiable version, so a
+        version has none mainly when it is the bill's first, when the version before it was not
+        archived, or when its row is missing (it is then simply absent). Not cached: diffs can be
+        large and the question is rare. None when api-v3 cannot be asked or has no answer.
         """
         if not self.settings.use_ddp_openstates_replica:
             return None
