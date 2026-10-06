@@ -117,6 +117,11 @@ class Settings(BaseSettings):
     use_ddp_openstates_replica: bool = False
     ddp_openstates_api_root: str = ""
     ddp_openstates_bearer_token: SecretStr = Field(default=SecretStr(""))
+    # How the credential above is sent when the replica flag is on. "bearer" is for ddp-api's proxy
+    # (Authorization: Bearer); "x-api-key" is for api-v3 itself, which accepts only an X-API-Key header
+    # (or ?apikey) and answers 403 to a Bearer token. The variable keeps its name: it holds whichever
+    # credential the chosen shape needs.
+    ddp_openstates_auth_header: Literal["bearer", "x-api-key"] = "bearer"
 
     # ddp-broker-py (VOTEBOT-8): /content/resolve uses its public bill endpoints to turn a ddp-next
     # bill URL into an OpenStates bill id. Empty by default (no hardcoded target); only the

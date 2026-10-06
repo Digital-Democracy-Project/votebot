@@ -104,6 +104,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `OPENSTATES_API_KEY` | OpenStates API key | For state bills |
 | `USE_DDP_OPENSTATES_REPLICA` | Routes OpenStates calls to DDP-API's own proxy instead of the public API (default `false`) | No |
 | `DDP_OPENSTATES_API_ROOT` | Base URL of DDP-API's OpenStates proxy — required if the replica flag above is on; no hardcoded fallback, fails loudly at request time if unset | Only with replica flag |
+| `DDP_OPENSTATES_AUTH_HEADER` | How the credential below is sent when the replica flag is on: `bearer` (default, for ddp-api's proxy) or `x-api-key` (api-v3 itself accepts only `X-API-Key` and answers 403 to a Bearer token). Exactly one shape is ever sent | Only with replica flag |
 | `DDP_OPENSTATES_BEARER_TOKEN` | Bearer token DDP-API's proxy expects (`Authorization: Bearer ...`) — a different auth shape than the public API's `x-api-key`, and the two must never both be sent on the same request | Only with replica flag |
 | `TAVILY_API_KEY` | Tavily API key for web search fallback | For web search |
 | `REDIS_URL` | Redis connection URL (cross-worker handoff state) | For multi-worker |

@@ -89,6 +89,40 @@ class TestOpenstatesHeaders:
         assert headers == {"Authorization": "Bearer replica-token"}
         assert "x-api-key" not in headers
 
+    def test_replica_mode_can_send_x_api_key_for_api_v3_itself(self):
+        """api-v3 accepts only X-API-Key (a Bearer token gets 403): replica mode pointed straight at it.
+        Still exactly one auth shape on the request, never both."""
+        settings = _settings(
+            use_ddp_openstates_replica=True,
+            ddp_openstates_api_root="http://10.0.0.11:8002",
+            ddp_openstates_bearer_token=SecretStr("api-v3-key"),
+            ddp_openstates_auth_header="x-api-key",
+        )
+        headers = openstates_headers(settings)
+        assert headers == {"x-api-key": "api-v3-key"}
+        assert "Authorization" not in headers
+
+    def test_the_default_replica_shape_is_still_bearer(self):
+        settings = _settings(
+            use_ddp_openstates_replica=True,
+            ddp_openstates_api_root="https://example.test/openstates",
+            ddp_openstates_bearer_token=SecretStr("t"),
+        )
+        assert settings.ddp_openstates_auth_header == "bearer"
+        assert openstates_headers(settings) == {"Authorization": "Bearer t"}
+
+    def test_the_header_choice_does_nothing_unless_the_replica_flag_is_on(self):
+        settings = _settings(
+            use_ddp_openstates_replica=False,
+            ddp_openstates_bearer_token=SecretStr("t"),
+            ddp_openstates_auth_header="x-api-key",
+        )
+        assert openstates_headers(settings) == {"x-api-key": "public-key"}  # the public key, never the replica token
+
+    def test_an_unknown_header_choice_is_rejected_at_startup(self):
+        with pytest.raises(ValueError):
+            _settings(ddp_openstates_auth_header="basic")
+
     def test_public_mode_never_leaks_a_bearer_header(self):
         """Mirror of the test above: a bearer token configured but the flag off
         (e.g. mid-rollout, before enabling) must not leak into the public-API
