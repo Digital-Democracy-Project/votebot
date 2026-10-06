@@ -123,6 +123,11 @@ class Settings(BaseSettings):
     # ddp-next URL forms need it, the Webflow path does not.
     ddp_broker_api_root: str = ""
 
+    # Our own site (ddp-next), e.g. https://digitaldemocracyproject.org. When set, answers cite and
+    # link bills to their /explore/... pages instead of the legislature's URL (those pages point to
+    # the legislature themselves). No default host: unset leaves every link as it was.
+    ddp_site_base_url: str = ""
+
     # Webflow CMS
     webflow_votebot_api_key: SecretStr = Field(default=SecretStr(""))  # Read-only (query-time lookups)
     webflow_scheduler_api_key: SecretStr = Field(default=SecretStr(""))  # Read+write (scheduler CMS updates)

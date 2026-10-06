@@ -18,6 +18,13 @@ from votebot.config import Settings, get_settings
 from votebot.core.prompts import build_system_prompt, format_retrieved_chunks
 from votebot.core.retrieval import RetrievalService
 from votebot.services.bill_versions import current_version
+from votebot.services.broker_lookup import (
+    BUDGET_SECONDS,
+    BrokerLookupService,
+    format_bill_org_positions,
+    format_org_bill_positions,
+    format_org_details,
+)
 from votebot.services.bill_votes import BillVotesService
 from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
 from votebot.services.openstates_client import openstates_base_url, openstates_headers
@@ -93,6 +100,7 @@ class VoteBotAgent:
         self.web_search = WebSearchService(self.settings)
         self.bill_votes = BillVotesService(self.settings)
         self.webflow_lookup = WebflowLookupService(self.settings)
+        self.broker_lookup = BrokerLookupService(self.settings)
 
     def _normalize_button(self, button: str | None) -> str | None:
         """Apply the feature flag and validate the button type.
@@ -1918,6 +1926,9 @@ class VoteBotAgent:
         Returns:
             Formatted bill positions string, or empty string on failure
         """
+        if self.settings.bill_filter_key == "ocd_bill_id":
+            return await self._prefetch_org_bill_positions_from_broker(page_context)
+
         webflow_id = getattr(page_context, "webflow_id", None)
         slug = getattr(page_context, "slug", None)
 
@@ -1950,6 +1961,47 @@ class VoteBotAgent:
             logger.error("Error pre-fetching org bill positions from Webflow", error=str(e))
             return ""
 
+    @staticmethod
+    def _broker_org_id(page_context: PageContext) -> str | None:
+        """The broker's organization id: an all-digit `page_context.id` (the same rule retrieval
+        uses to pin an organization on the canonical-id index)."""
+        org_id = getattr(page_context, "id", None)
+        return org_id if org_id and org_id.isdigit() else None
+
+    async def _prefetch_org_bill_positions_from_broker(self, page_context: PageContext) -> str:
+        """Canonical-id index: the bills an organization supports or opposes, from ddp-broker-py."""
+        org_id = self._broker_org_id(page_context)
+        if not org_id:
+            logger.debug("No broker organization id in page_context for org bill lookup")
+            return ""
+        try:
+            org, positions = await asyncio.wait_for(
+                asyncio.gather(
+                    self.broker_lookup.get_org_details(org_id),
+                    self.broker_lookup.get_org_bill_positions(org_id),
+                ),
+                BUDGET_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Broker org positions took too long; answering without them", org_id=org_id)
+            return ""
+        return format_org_bill_positions(org, positions, self.settings.ddp_site_base_url)
+
+    async def _prefetch_bill_org_positions_from_broker(self, page_context: PageContext) -> str:
+        """Canonical-id index: organizations' positions on this bill, from ddp-broker-py. The bill
+        is named by its page (`id` is the identifier, e.g. "HB 219", with jurisdiction and session)."""
+        try:
+            positions = await asyncio.wait_for(
+                self.broker_lookup.get_bill_org_positions(
+                    page_context.jurisdiction, page_context.session, page_context.id
+                ),
+                BUDGET_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Broker bill positions took too long; answering without them")
+            return ""
+        return format_bill_org_positions(positions)
+
     async def _prefetch_bill_org_positions(self, page_context: PageContext) -> str:
         """
         Pre-fetch organization positions from Webflow CMS for a bill.
@@ -1964,6 +2016,9 @@ class VoteBotAgent:
         Returns:
             Formatted org positions string, or empty string on failure
         """
+        if self.settings.bill_filter_key == "ocd_bill_id":
+            return await self._prefetch_bill_org_positions_from_broker(page_context)
+
         webflow_id = getattr(page_context, "webflow_id", None)
         slug = getattr(page_context, "slug", None)
 
@@ -2451,6 +2506,20 @@ class VoteBotAgent:
         Returns:
             Formatted verification context string, or empty string on failure
         """
+        if self.settings.bill_filter_key == "ocd_bill_id":
+            # Canonical-id index. Only an organization has a database record to check against:
+            # a bill's facts are checked against OpenStates by the vote verification, and the
+            # broker has no public legislator profile.
+            org_id = self._broker_org_id(page_context) if page_context.type == "organization" else None
+            if not org_id:
+                return ""
+            try:
+                return format_org_details(
+                    await asyncio.wait_for(self.broker_lookup.get_org_details(org_id), BUDGET_SECONDS)
+                )
+            except asyncio.TimeoutError:
+                return ""
+
         webflow_id = getattr(page_context, "webflow_id", None)
         slug = getattr(page_context, "slug", None)
 
