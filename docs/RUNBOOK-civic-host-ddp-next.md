@@ -210,7 +210,7 @@ health check fails with `DisallowedHost` because Django rejects requests address
 `infrastructure/docker/docker-compose.prod.yml` (project name `votebot-ddp-next`): the `votebot` container
 (`votebot-ddp-next`, built from the Dockerfile above, `mem_limit` 768 MB, `env_file` `/opt/votebot/.env`, a bind mount
 `${VOTEBOT_LOG_DIR:-/opt/votebot-logs}` at `/app/logs`, joined to the broker's Docker network `ddp-broker-py_default`) and
-`votebot-redis` (128 MB cap, no persistence). The log directory must exist and be owned by uid 1000:
+`votebot-redis` (128 MB dataset cap inside a 256 MB container limit, no persistence). The log directory must exist and be owned by uid 1000:
 `sudo install -d -o 1000 -g 1000 /opt/votebot-logs/queries`. Deploying is the same routine as the other projects:
 `cd /opt/votebot && git pull --ff-only`, `docker compose -f infrastructure/docker/docker-compose.prod.yml build`, then `... up -d`.
 
