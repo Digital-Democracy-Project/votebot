@@ -39,6 +39,7 @@ tenacity>=8.2.0
 
 # Slack Integration (for human handoff)
 slack-sdk>=3.27.0
+aiohttp>=3.9.0  # slack-sdk's async client needs it but does not declare it
 
 # Development dependencies
 pytest>=8.0.0

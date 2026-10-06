@@ -3,9 +3,12 @@
 VoteBot is a chat/RAG service. Sync/ingestion is handled by ddp-sync.
 """
 
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 import structlog
 import uvicorn
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -27,6 +30,32 @@ from votebot.utils.logging import setup_logging
 get_settings.cache_clear()
 settings = get_settings()
 logger = structlog.get_logger()
+
+
+def check_query_log_dir() -> bool:
+    """Say so at startup when query logs cannot be written.
+
+    Logging failures are swallowed on purpose (a log must never break an answer), so a log directory
+    the app user cannot write (a bind mount created as root, say) would otherwise go unnoticed until
+    someone looks for logs that were never written. Returns whether the directory is writable.
+    """
+    if not settings.query_log_enabled:
+        return True
+    log_dir = Path(settings.query_log_dir)
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        probe = log_dir / f".write-test-{os.getpid()}"
+        probe.write_text("")
+        probe.unlink()
+        return True
+    except OSError as e:
+        logger.error(
+            "Query log directory is NOT writable: query logging will silently fail. "
+            "Create it owned by the user the app runs as (uid 1000 in the image)",
+            query_log_dir=str(log_dir),
+            error=str(e),
+        )
+        return False
 
 
 @asynccontextmanager
@@ -65,6 +94,8 @@ async def lifespan(app: FastAPI):
             pinecone_index_name=settings.pinecone_index_name,
             canonical_pinecone_index_name=settings.canonical_pinecone_index_name,
         )
+
+    check_query_log_dir()
 
     logger.info(
         "VoteBot started (chat-only mode)",

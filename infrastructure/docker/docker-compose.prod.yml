@@ -1,0 +1,71 @@
+# VoteBot for the new site (ddp-next) on the new-infrastructure server (VOTEBOT-14).
+#
+# Its OWN compose project (`name:` below, never part of the broker's): the broker's deploy recreates
+# containers, which would drop open chats. nginx (the broker's, ddp-broker-py PR #410) reaches it by the
+# container name `votebot-ddp-next` on the broker's Docker network.
+#
+# Run from the repo checkout on the host (the way the broker and ddp-sync are run):
+#   cd /opt/votebot && git pull --ff-only
+#   docker compose -f infrastructure/docker/docker-compose.prod.yml build
+#   docker compose -f infrastructure/docker/docker-compose.prod.yml up -d
+#
+# Needs, outside git:
+#   /opt/votebot/.env      the settings (README: Environment Variables). Owner root, mode 600. Not read by compose
+#                          itself; it is passed into the container with env_file below.
+#   ${VOTEBOT_LOG_DIR}     query logs (JSONL, one file per day; visitors' messages and addresses), owned by uid 1000
+#                          (the image runs as a non-root user with uid 1000): sudo install -d -o 1000 -g 1000 <dir>
+#
+# `.env` must set REDIS_URL=redis://votebot-redis:6379/0 and QUERY_LOG_DIR=/app/logs/queries.
+# One worker, deliberately: a session's chat history lives in the memory of the worker that served it.
+# Query logs: one JSONL file per day on the host under ${VOTEBOT_LOG_DIR}. Docker's json-file rotation below covers
+# container output only, not these files: rotate them on the host (docs/RUNBOOK-civic-host-ddp-next.md, 3.6).
+# If the directory is missing or not owned by uid 1000 VoteBot logs an ERROR at startup ("Query log directory is NOT
+# writable") and keeps answering without writing logs.
+# Redis holds only a button cache and the human-handoff thread map: a restart or eviction loses cached quick-action
+# answers (regenerated on demand) and open handoff mappings; chat history is in VoteBot's own memory.
+# Not for development: use docker-compose.yml in this directory for that.
+
+name: votebot-ddp-next
+
+services:
+  votebot:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile
+      target: production
+    image: votebot-ddp-next:local
+    container_name: votebot-ddp-next          # the broker's nginx addresses it by this name
+    env_file: ../../.env
+    depends_on:
+      - votebot-redis
+    mem_limit: 768m
+    restart: unless-stopped
+    volumes:
+      - ${VOTEBOT_LOG_DIR:-/opt/votebot-logs}:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
+      - broker
+
+  # VoteBot's own Redis (a button cache and the handoff thread map only: no persistence). Never the
+  # broker's or the host's.
+  votebot-redis:
+    image: redis:7-alpine
+    container_name: votebot-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    mem_limit: 256m                           # headroom over the 128mb dataset cap: allocator and connection overhead
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  broker:
+    external: true
+    name: ${BROKER_DOCKER_NETWORK:-ddp-broker-py_default}

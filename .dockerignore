@@ -1,0 +1,30 @@
+# What the image build must never see. The build context is the repo root, and on the server
+# /opt/votebot/.env (the production secrets) lives there, outside git.
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+node_modules
+logs
+data/cache
+tests
+docs
+plans
+research
+feedback
+chat-widget
+chat-widget-poc
+RAG training docs
+notes
+*.md
+!README.md
