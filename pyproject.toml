@@ -29,6 +29,7 @@ dependencies = [
     "openai>=1.10.0",
     "pinecone>=3.0.0",
     "httpx>=0.26.0",
+    "aiofiles>=24.1.0",  # query logging (src/votebot/services/query_logger.py); without it logging is silently off
     "structlog>=24.1.0",
     "redis>=5.0.0",
     "python-multipart>=0.0.6",
