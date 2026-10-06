@@ -140,7 +140,8 @@ Rollback of the whole project is "send the website back to the old copy": it is 
 ## 3. Install the new VoteBot (new server)
 
 Everything on this host runs in Docker and is built on the host, and the host's Python (3.9) is too old for VoteBot
-(3.11 or newer), so VoteBot is a container too: **its own compose project** in `/opt/votebot-ddp-next/`, joined to the
+(3.11 or newer), so VoteBot is a container too: **its own compose project**, defined by `infrastructure/docker/docker-compose.prod.yml` in this repo (reviewed and
+versioned like the other projects here: the broker's compose file lives in its checkout too), joined to the
 broker's Docker network, reached by the broker's nginx by its container name `votebot-ddp-next`. VoteBot is the only
 part of this server that takes anonymous input from the public; the container runs as a non-root user (uid 1000) and
 publishes no host port.
@@ -164,14 +165,16 @@ planned, whole-box downtime and is not part of this runbook.
 
 ```bash
 cd /opt/votebot && git fetch origin && git checkout <the main SHA to deploy; record it>
-docker compose -f /opt/votebot-ddp-next/docker-compose.yml build      # after 3.3 and 3.4; watch `free -m`
+docker compose -f infrastructure/docker/docker-compose.prod.yml build      # after 3.3; watch `free -m`
 ```
 
-The repo's own `infrastructure/docker/Dockerfile`, target `production` (Python 3.11-slim, non-root, a health check on
-`/votebot/v1/health/live`). Do **not** use the repo's `docker-compose.yml`: it is development only. Build in a quiet
+The repo's own `infrastructure/docker/Dockerfile`, target `production` (Python 3.11-slim, non-root uid 1000, a health
+check on `/votebot/v1/health/live`; about 400 MB and 75 MiB of memory at idle). Its dependencies come from
+`pyproject.toml`, and a `.dockerignore` keeps `.env`, `.git` and the rest out of the build context. Do **not** use the
+repo's `docker-compose.yml`: it is development only. Build in a quiet
 moment after 3.1; if available memory falls below about 300 MB, stop the build and report.
 
-### 3.3 `/opt/votebot-ddp-next/.env` (owner root, mode 600; a fresh file, nothing copied from the old server)
+### 3.3 `/opt/votebot/.env` (git-ignored; owner root, mode 600; a fresh file, nothing copied from the old server)
 
 ```bash
 ENVIRONMENT=production
@@ -182,13 +185,14 @@ PINECONE_INDEX_NAME=ddp-knowledge-base          # exactly this; the index name d
 PINECONE_NAMESPACE=<ddp-sync's PINECONE_NAMESPACE; default is "default">
 DDP_BROKER_API_ROOT=<an address that serves the broker's public GETs and is not rejected as DisallowedHost; see 1.2>
 USE_DDP_OPENSTATES_REPLICA=true
-DDP_OPENSTATES_API_ROOT=<api-v3's in-network address>
+DDP_OPENSTATES_API_ROOT=http://10.0.0.11:8002     # api-v3 through the host address, as ddp-sync reaches it
 DDP_OPENSTATES_BEARER_TOKEN=<...>
 DDP_SITE_BASE_URL=https://dev.digitaldemocracyproject.org     # production host once decided; unset is a safe no-op
 ALLOWED_ORIGINS=["https://dev.digitaldemocracyproject.org"]   # JSON array; REPLACES the code default; no Webflow origins
 REDIS_URL=redis://votebot-redis:6379/0
 QUERY_LOG_DIR=/app/logs/queries
-VOTEBOT_QUICK_ACTION_BUTTONS=<same value as on the old server>
+VOTEBOT_QUICK_ACTION_BUTTONS=false           # first deployment; flip to true after verification (a restart)
+DDP_OPENSTATES_AUTH_HEADER=x-api-key         # api-v3 itself accepts only X-API-Key (a Bearer token is refused with 403)
 SLACK_BOT_TOKEN=
 SLACK_APP_TOKEN=
 ```
@@ -202,37 +206,12 @@ health check fails with `DisallowedHost` because Django rejects requests address
 
 ### 3.4 The compose project
 
-```yaml
-# /opt/votebot-ddp-next/docker-compose.yml  (host-specific; not in the repo)
-name: votebot-ddp-next
-services:
-  votebot:
-    build:
-      context: /opt/votebot
-      dockerfile: infrastructure/docker/Dockerfile
-      target: production
-    image: votebot-ddp-next:local
-    container_name: votebot-ddp-next          # the broker's nginx addresses it by this name
-    env_file: /opt/votebot-ddp-next/.env
-    depends_on: [votebot-redis]
-    mem_limit: 768m
-    restart: unless-stopped
-    volumes:
-      - /opt/votebot-ddp-next/logs:/app/logs
-    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
-    networks: [default, broker]
-  votebot-redis:
-    image: redis:7-alpine
-    container_name: votebot-redis
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
-    mem_limit: 192m
-    restart: unless-stopped
-    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
-networks:
-  broker:
-    external: true
-    name: <the broker's Docker network>
-```
+`infrastructure/docker/docker-compose.prod.yml` (project name `votebot-ddp-next`): the `votebot` container
+(`votebot-ddp-next`, built from the Dockerfile above, `mem_limit` 768 MB, `env_file` `/opt/votebot/.env`, a bind mount
+`${VOTEBOT_LOG_DIR:-/opt/votebot-logs}` at `/app/logs`, joined to the broker's Docker network `ddp-broker-py_default`) and
+`votebot-redis` (128 MB cap, no persistence). The log directory must exist and be owned by uid 1000:
+`sudo install -d -o 1000 -g 1000 /opt/votebot-logs/queries`. Deploying is the same routine as the other projects:
+`cd /opt/votebot && git pull --ff-only`, `docker compose -f infrastructure/docker/docker-compose.prod.yml build`, then `... up -d`.
 
 VoteBot has a Redis of its own (never the broker's, never the host's 6379): only a button cache and a handoff map
 live in it, so no persistence. **One worker, on purpose**: a session's chat history is kept in the memory of the
@@ -242,8 +221,7 @@ history: expected, and the widget reconnects.
 ### 3.5 Start it and verify it INSIDE the Docker network, before any nginx change
 
 ```bash
-sudo install -d -o 1000 -g 1000 /opt/votebot-ddp-next/logs/queries
-docker compose -f /opt/votebot-ddp-next/docker-compose.yml up -d
+docker compose -f infrastructure/docker/docker-compose.prod.yml up -d
 docker logs votebot-ddp-next 2>&1 | grep -E 'VoteBot started|PINECONE_INDEX_NAME|Traceback|Error'
 docker exec votebot-ddp-next python -c "import aiofiles, websockets, httpx; print('deps ok')"
 docker exec votebot-ddp-next python -c "import httpx; print(httpx.get('http://localhost:8000/votebot/v1/health/ready').text)"
@@ -255,12 +233,12 @@ in the namespace first, read-only, as in section 1.2's check). Then section 6, r
 
 ### 3.6 Logs
 
-Query logs are one JSONL file per day in `/opt/votebot-ddp-next/logs/queries` (visitors' messages and addresses). Keep
+Query logs are one JSONL file per day in `/opt/votebot-logs/queries` (visitors' messages and addresses). Keep
 14 days and compress, so they neither fill the shared disk nor keep messages longer than needed:
 
 ```conf
 # /etc/logrotate.d/votebot-ddp-next
-/opt/votebot-ddp-next/logs/queries/*.jsonl {
+/opt/votebot-logs/queries/*.jsonl {
     daily
     rotate 14
     compress
@@ -330,7 +308,7 @@ addresses directly (VoteBot logs the first `X-Forwarded-For` value).
 with `head -1` first):
 
 ```bash
-cd /opt/votebot-ddp-next/logs/queries
+cd /opt/votebot-logs/queries
 jq -r 'select(.event_type=="message_received") | .client_ip' $(date +%F).jsonl | sort | uniq -c | sort -rn | head
 ```
 
