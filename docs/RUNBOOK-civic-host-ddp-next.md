@@ -353,7 +353,7 @@ actually blocks requests (and which other products would be affected if the key 
 
 ## 6. Verify
 
-**What this section needs from code.** `scripts/smoke_ws.py` (VOTEBOT-16, in `main`). Links to our own `/explore/...` pages need `DDP_SITE_BASE_URL` and organization positions from the broker need `DDP_BROKER_API_ROOT`; both are VOTEBOT-15 part 2 (PR #16). Legislator answers and "what changed" read api-v3 live (VOTEBOT-15 part 3, PR #17) and need `USE_DDP_OPENSTATES_REPLICA=true`. Deploy a version of `main` that contains all of them before running this section, or the checks below will fail for the right reason. The startup line to check (`journalctl -u votebot | grep 'VoteBot started'`) is a structured log that includes `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id` (`src/votebot/main.py`).
+**What this section needs from code.** `scripts/smoke_ws.py` (VOTEBOT-16, in `main`). Links to our own `/explore/...` pages need `DDP_SITE_BASE_URL` and organization positions from the broker need `DDP_BROKER_API_ROOT`; both are VOTEBOT-15 part 2 (PR #16, merged). Legislator answers and "what changed" read api-v3 live (VOTEBOT-15 part 3, PR #17) and need `USE_DDP_OPENSTATES_REPLICA=true`. Deploy a version of `main` that contains all of them before running this section, or the checks below will fail for the right reason. The startup line to check (`journalctl -u votebot | grep 'VoteBot started'`) is a structured log that includes `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id` (`src/votebot/main.py`).
 
 ```bash
 python scripts/smoke_ws.py --url wss://<votebot-host>/ws/chat --cases <real cases> --retrieval
