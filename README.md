@@ -286,7 +286,7 @@ You can pass a DDP URL to provide page context:
 https://votebot.digitaldemocracyproject.org/?ddp_url=https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025
 ```
 
-For the host side of serving the new site (nginx routes, allowed origins, `DDP_BROKER_API_ROOT`, an optional second instance on the canonical index, rate limiting), see [docs/RUNBOOK-civic-host-ddp-next.md](docs/RUNBOOK-civic-host-ddp-next.md).
+For running VoteBot for the new site (the old Webflow copy frozen on its own branch, the new copy on the new-infrastructure server, nginx, origins, bot monitoring, cutover and rollback), see [docs/RUNBOOK-civic-host-ddp-next.md](docs/RUNBOOK-civic-host-ddp-next.md).
 
 ### Embedding on Your Site
 
