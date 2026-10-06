@@ -391,8 +391,9 @@
         if (!oldCtx || !newCtx) return true;
         if (oldCtx.type !== newCtx.type) return true;
         if (newCtx.type !== 'general') {
-            // ddp-next pages have no slug, and a bill's id ("HB 1") repeats across states and sessions
-            if (oldCtx.ocd_bill_id && newCtx.ocd_bill_id) return oldCtx.ocd_bill_id !== newCtx.ocd_bill_id;
+            // ddp-next pages have no slug, and a bill's id ("HB 1") repeats across states and sessions.
+            // The same bill id is the same bill; gaining or losing one is a different page.
+            if (oldCtx.ocd_bill_id || newCtx.ocd_bill_id) return oldCtx.ocd_bill_id !== newCtx.ocd_bill_id;
             if (oldCtx.slug && newCtx.slug) return oldCtx.slug !== newCtx.slug;
             if (oldCtx.id && newCtx.id) return oldCtx.id !== newCtx.id;
             if (oldCtx.webflow_id && newCtx.webflow_id) return oldCtx.webflow_id !== newCtx.webflow_id;
