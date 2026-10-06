@@ -17,6 +17,12 @@
 #
 # `.env` must set REDIS_URL=redis://votebot-redis:6379/0 and QUERY_LOG_DIR=/app/logs/queries.
 # One worker, deliberately: a session's chat history lives in the memory of the worker that served it.
+# Query logs: one JSONL file per day on the host under ${VOTEBOT_LOG_DIR}. Docker's json-file rotation below covers
+# container output only, not these files: rotate them on the host (docs/RUNBOOK-civic-host-ddp-next.md, 3.6).
+# If the directory is missing or not owned by uid 1000 VoteBot logs an ERROR at startup ("Query log directory is NOT
+# writable") and keeps answering without writing logs.
+# Redis holds only a button cache and the human-handoff thread map: a restart or eviction loses cached quick-action
+# answers (regenerated on demand) and open handoff mappings; chat history is in VoteBot's own memory.
 # Not for development: use docker-compose.yml in this directory for that.
 
 name: votebot-ddp-next
@@ -51,7 +57,7 @@ services:
     image: redis:7-alpine
     container_name: votebot-redis
     command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
-    mem_limit: 192m
+    mem_limit: 256m                           # headroom over the 128mb dataset cap: allocator and connection overhead
     restart: unless-stopped
     logging:
       driver: json-file
