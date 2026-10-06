@@ -64,14 +64,17 @@ class TestOrganizationRetrieval:
 def _agent(index: str = NEW_INDEX, results=None, scope=None) -> VoteBotAgent:
     a = VoteBotAgent.__new__(VoteBotAgent)
     a.settings = SimpleNamespace(bill_filter_key="ocd_bill_id" if index == NEW_INDEX else "webflow_id")
-    a.retrieval = SimpleNamespace(_legislative_scope=lambda ctx: scope or {})
     queries: list = []
 
     async def query(query, top_k=10, filter=None, include_metadata=True):
         queries.append(filter)
         return results or []
 
-    a.bill_votes = SimpleNamespace(vector_store=SimpleNamespace(query=query))
+    # the real handles: the vector store lives on the retrieval service, and BillVotesService has none
+    a.retrieval = SimpleNamespace(
+        _legislative_scope=lambda ctx: scope or {}, vector_store=SimpleNamespace(query=query)
+    )
+    a.bill_votes = SimpleNamespace()
     a.queries = queries
     return a
 

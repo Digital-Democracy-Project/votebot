@@ -1658,7 +1658,7 @@ class VoteBotAgent:
             search_filter.update(self.retrieval._legislative_scope(page_context))
 
         try:
-            results = await self.bill_votes.vector_store.query(
+            results = await self.retrieval.vector_store.query(
                 query=message,
                 top_k=1,
                 filter=search_filter,
