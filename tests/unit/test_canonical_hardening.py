@@ -72,6 +72,12 @@ class TestJurisdictionOfNamedBill:
         info = _service()._extract_bill_from_query(query)
         assert info is not None and info.jurisdiction is None
 
+    def test_a_code_that_is_also_a_word_needs_capitals(self):
+        svc = _service()
+        assert svc._extract_bill_from_query("Can you tell us about HB 363?").jurisdiction is None
+        assert svc._extract_bill_from_query("What is US HB 363?").jurisdiction == "us"
+        assert svc._extract_bill_from_query("fl hb 363").jurisdiction == "fl"  # unambiguous: unchanged
+
     async def test_those_queries_do_not_guess_a_state_on_a_page_without_one(self):
         looked_up: list = []
         svc = _service(respond=self._respond(looked_up))

@@ -44,6 +44,9 @@ STATE_MAPPINGS = {
 }
 
 
+# Two-letter codes that are also ordinary words, so only the capitalised form names a jurisdiction.
+CODES_THAT_ARE_WORDS = frozenset({"us", "ma", "al"})
+
 # How many chunks the "which bill is this?" lookup reads. A bill has many chunks, so a small top_k
 # can be filled by one session's and never see the other's, defeating the ambiguity check.
 BILL_LOOKUP_TOP_K = 100
@@ -806,8 +809,11 @@ class RetrievalService:
         # Extract jurisdiction from query
         jurisdiction = None
         for name, code in STATE_MAPPINGS.items():
-            # Whole words only: "al" is not in "actually", nor "ma" in "summarize"
-            if re.search(rf"\b{re.escape(name)}\b", query_lower):
+            # Whole words only: "al" is not in "actually", nor "ma" in "summarize". Codes that are
+            # also ordinary words ("tell us about HB 5") count only when written in capitals.
+            haystack = query if name in CODES_THAT_ARE_WORDS else query_lower
+            needle = name.upper() if name in CODES_THAT_ARE_WORDS else name
+            if re.search(rf"\b{re.escape(needle)}\b", haystack):
                 jurisdiction = code
                 break
 
