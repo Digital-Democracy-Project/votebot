@@ -1,4 +1,4 @@
-"""VOTEBOT-8: /content/resolve turns a ddp-next bill URL into a page context with ocd_bill_id.
+"""VOTEBOT-8 / VOTEBOT-13: /content/resolve turns a ddp-next bill URL into a page context with ocd_bill_id.
 
 ddp-broker-py has no bill-detail endpoint, so resolution uses its public `scorecard` and
 `resolve` endpoints. The Webflow path must keep working untouched.
@@ -192,3 +192,116 @@ class TestWebflowPathIsUnchanged:
         )
         result = await content.resolve_content(url="https://digitaldemocracyproject.org/bills/some-bill-2026")
         assert result["webflow_id"] == "wf1"
+
+
+class TestExploreUrls:
+    """VOTEBOT-13: the new site's bill page, /explore/{JURISDICTION}/{SESSION}/{IDENTIFIER}."""
+
+    def test_the_explore_path_is_the_natural_key_with_a_decoded_space(self):
+        assert content._match_ddp_next_bill("/explore/FL/2026/HB%20219") == {
+            "jurisdiction": "FL",
+            "session": "2026",
+            "gov_id": "HB 219",
+        }
+        assert content._match_ddp_next_bill("/explore/FL/2026/HB%20219/") is not None
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/explore", "/explore/FL", "/explore/FL/2026", "/explore/Florida/2026/HB%201", "/explore/FL/2026/HB%201/votes"],
+    )
+    def test_other_explore_paths_are_not_bills(self, path):
+        assert content._match_ddp_next_bill(path) is None
+
+    async def test_resolves_through_the_broker_to_the_same_payload_as_the_bills_form(self, monkeypatch):
+        broker = AsyncMock(return_value={"bill_openstates_id": BILL})
+        monkeypatch.setattr(content, "_broker_get", broker)
+        url = "https://digitaldemocracyproject.org/explore/FL/2026/HB%20219"
+
+        result = await content.resolve_content(url=url)
+
+        assert result == {
+            "type": "bill",
+            "id": "HB 219",
+            "ocd_bill_id": BILL,
+            "gov_id": "HB 219",
+            "jurisdiction": "FL",
+            "session": "2026",
+            "url": url,
+            "ddp_url": url,
+        }
+        assert broker.call_args.args[1] == f"{BROKER}/api/bills/resolve/"
+        assert broker.call_args.kwargs["params"] == {"jurisdiction": "FL", "session": "2026", "gov_id": "HB 219"}
+
+    async def test_a_biennium_session_code_is_passed_through_unparsed(self, monkeypatch):
+        broker = AsyncMock(return_value={"bill_openstates_id": BILL})
+        monkeypatch.setattr(content, "_broker_get", broker)
+        result = await content.resolve_content(
+            url="https://digitaldemocracyproject.org/explore/WA/2023-2024/HB%201234"
+        )
+        assert broker.call_args.kwargs["params"]["session"] == "2023-2024"
+        assert result["session"] == "2023-2024"
+
+    async def test_an_unknown_session_is_404(self, monkeypatch):
+        monkeypatch.setattr(content, "_broker_get", AsyncMock(side_effect=_status_error(404)))
+        with pytest.raises(HTTPException) as err:
+            await content.resolve_content(url="https://digitaldemocracyproject.org/explore/FL/1999/HB%20219")
+        assert err.value.status_code == 404
+
+    async def test_unconfigured_broker_is_503(self, monkeypatch):
+        monkeypatch.setattr(content, "get_settings", lambda: _settings(broker=""))
+        with pytest.raises(HTTPException) as err:
+            await content.resolve_content(url="https://digitaldemocracyproject.org/explore/FL/2026/HB%20219")
+        assert err.value.status_code == 503
+
+
+class TestDeferredDdpNextUrls:
+    """Legislator and organization URLs of ddp-next are deliberately not recognised yet (VOTEBOT-13)."""
+
+    @pytest.mark.parametrize("path", ["/legislators/123", "/legislators/123/", "/organizations/7", "/explore/FL"])
+    def test_not_matched_as_ddp_next_bills(self, path):
+        assert content._match_ddp_next_bill(path) is None
+
+    async def test_a_numeric_legislator_url_still_takes_the_webflow_path(self, monkeypatch):
+        broker = AsyncMock()
+        monkeypatch.setattr(content, "_broker_get", broker)
+        monkeypatch.setattr(content, "fetch_webflow_item_by_slug", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            content,
+            "get_settings",
+            lambda: SimpleNamespace(
+                ddp_broker_api_root=BROKER,
+                webflow_legislators_collection_id="legislators-collection",
+                webflow_votebot_api_key=SecretStr("k"),
+            ),
+        )
+        with pytest.raises(HTTPException) as err:
+            await content.resolve_content(url="https://digitaldemocracyproject.org/legislators/123")
+        assert err.value.status_code == 404  # not found in the CMS, and the broker was never asked
+        broker.assert_not_called()
+
+
+class TestBrokerBodyShape:
+    """A 200 whose body is not a JSON object is the broker breaking its contract: 502, not 500."""
+
+    @staticmethod
+    def _client(body: bytes, content_type: str = "application/json") -> httpx.AsyncClient:
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body, headers={"content-type": content_type}))
+        return httpx.AsyncClient(transport=transport)
+
+    @pytest.mark.parametrize("body", [b"<html>gateway</html>", b"", b"[1, 2]", b'"text"', b"null"])
+    async def test_non_json_or_non_dict_body_is_a_bad_gateway(self, body):
+        async with self._client(body) as client:
+            with pytest.raises(HTTPException) as err:
+                await content._broker_get(client, f"{BROKER}/api/bills/resolve/")
+        assert err.value.status_code == 502
+
+    async def test_a_json_object_is_returned(self):
+        async with self._client(b'{"bill_openstates_id": "x"}') as client:
+            assert await content._broker_get(client, f"{BROKER}/api/bills/resolve/") == {"bill_openstates_id": "x"}
+
+    @pytest.mark.parametrize("scorecard", [{"bill": "oops"}, {"bill": ["x"]}, {"bill": {"session": "2026", "govId": "HB 1", "jurisdictionIso2": "FL"}}])
+    async def test_a_malformed_scorecard_is_a_bad_gateway(self, monkeypatch, scorecard):
+        monkeypatch.setattr(content, "_broker_get", AsyncMock(return_value=scorecard))
+        with pytest.raises(HTTPException) as err:
+            await content.resolve_content(url="https://digitaldemocracyproject.org/bills/123")
+        assert err.value.status_code == 502

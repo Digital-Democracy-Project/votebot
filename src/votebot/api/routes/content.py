@@ -17,6 +17,9 @@ router = APIRouter(prefix="/content", tags=["content"])
 # segment is a ddp-broker-py bill id; the three-segment form is the bill's natural key.
 DDP_NEXT_BILL_BY_ID = re.compile(r"^/bills/(\d+)/?$")
 DDP_NEXT_BILL_BY_KEY = re.compile(r"^/bills/([A-Za-z]{2})/([^/]+)/([^/]+)/?$")
+# The new site's bill page: /explore/{JURISDICTION}/{SESSION}/{IDENTIFIER}, identifier URL-encoded
+# ("HB%20219"). Same natural key as above, resolved the same way.
+DDP_NEXT_EXPLORE_BILL = re.compile(r"^/explore/([A-Za-z]{2})/([^/]+)/([^/]+)/?$")
 
 # URL patterns for DDP content (Webflow-hosted pages; kept until Webflow is retired)
 DDP_PATTERNS = {
@@ -33,10 +36,12 @@ async def resolve_content(
     """
     Resolve a DDP URL to content metadata for the chat widget.
 
-    ddp-next bill URLs (`/bills/{broker_id}` or `/bills/{jurisdiction}/{session}/{gov_id}`) are
-    resolved through ddp-broker-py to the bill's OpenStates id, which is what retrieval filters
-    on once VoteBot reads the canonical-id index. Every other URL is parsed for content type
-    and slug and looked up in the Webflow CMS, exactly as before.
+    ddp-next bill URLs (`/explore/{jurisdiction}/{session}/{gov_id}`, `/bills/{broker_id}` or
+    `/bills/{jurisdiction}/{session}/{gov_id}`) are resolved through ddp-broker-py to the bill's
+    OpenStates id, which is what retrieval filters on once VoteBot reads the canonical-id index.
+    Every other URL is parsed for content type and slug and looked up in the Webflow CMS, exactly
+    as before. ddp-next legislator (`/legislators/{numeric id}`) and organization URLs are not
+    resolved yet: see `_match_ddp_next_bill`.
 
     Args:
         url: Full DDP URL (e.g., https://digitaldemocracyproject.org/bills/one-big-beautiful-bill-act-hr1-2025)
@@ -162,11 +167,17 @@ async def resolve_content(
 
 
 def _match_ddp_next_bill(path: str) -> dict | None:
-    """Recognise a ddp-next bill URL path; None for anything else (including Webflow slugs)."""
+    """Recognise a ddp-next bill URL path; None for anything else (including Webflow slugs).
+
+    Deliberately not recognised yet, so they fall through to the Webflow path: ddp-next
+    `/legislators/{numeric id}` (the broker has no public endpoint that returns a legislator's
+    OpenStates person id; its list and scorecard endpoints do not carry it) and organization
+    URLs (ddp-next has no organization page). Add them here once the broker exposes the id.
+    """
     match = DDP_NEXT_BILL_BY_ID.match(path)
     if match:
         return {"broker_id": int(match.group(1))}
-    match = DDP_NEXT_BILL_BY_KEY.match(path)
+    match = DDP_NEXT_BILL_BY_KEY.match(path) or DDP_NEXT_EXPLORE_BILL.match(path)
     if match:
         return {
             "jurisdiction": match.group(1),
@@ -177,10 +188,20 @@ def _match_ddp_next_bill(path: str) -> dict | None:
 
 
 async def _broker_get(client: httpx.AsyncClient, url: str, params: dict | None = None) -> dict:
-    """GET a ddp-broker-py JSON endpoint; raises httpx.HTTPStatusError on 4xx/5xx."""
+    """GET a ddp-broker-py JSON endpoint; raises httpx.HTTPStatusError on 4xx/5xx.
+
+    A 200 whose body is not a JSON object breaks the broker's contract: a bad gateway (502).
+    """
     response = await client.get(url, params=params)
     response.raise_for_status()
-    return response.json()
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        logger.error("Broker returned a non-JSON-object body", url=url)
+        raise HTTPException(status_code=502, detail="ddp-broker-py returned an invalid response")
+    return body
 
 
 async def resolve_ddp_next_bill(url: str, key: dict) -> dict:
@@ -202,10 +223,11 @@ async def resolve_ddp_next_bill(url: str, key: dict) -> dict:
         async with httpx.AsyncClient(timeout=15.0) as client:
             if "broker_id" in key:
                 scorecard = await _broker_get(client, f"{root}/api/bills/{key['broker_id']}/scorecard/")
-                meta = scorecard.get("bill") or {}
+                meta = scorecard.get("bill")
+                meta = meta if isinstance(meta, dict) else {}
                 key = {
                     "jurisdiction": meta.get("jurisdictionIso2"),
-                    "session": (meta.get("session") or {}).get("code"),
+                    "session": (meta.get("session") if isinstance(meta.get("session"), dict) else {}).get("code"),
                     "gov_id": meta.get("govId"),
                 }
                 title = meta.get("title")
