@@ -81,3 +81,24 @@ class TestNonStreamingPath:
         await _ask(agent, PageContext(type="bill", id="HR 1", slug="a-bill"))
         agent.legislators.find_by_name.assert_not_called()
         assert "Legislator Profile" not in prompts[0]
+
+
+class TestOneBudgetPerMessage:
+    async def test_the_non_streaming_path_starts_its_own_budget_too(self):
+        import time
+
+        from votebot.core import agent as agent_module
+
+        agent, _ = _agent()
+        seen = []
+        original = agent.retrieval.retrieve
+
+        async def spy(**kwargs):
+            seen.append(agent_module._enrichment_deadline.get())
+            return await original(**kwargs)
+
+        agent.retrieval = SimpleNamespace(retrieve=spy)
+        before = time.monotonic()
+        await _ask(agent, PageContext(type="general"), "hi")
+        assert seen[0] is not None
+        assert before + agent_module.BUDGET_SECONDS - 0.5 < seen[0] < time.monotonic() + agent_module.BUDGET_SECONDS

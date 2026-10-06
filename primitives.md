@@ -37,7 +37,7 @@ The single retrieval orchestrator. **Do not add raw Pinecone calls outside this 
     - Phase 2: `bill` (CMS summary) + webflow_id
     - Phase 3: removed (stale bill-history)
     - Phase 4a: org positions (`bill` + `organization`)
-    - Phase 4b: vote records (`bill-votes`, `legislator-votes`)
+    - Phase 4b: vote records (`bill-votes`, `legislator-votes`) — **legacy index only**: votes are not embedded in the canonical-id index (read live), so nothing searches for them there; legislator pages return no chunks there either (live from api-v3, no Webflow id lookup)
     - Phase 5: what changed, **only on changelog intent**. Legacy index: `bill-changelog` + webflow_id. Canonical-id index: **no search**: `_live_version_diffs(ocd_bill_id, query)` reads api-v3's stored `diff_from_previous_version` live (`BillVersionService.get_diffs`) under the same version scope as the text (current version, or the stage/date a query names), as synthetic `bill-version-diff` chunks (`source: "OpenStates (live)"`, labelled with both versions, capped at `DIFF_MAX_CHARS` per version) that `format_retrieved_chunks` groups as before
   - `_retrieve_organization_priority(query, filters, max_chunks) -> list[SearchResult]`
   - `_build_filters(page_context, query) -> dict` — builds Pinecone filter from page context; use this, never build filters inline. A bill is pinned by `webflow_id` on the legacy index and by `ocd_bill_id` on the canonical-id index (VOTEBOT-8). An organization is pinned by `webflow_id`/`slug` on the legacy index and by `broker_org_id` (an all-digit `page_context.id`, else the broker `slug`) on the canonical-id one (VOTEBOT-15, SYNC-91)
@@ -136,7 +136,7 @@ Bidirectional CMS fetch used at query time for RAG augmentation/verification. Al
 Canonical-id index: legislators and version diffs are not embedded (SYNC-94; 2026-10-05), so both are read from api-v3 through `openstates_base_url`/`openstates_headers`.
 
 - **`LegislatorLookupService`** — `find_by_id(person_id)`, `find_by_name(name, jurisdiction=None)` over `GET /people` (`include=offices&include=links`); None on any problem. `Legislator` (`current` = has a current role), `format_legislators(people, asked)` (one profile, or a "several match, ask which" list; current members preferred over former).
-- **`VoteBotAgent._legislator_context_from_api_v3(message, page_context)`** — legislator page: by `ocd-person/...` id, else title + jurisdiction; bill page: a name in the message; other pages only with a cue word (`LEGISLATOR_CUES`). Used by both the streaming and non-streaming paths on the canonical index; the legacy index keeps `_prefetch_legislator_info`. `_candidate_person_name(message)` is the shared name guess.
+- **`VoteBotAgent._legislator_context_from_api_v3(message, page_context)`** — legislator page: by `ocd-person/...` id, else title + jurisdiction; bill page: a name from `_legislator_name_in` (acronyms, `US_STATES` and `NAME_STOPWORDS` dropped; a cue word or at least two words); other pages only with a cue word (`LEGISLATOR_CUES`). **One time budget per message**: `_enrichment_deadline` (a contextvar set at the start of `process_message` and `process_message_stream`) is shared by the broker and legislator lookups; the broker service stops at it and returns what it has. An organization's bills are listed **once per bill** (the broker returns one row per bill version ordered by version id and exposes no timestamp, so the last row per bill wins). Used by both the streaming and non-streaming paths on the canonical index; the legacy index keeps `_prefetch_legislator_info`. `_candidate_person_name(message)` is the shared name guess.
 - **`BillVersionService.get_diffs(ocd_bill_id, stages=(), dates=()) -> list[VersionDiff] | None`** — stored `diff_from_previous_version` for the current version (default) or the named stage/date, with the predecessor's label; not cached; every matching version is returned and retrieval's `DIFF_MAX_CHARS` budget (shared by all of them) decides what fits, saying how many were omitted. Since OPEN-118 api-v3 carries a diff for every classifiable version; one is missing mainly for a bill's first version, an unarchived predecessor, or a missing row.
 
 ## Broker lookups and links to our pages (`services/broker_lookup.py`, `utils/ddp_urls.py`, VOTEBOT-15)
@@ -261,7 +261,7 @@ Same index and namespace as DDP-Sync (`votebot-large` today; `ddp-knowledge-base
 | `bill-version-diff` | **Not embedded** (2026-10-05); Phase 5 reads it live (changelog intent only; canonical-id index) | api-v3's stored diff against the previous version, labelled with `from_version_note`/`from_document_id`; replaces `bill-changelog`. Every classifiable version has one (OPEN-118) except a bill's first and any whose predecessor is not archived; none for `unknown`-stage versions |
 | `bill-votes` | Phase 4b | Vote records per bill |
 | `legislator` | Standard retrieval | Legislator profiles |
-| `legislator-votes` | Phase 4b | Reverse index: per-legislator voting history |
+| `legislator-votes` | Phase 4b (legacy index only) | Reverse index: per-legislator voting history |
 | `organization` | Phase 4a, org retrieval | Org profiles with bill positions |
 | `training` | General retrieval | Behaviour customisation docs |
 
