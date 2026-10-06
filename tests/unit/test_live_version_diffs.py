@@ -14,8 +14,13 @@ import pytest
 from tests.unit.test_ocd_bill_id_retrieval import BILL, NEW_INDEX, _service
 from votebot.api.schemas.chat import PageContext
 from votebot.config import Settings
-from votebot.core.retrieval import DIFF_CHUNK_CHARS, DIFF_MAX_CHARS
-from votebot.services.bill_versions import MAX_DIFF_VERSIONS, BillVersionService
+from votebot.core.retrieval import (
+    DIFF_CHUNK_CHARS,
+    DIFF_MAX_CHARS,
+    DIFF_NONE_NOTE,
+    DIFF_UNAVAILABLE_NOTE,
+)
+from votebot.services.bill_versions import BillVersionService
 
 
 def _version(note, date, stage, ordinal, archive_id, diff):
@@ -66,15 +71,23 @@ class TestGetDiffs:
     async def test_stage_unknown_versions_are_never_chosen(self):
         assert await _versions_service().get_diffs(BILL, stages=("unknown",)) == []
 
+    async def test_a_diff_whose_predecessor_is_not_archived_is_dropped_not_mislabelled(self):
+        # Introduced exists in the lineage but has no archived text: what Engrossed was compared with is unknown.
+        unarchived = _version("Introduced", "2026-01-10", "introduced", 0, None, None)
+        api = {"versions": [unarchived, API["versions"][1], API["versions"][2]]}
+        assert await _versions_service(api).get_diffs(BILL, stages=("chamber_passage",)) == []
+        (enrolled,) = await _versions_service(api).get_diffs(BILL)  # its own predecessor is archived: fine
+        assert enrolled.from_note == "Engrossed"
+
     async def test_the_predecessor_skips_stage_unknown_versions(self):
         api = {"versions": [API["versions"][0], API["versions"][3], API["versions"][1]]}
         (diff,) = await _versions_service(api).get_diffs(BILL, stages=("chamber_passage",))
         assert diff.from_note == "Introduced"
 
-    async def test_no_more_than_the_cap_is_returned(self):
-        many = {"versions": [_version(f"Amendment {i}", f"2026-02-0{i + 1}", "amendment", i, 200 + i, f"+ {i}") for i in range(6)]}
+    async def test_every_matching_version_is_returned_and_the_size_budget_decides_what_fits(self):
+        many = {"versions": [_version(f"Amendment {i}", f"2026-02-0{i + 1}", "amendment", i, 200 + i, f"+ {i}" if i else None) for i in range(6)]}
         diffs = await _versions_service(many).get_diffs(BILL, stages=("amendment",))
-        assert len(diffs) == MAX_DIFF_VERSIONS
+        assert [d.note for d in diffs] == [f"Amendment {i}" for i in range(1, 6)]  # the first has no predecessor, so no diff
 
     @pytest.mark.parametrize("api", [None, {}, {"versions": "x"}, {"versions": [None, "x"]}])
     async def test_nothing_usable_is_none_or_empty(self, api):
@@ -131,16 +144,55 @@ class TestRetrievalPhaseFive:
         assert f"first {DIFF_MAX_CHARS} of {len(long_diff)} characters" in text
         assert len(text) < DIFF_MAX_CHARS + 200
 
-    async def test_api_v3_down_costs_the_diff_not_the_answer(self):
-        svc = _retrieval(None)
-        result = await svc.retrieve("what changed in this bill?", _bill())  # must not raise
-        assert not any(c.metadata.get("document_type") == "bill-version-diff" for c in result.chunks)
+    async def test_the_budget_is_for_all_the_versions_together_and_the_rest_are_said_to_be_omitted(self):
+        big = "+" + "y" * 9000
+        api = {"versions": [
+            _version("Amendment A", "2026-02-01", "amendment", 0, 201, None),
+            _version("Amendment B", "2026-02-02", "amendment", 1, 202, big),
+            _version("Amendment C", "2026-02-03", "amendment", 2, 203, big),
+            _version("Amendment D", "2026-02-04", "amendment", 3, 204, big),
+        ]}
+        result = await _retrieval(api).retrieve("what changed in the amended version?", _bill())
+        diffs = [c for c in result.chunks if c.metadata["document_type"] == "bill-version-diff"]
+        assert sum(len(c.content) for c in diffs) < DIFF_MAX_CHARS + 200  # not 3 x 9000
+        assert {c.metadata["version_note"] for c in diffs} == {"Amendment B", "Amendment C"}  # D had no budget left
+        assert any("omitted for length" in n for n in result.notes)
 
-    async def test_a_lookup_that_raises_costs_the_diff_not_the_answer(self):
+    async def test_api_v3_down_tells_the_model_it_could_not_read_the_change(self):
+        result = await _retrieval(None).retrieve("what changed in this bill?", _bill())  # must not raise
+        assert not any(c.metadata.get("document_type") == "bill-version-diff" for c in result.chunks)
+        assert result.notes == [DIFF_UNAVAILABLE_NOTE]
+
+    async def test_a_lookup_that_raises_is_the_same_as_api_v3_being_down(self):
         svc = _retrieval()
         svc.bill_versions.get_diffs = AsyncMock(side_effect=RuntimeError("boom"))
         result = await svc.retrieve("what changed in this bill?", _bill())
-        assert not any(c.metadata.get("document_type") == "bill-version-diff" for c in result.chunks)
+        assert result.notes == [DIFF_UNAVAILABLE_NOTE]
+
+    async def test_no_stored_diff_is_said_differently_from_an_outage(self):
+        result = await _retrieval().retrieve("what changed in the introduced version?", _bill())
+        assert result.notes == [DIFF_NONE_NOTE] and "latest version and the one before it" in DIFF_NONE_NOTE
+
+    async def test_an_ordinary_question_adds_no_notes(self):
+        assert (await _retrieval().retrieve("what does this bill do?", _bill())).notes == []
+
+    async def test_the_notes_reach_the_prompt_ahead_of_the_sources(self):
+        from tests.unit.test_agent_stream_votes_flag import _agent
+
+        agent = _agent("", should_use_tool=False)
+        prompts = []
+
+        async def stream(**kwargs):
+            prompts.append(kwargs["system_prompt"])
+            from votebot.services.llm import StreamChunk
+
+            yield StreamChunk(text="ok", done=True)
+
+        agent.llm = type("L", (), {"stream": staticmethod(stream)})()
+        agent.retrieval = _retrieval(None)
+        async for _ in agent.process_message_stream(message="what changed in this bill?", session_id="s", page_context=_bill()):
+            pass
+        assert DIFF_UNAVAILABLE_NOTE in prompts[0]
 
     async def test_the_diff_chunks_carry_the_labels_the_prompt_groups_by(self):
         from votebot.core.prompts import format_retrieved_chunks

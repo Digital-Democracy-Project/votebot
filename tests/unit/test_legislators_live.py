@@ -19,7 +19,13 @@ from votebot.api.schemas.chat import PageContext
 from votebot.config import Settings
 from votebot.core.agent import LEGISLATOR_CUES, VoteBotAgent
 from votebot.services import legislators as legislators_module
-from votebot.services.legislators import Legislator, LegislatorLookupService, format_legislators
+from votebot.services.legislators import (
+    UNAVAILABLE,
+    Legislator,
+    LegislatorLookupService,
+    PeopleMatch,
+    format_legislators,
+)
 
 PERSON_ID = "ocd-person/11111111-2222-3333-4444-555555555555"
 REAL_CLIENT = httpx.AsyncClient
@@ -53,7 +59,8 @@ class TestLookupService:
             seen.append(request)
             return httpx.Response(200, json={"results": [_raw()]})
 
-        (person,) = await _service(monkeypatch, handler).find_by_name("Ashley Moody", "us")
+        match = await _service(monkeypatch, handler).find_by_name("Ashley Moody", "us")
+        (person,) = match.people
         request = seen[0]
         assert request.url.path == "/people"
         params = request.url.params
@@ -72,13 +79,14 @@ class TestLookupService:
             seen.append(request)
             return httpx.Response(200, json={"results": [_raw()]})
 
-        person = await _service(monkeypatch, handler).find_by_id(PERSON_ID)
+        person = (await _service(monkeypatch, handler).find_by_id(PERSON_ID)).people[0]
         assert person.person_id == PERSON_ID and seen[0].url.params["id"] == PERSON_ID
 
     async def test_a_former_legislator_has_no_current_role(self, monkeypatch):
         raw = _raw()
         raw["current_role"] = None
-        (person,) = await _service(monkeypatch, lambda r: httpx.Response(200, json={"results": [raw]})).find_by_name("X")
+        match = await _service(monkeypatch, lambda r: httpx.Response(200, json={"results": [raw]})).find_by_name("X")
+        (person,) = match.people
         assert person.current is False and person.title == ""
 
     @pytest.mark.parametrize("answer", [httpx.Response(500), httpx.Response(200, content=b"<html>"),
@@ -90,13 +98,26 @@ class TestLookupService:
 
     async def test_unusable_rows_are_skipped_and_an_unreachable_service_is_none(self, monkeypatch):
         rows = [_raw(), {"id": "x"}, "junk", {"name": "No id"}]
-        people = await _service(monkeypatch, lambda r: httpx.Response(200, json={"results": rows})).find_by_name("X")
-        assert [p.name for p in people] == ["Ashley Moody"]
+        match = await _service(monkeypatch, lambda r: httpx.Response(200, json={"results": rows})).find_by_name("X")
+        assert [p.name for p in match.people] == ["Ashley Moody"]
 
         def down(request):
             raise httpx.ConnectError("down")
 
         assert await _service(monkeypatch, down).find_by_name("X") is None
+
+
+class TestMatchTotals:
+    async def test_the_total_comes_from_api_v3s_pagination_and_defaults_to_what_was_returned(self, monkeypatch):
+        body = {"results": [_raw(), _raw(name="Other", id="ocd-person/b")], "pagination": {"total_items": 37, "per_page": 10}}
+        match = await _service(monkeypatch, lambda r: httpx.Response(200, json=body)).find_by_name("Moody")
+        assert (len(match.people), match.total) == (2, 37)
+        match = await _service(monkeypatch, lambda r: httpx.Response(200, json={"results": [_raw()]})).find_by_name("Moody")
+        assert (len(match.people), match.total) == (1, 1)
+
+    async def test_nobody_matching_is_an_empty_match_not_a_failure(self, monkeypatch):
+        match = await _service(monkeypatch, lambda r: httpx.Response(200, json={"results": []})).find_by_name("Zzz")
+        assert match is not None and match.people == [] and match.total == 0
 
 
 class TestFormatting:
@@ -106,25 +127,33 @@ class TestFormatting:
         return Legislator(**{**base, **kw})
 
     def test_one_match_is_a_full_profile(self):
-        text = format_legislators([self._p(email="e@x.test", offices=["Capitol Office: 1 Main St"],
-                                           links=[("homepage", "https://x.test")], profile_url="https://openstates.org/p")])
+        text = format_legislators(PeopleMatch([self._p(email="e@x.test", offices=["Capitol Office: 1 Main St"],
+                                           links=[("homepage", "https://x.test")], profile_url="https://openstates.org/p")], 1))
         for expected in ("Ashley Moody** (Republican)", "Senator, District FL, Senate, United States", "e@x.test",
                          "Capitol Office: 1 Main St", "[homepage](https://x.test)", "https://openstates.org/p", "Authoritative Source"):
             assert expected in text
 
     def test_several_current_matches_are_listed_and_the_model_is_told_to_ask(self):
-        text = format_legislators([self._p(), self._p(name="Ashley Moody Jr", person_id="b", party="Democratic")], asked="Moody")
+        text = format_legislators(PeopleMatch([self._p(), self._p(name="Ashley Moody Jr", person_id="b", party="Democratic")], 2), asked="Moody")
         assert "Several legislators match \"Moody\"" in text and "ask them" in text and "Ashley Moody Jr (Democratic)" in text
 
     def test_current_members_are_preferred_over_former_ones(self):
-        text = format_legislators([self._p(current=False, name="Old Moody"), self._p()], asked="Moody")
+        text = format_legislators(PeopleMatch([self._p(current=False, name="Old Moody"), self._p()], 2), asked="Moody")
         assert "Ashley Moody" in text and "Old Moody" not in text and "Several" not in text
 
     def test_a_former_legislator_alone_is_said_to_be_former(self):
-        assert "a former legislator" in format_legislators([self._p(current=False, title="", chamber="")])
+        assert "a former legislator" in format_legislators(PeopleMatch([self._p(current=False, title="", chamber="")], 1))
 
     def test_nothing_is_empty(self):
-        assert format_legislators(None) == "" and format_legislators([]) == ""
+        assert format_legislators(None) == "" and format_legislators(PeopleMatch()) == ""
+
+    def test_a_match_larger_than_what_was_returned_says_so(self):
+        text = format_legislators(PeopleMatch([self._p(), self._p(person_id="b", name="Other Moody")], 37), asked="Moody")
+        assert "37 people match in all" in text and "ask for a fuller name" in text
+
+    def test_one_person_returned_out_of_many_is_not_presented_as_the_only_match(self):
+        text = format_legislators(PeopleMatch([self._p()], 12), asked="Moody")
+        assert "Several legislators match" in text and "12 people match in all" in text
 
 
 def _agent(index=NEW_INDEX, found=None, by_id=None) -> VoteBotAgent:
@@ -132,8 +161,8 @@ def _agent(index=NEW_INDEX, found=None, by_id=None) -> VoteBotAgent:
     a.settings = SimpleNamespace(bill_filter_key="ocd_bill_id" if index == NEW_INDEX else "webflow_id")
     person = Legislator(PERSON_ID, "Ashley Moody", "Republican", "Senator", "Senate", "FL", "United States", True)
     a.legislators = SimpleNamespace(
-        find_by_id=AsyncMock(return_value=by_id if by_id is not None else person),
-        find_by_name=AsyncMock(return_value=found if found is not None else [person]),
+        find_by_id=AsyncMock(return_value=by_id if by_id is not None else PeopleMatch([person], 1)),
+        find_by_name=AsyncMock(return_value=found if found is not None else PeopleMatch([person], 1)),
     )
     return a
 
@@ -177,13 +206,18 @@ class TestAgentContext:
         assert await agent._legislator_context_from_api_v3(message, PageContext(type="general")) == ""
         agent.legislators.find_by_name.assert_not_called()
 
-    async def test_no_match_or_a_failure_is_empty_not_an_error(self):
-        agent = _agent(found=[])
-        assert await agent._legislator_context_from_api_v3("Senator Nobody", PageContext(type="bill", id="HB 1")) == ""
-        agent.legislators.find_by_name = AsyncMock(return_value=None)
-        assert await agent._legislator_context_from_api_v3("Senator Nobody", PageContext(type="bill", id="HB 1")) == ""
+    async def test_nobody_matching_adds_nothing_but_a_failure_tells_the_model_it_could_not_look(self):
+        bill = PageContext(type="bill", id="HB 1")
+        agent = _agent(found=PeopleMatch())
+        assert await agent._legislator_context_from_api_v3("Senator Nobody", bill) == ""
+        agent.legislators.find_by_name = AsyncMock(return_value=None)  # api-v3 failed
+        text = await agent._legislator_context_from_api_v3("Senator Nobody", bill)
+        assert text == UNAVAILABLE and "from memory" in text
+        agent.legislators.find_by_id = AsyncMock(return_value=None)
+        page = PageContext(type="legislator", id=PERSON_ID)
+        assert await agent._legislator_context_from_api_v3("hi", page) == UNAVAILABLE
 
-    async def test_a_slow_api_v3_costs_the_context_not_the_answer(self, monkeypatch):
+    async def test_a_slow_api_v3_costs_the_profile_and_the_model_is_told(self, monkeypatch):
         monkeypatch.setattr("votebot.core.agent.BUDGET_SECONDS", 0.05)
         agent = _agent()
 
@@ -191,7 +225,7 @@ class TestAgentContext:
             await asyncio.sleep(5)
 
         agent.legislators.find_by_name = slow
-        assert await agent._legislator_context_from_api_v3("Senator Moody", PageContext(type="bill", id="HB 1")) == ""
+        assert await agent._legislator_context_from_api_v3("Senator Moody", PageContext(type="bill", id="HB 1")) == UNAVAILABLE
 
     def test_cue_words(self):
         for text in ("Sen. Smith", "the Representative", "Rep. Jones", "Congresswoman X", "lawmakers", "Senators from FL"):

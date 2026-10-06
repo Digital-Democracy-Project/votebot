@@ -52,10 +52,19 @@ CODES_THAT_ARE_WORDS = frozenset({"us", "ma", "al"})
 # can be filled by one session's and never see the other's, defeating the ambiguity check.
 BILL_LOOKUP_TOP_K = 100
 
-# A live "what changed" diff is cut to this much per version, in chunks of this size, so a whole-bill
-# rewrite cannot flood the prompt.
+# Live "what changed" diffs together are cut to this much (in chunks of the second size), so a
+# whole-bill rewrite, or several named versions, cannot flood the prompt.
 DIFF_MAX_CHARS = 12000
 DIFF_CHUNK_CHARS = 4000
+
+DIFF_UNAVAILABLE_NOTE = (
+    "Version-change data could not be retrieved from the live records right now. Do not describe what "
+    "changed between versions; tell the user you could not retrieve it just now."
+)
+DIFF_NONE_NOTE = (
+    "No stored comparison exists for the requested version (the live records keep one only for a bill's "
+    "latest version and the one before it). Say so; do not infer what changed."
+)
 
 
 @dataclass
@@ -90,6 +99,9 @@ class RetrievalResult:
     # Canonical-id index only: the `document_id` of the bill's current version, so the prompt
     # builder can mark that version "current". Looked up per request, never stored on vectors.
     current_document_id: str | None = None
+    # Things the model must be told about this retrieval (e.g. live version data could not be read),
+    # shown ahead of the sources so it does not answer from memory.
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -268,6 +280,7 @@ class RetrievalService:
 
         # For bill queries, use multi-phase retrieval to prioritize legislative text
         current_document_id = None
+        notes: list[str] = []
         if effective_context.type == "bill":
             version_filter: dict = {}
             if self._ocd_mode:
@@ -280,6 +293,7 @@ class RetrievalService:
                 max_chunks=max_chunks,
                 page_context=effective_context,
                 version_filter=version_filter,
+                notes=notes,
             )
         elif effective_context.type == "organization" or self._is_organization_query(query):
             # Organization-focused retrieval: prioritize org documents
@@ -333,6 +347,7 @@ class RetrievalService:
             filters_applied=filters,
             total_retrieved=len(final_results),
             current_document_id=current_document_id,
+            notes=notes,
         )
 
     async def _retrieve_bill_with_text_priority(
@@ -342,6 +357,7 @@ class RetrievalService:
         max_chunks: int,
         page_context: PageContext | None = None,
         version_filter: dict | None = None,
+        notes: list[str] | None = None,
     ) -> list[SearchResult]:
         """
         Retrieve bill content with priority for actual legislative text.
@@ -668,7 +684,7 @@ class RetrievalService:
             # Canonical-id index: diffs are not embedded; the change is api-v3's stored diff, read
             # live under the same version scope as the text (the current version's diff unless a
             # version is named) and labelled with both versions.
-            changelog_results = await self._live_version_diffs(filters.get("ocd_bill_id"), query)
+            changelog_results = await self._live_version_diffs(filters.get("ocd_bill_id"), query, notes)
         elif is_changelog_query and filters.get("webflow_id"):
             changelog_filter = {"document_type": "bill-changelog", "webflow_id": filters["webflow_id"]}
         if changelog_filter:
@@ -1172,12 +1188,15 @@ class RetrievalService:
 
         return filters
 
-    async def _live_version_diffs(self, ocd_bill_id: str | None, query: str) -> list[SearchResult]:
+    async def _live_version_diffs(
+        self, ocd_bill_id: str | None, query: str, notes: list[str] | None = None
+    ) -> list[SearchResult]:
         """The stored diffs for a "what changed" question, as `bill-version-diff` chunks.
 
-        Read from api-v3 (nothing is searched in the index). Long diffs are cut to
-        `DIFF_MAX_CHARS` per version, in chunks, with a note saying so. Any failure is no chunks:
-        the answer then says it cannot show the change, as the prompt already requires.
+        Read from api-v3 (nothing is searched in the index). Together they are cut to
+        `DIFF_MAX_CHARS`, in chunks, with a note saying so. When api-v3 cannot answer, or has no
+        stored diff for the version, `notes` gets a message saying which, so the answer says it
+        cannot show the change instead of guessing.
         """
         if not ocd_bill_id:
             return []
@@ -1190,15 +1209,27 @@ class RetrievalService:
             )
         except Exception as e:  # noqa: BLE001 -- a lookup problem must cost the diff, not the answer
             logger.warning("Could not read version diffs from api-v3", ocd_bill_id=ocd_bill_id, error=str(e))
+            diffs = None
+        if diffs is None:
+            if notes is not None:
+                notes.append(DIFF_UNAVAILABLE_NOTE)
+            return []
+        if not diffs:
+            if notes is not None:
+                notes.append(DIFF_NONE_NOTE)
             return []
         chunks: list[SearchResult] = []
-        for diff in diffs or []:
-            text = diff.text
-            truncated = len(text) > DIFF_MAX_CHARS
-            if truncated:
-                text = text[:DIFF_MAX_CHARS] + f"\n[Diff truncated: first {DIFF_MAX_CHARS} of {len(diff.text)} characters]"
-            pieces = [text[i : i + DIFF_CHUNK_CHARS] for i in range(0, len(text), DIFF_CHUNK_CHARS)]
-            for n, piece in enumerate(pieces):
+        remaining, omitted, truncated = DIFF_MAX_CHARS, 0, 0
+        for diff in diffs:
+            if remaining <= 0:
+                omitted += 1
+                continue
+            text = diff.text[:remaining]
+            if len(diff.text) > remaining:
+                truncated += 1
+                text += f"\n[Diff truncated: first {len(text)} of {len(diff.text)} characters]"
+            remaining -= len(diff.text[:remaining])
+            for n, piece in enumerate(text[i : i + DIFF_CHUNK_CHARS] for i in range(0, len(text), DIFF_CHUNK_CHARS)):
                 chunks.append(
                     SearchResult(
                         id=f"bill-version-diff:{ocd_bill_id}:{diff.document_id}-live-{n}",
@@ -1217,6 +1248,12 @@ class RetrievalService:
                         },
                     )
                 )
+        if omitted and notes is not None:
+            notes.append(f"The changes of {omitted} further matching version(s) are omitted for length; say so if asked.")
+        logger.info(
+            "Live version diffs", ocd_bill_id=ocd_bill_id, versions=len(diffs), chunks=len(chunks),
+            truncated=truncated, omitted=omitted,
+        )
         return chunks
 
     def _link_to_ddp_pages(self, chunks: list[SearchResult]) -> list[SearchResult]:

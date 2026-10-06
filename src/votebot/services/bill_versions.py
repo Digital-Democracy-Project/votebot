@@ -52,8 +52,6 @@ class VersionDiff:
     text: str
 
 
-MAX_DIFF_VERSIONS = 3  # a named stage ("the amendments") can match several versions
-
 
 def current_version(versions: list[BillVersion] | None) -> BillVersion | None:
     """The bill's current version: the latest classifiable one, and only if it can be filtered on.
@@ -134,22 +132,30 @@ class BillVersionService:
             return None
         raw = [r for r in data.get("versions") or [] if isinstance(r, dict)]
         versions = self._parse_versions({"versions": raw})
-        lineage = [(v, r) for v, r in zip(versions, raw, strict=True) if v.stage != STAGE_UNKNOWN and v.document_id]
+        # api-v3's own lineage: every classifiable version in chronological order (stage-unknown ones
+        # are outside it), archived or not. A diff compares a version with the one before it in
+        # THIS list, so that is the label it gets.
+        lineage = [(v, r) for v, r in zip(versions, raw, strict=True) if v.stage != STAGE_UNKNOWN]
         if stages or dates:
             chosen = [
                 i for i, (v, _) in enumerate(lineage)
-                if (not stages or v.stage in stages) and (not dates or v.date in dates)
+                if v.document_id and (not stages or v.stage in stages) and (not dates or v.date in dates)
             ]
         else:
             current = current_version(versions)
             chosen = [i for i, (v, _) in enumerate(lineage) if current and v.document_id == current.document_id]
         diffs = []
-        for i in chosen[:MAX_DIFF_VERSIONS]:
+        for i in chosen:
             version, record = lineage[i]
             text = record.get("diff_from_previous_version")
             if not isinstance(text, str) or not text.strip():
                 continue
             previous = lineage[i - 1][0] if i > 0 else None
+            if previous is not None and not previous.document_id:
+                # The version before it has no archived text, so what this diff was computed against
+                # is not established: better no comparison than one labelled with the wrong version.
+                logger.warning("Skipping a diff whose predecessor is not archived", ocd_bill_id=ocd_bill_id, version=version.note)
+                continue
             diffs.append(
                 VersionDiff(
                     document_id=version.document_id,

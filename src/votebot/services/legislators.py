@@ -65,13 +65,23 @@ def _person(raw: dict) -> Legislator | None:
     )
 
 
+@dataclass
+class PeopleMatch:
+    """What api-v3 answered: the people returned and how many matched in all (`total` can exceed
+    `len(people)` when a name matches many)."""
+
+    people: list[Legislator] = field(default_factory=list)
+    total: int = 0
+
+
 class LegislatorLookupService:
-    """People records from api-v3."""
+    """People records from api-v3. None means api-v3 could not answer (a failure); a PeopleMatch with
+    no people means it answered and nobody matched. The two are told apart in what the model sees."""
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
 
-    async def _people(self, params: dict) -> list[Legislator] | None:
+    async def _people(self, params: dict) -> PeopleMatch | None:
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
                 response = await client.get(
@@ -87,13 +97,16 @@ class LegislatorLookupService:
         results = body.get("results") if isinstance(body, dict) else None
         if not isinstance(results, list):
             return None
-        return [p for p in map(_person, results) if p]
+        people = [p for p in map(_person, results) if p]
+        meta = body.get("pagination") if isinstance(body.get("pagination"), dict) else {}
+        total = meta.get("total_items") if isinstance(meta.get("total_items"), int) else len(people)
+        logger.info("People lookup", params=params, returned=len(people), total=total)
+        return PeopleMatch(people, max(total, len(people)))
 
-    async def find_by_id(self, person_id: str) -> Legislator | None:
-        people = await self._people({"id": person_id})
-        return people[0] if people else None
+    async def find_by_id(self, person_id: str) -> PeopleMatch | None:
+        return await self._people({"id": person_id})
 
-    async def find_by_name(self, name: str, jurisdiction: str | None = None) -> list[Legislator] | None:
+    async def find_by_name(self, name: str, jurisdiction: str | None = None) -> PeopleMatch | None:
         """People matching a name (api-v3 matches the name as a case-insensitive substring, and
         other names too). With a jurisdiction api-v3 returns only its current members."""
         params = {"name": name, "per_page": 10}
@@ -104,17 +117,27 @@ class LegislatorLookupService:
 
 SOURCE = "Authoritative Source: OpenStates people records, current"
 
+UNAVAILABLE = (
+    "## Legislator records unavailable\n"
+    "Current legislator records could not be retrieved right now. Do not state a legislator's current role, "
+    "party, district or contact details from memory; tell the user you could not retrieve them just now."
+)
 
-def format_legislators(people: list[Legislator] | None, asked: str = "") -> str:
+
+def format_legislators(match: PeopleMatch | None, asked: str = "") -> str:
     """Markdown for the LLM context: one profile, or the candidates when several people match
-    (so the model asks which one instead of guessing). Current members are preferred over former."""
-    if not people:
+    (so the model asks which one instead of guessing). Current members are preferred over former.
+    A match that api-v3 reports as larger than what it returned says so."""
+    if not match or not match.people:
         return ""
+    people = match.people
     current = [p for p in people if p.current]
     pool = current or people
-    if len(pool) > 1:
+    if len(pool) > 1 or (len(pool) == 1 and match.total > len(people)):
         lines = [f"## Several legislators match \"{asked}\" ({SOURCE})",
                  "Do not guess which one the user means; ask them."]
+        if match.total > min(len(pool), MAX_CANDIDATES):
+            lines.append(f"{match.total} people match in all; only some are listed, so ask for a fuller name.")
         for p in pool[:MAX_CANDIDATES]:
             role = ", ".join(x for x in (p.title, f"District {p.district}" if p.district else "", p.chamber, p.jurisdiction) if x)
             lines.append(f"- {p.name}" + (f" ({p.party})" if p.party else "") + (f": {role}" if role else ""))

@@ -26,7 +26,7 @@ from votebot.services.broker_lookup import (
     format_org_details,
 )
 from votebot.services.bill_votes import BillVotesService
-from votebot.services.legislators import LegislatorLookupService, format_legislators
+from votebot.services.legislators import UNAVAILABLE, LegislatorLookupService, format_legislators
 from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
 from votebot.services.openstates_client import openstates_base_url, openstates_headers
 from votebot.services.web_search import WebSearchService, WebSearchResult
@@ -581,6 +581,8 @@ class VoteBotAgent:
             ],
             current_document_id=retrieval_result.current_document_id,
         )
+        if retrieval_result.notes:
+            retrieved_context = "\n\n".join([*retrieval_result.notes, retrieved_context])
 
         # Step 3: If user is disputing/verifying vote info, fetch directly from OpenStates
         vote_verification_context = ""
@@ -939,6 +941,8 @@ class VoteBotAgent:
             ],
             current_document_id=retrieval_result.current_document_id,
         )
+        if retrieval_result.notes:
+            retrieved_context = "\n\n".join([*retrieval_result.notes, retrieved_context])
 
         # Step 2b: Pre-fetch bill info if query mentions a specific bill
         # (This is done before streaming since tool calls can't interrupt streams)
@@ -2367,21 +2371,23 @@ class VoteBotAgent:
             if page_type == "legislator":
                 person_id = page_context.id if (page_context.id or "").startswith("ocd-person/") else None
                 if person_id:
-                    person = await self.legislators.find_by_id(person_id)
-                    return format_legislators([person] if person else None)
+                    match = await self.legislators.find_by_id(person_id)
+                    return format_legislators(match) if match is not None else UNAVAILABLE
                 name, jurisdiction = page_context.title, page_context.jurisdiction
             else:
                 wanted = page_type == "bill" or LEGISLATOR_CUES.search(message)
                 name, jurisdiction = (self._candidate_person_name(message) if wanted else None), None
             if not name:
                 return ""
-            return format_legislators(await self.legislators.find_by_name(name, jurisdiction), asked=name)
+            match = await self.legislators.find_by_name(name, jurisdiction)
+            # None is api-v3 failing (the model is told so); no people is a name that is nobody
+            return format_legislators(match, asked=name) if match is not None else UNAVAILABLE
 
         try:
             return await asyncio.wait_for(lookup(), BUDGET_SECONDS)
         except asyncio.TimeoutError:
-            logger.warning("Legislator lookup took too long; answering without it")
-            return ""
+            logger.warning("Legislator lookup took too long; telling the model it is unavailable")
+            return UNAVAILABLE
 
     async def _prefetch_legislator_info(self, message: str) -> str:
         """
