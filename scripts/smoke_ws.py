@@ -177,11 +177,16 @@ async def discover_bill(jurisdiction: str) -> dict:
 
 
 async def forbidden_types_check(forbid_types: list[str]) -> list[str]:
-    """A true negative: the index holds no document of these types at all."""
+    """A true negative: the index holds no document of these types at all (and the query path works)."""
     from votebot.config import get_settings
     from votebot.services.vector_store import VectorStoreService
 
     store = VectorStoreService(get_settings())
+    # Positive control: through this same path a bill-text query must find something, otherwise an
+    # empty result for the forbidden types would only mean a wrong filter or an empty namespace.
+    if not await store.query(query="bill", top_k=1, filter={"document_type": "bill-text"}):
+        return ["positive control failed: no bill-text found through this index/namespace, so an empty "
+                f"{'/'.join(forbid_types)} result proves nothing (wrong index, namespace or filter?)"]
     problems = []
     for doc_type in forbid_types:
         if await store.query(query="bill", top_k=1, filter={"document_type": doc_type}):

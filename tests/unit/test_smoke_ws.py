@@ -141,6 +141,7 @@ class TestShippedCases:
         for case in cases:
             votes = [q for q in case["questions"] if q.get("expect_votes_tool")]
             assert len(votes) == 1 and "vote" in votes[0]["message"]
+            assert [q.get("min_citations", 0) for q in case["questions"]] == [1, 1, 0]  # the vote answer comes from the live tool, not a chunk
             assert all("what changed" not in q["message"].lower() for q in case["questions"])
             assert "bill-votes" not in case["expect_types"] and "bill-version-diff" not in case["expect_types"]
 
@@ -269,13 +270,15 @@ class TestRetrievalChecks:
 
 class TestIndexAbsenceAndDiscovery:
     class _Store:
-        def __init__(self, held=(), found=None):
-            self.held, self.found, self.filters = set(held), found, []
+        def __init__(self, held=(), found=None, has_bill_text=True):
+            self.held, self.found, self.has_bill_text, self.filters = set(held), found, has_bill_text, []
 
         async def query(self, query, top_k=10, filter=None, include_metadata=True):
             self.filters.append(filter)
-            if filter.get("document_type") == "bill-text" and self.found is not None:
-                return [SimpleNamespace(metadata=self.found)]
+            if filter.get("document_type") == "bill-text":
+                if self.found is not None:
+                    return [SimpleNamespace(metadata=self.found)]
+                return [SimpleNamespace(metadata={})] if self.has_bill_text else []
             return [SimpleNamespace(metadata={})] if filter.get("document_type") in self.held else []
 
     def _patch(self, monkeypatch, store):
@@ -288,7 +291,15 @@ class TestIndexAbsenceAndDiscovery:
         store = self._Store()
         self._patch(monkeypatch, store)
         assert asyncio.run(smoke.forbidden_types_check(["bill-votes", "bill-version-diff"])) == []
-        assert [f["document_type"] for f in store.filters] == ["bill-votes", "bill-version-diff"]
+        assert [f["document_type"] for f in store.filters] == ["bill-text", "bill-votes", "bill-version-diff"]
+
+    def test_an_empty_result_does_not_count_as_absent_when_the_query_path_finds_nothing(self, monkeypatch):
+        # A wrong index, namespace or filter key would also return nothing for bill-votes.
+        store = self._Store(has_bill_text=False)
+        self._patch(monkeypatch, store)
+        problems = asyncio.run(smoke.forbidden_types_check(["bill-votes", "bill-version-diff"]))
+        assert len(problems) == 1 and "positive control failed" in problems[0]
+        assert [f["document_type"] for f in store.filters] == ["bill-text"]  # stopped before the forbidden queries
 
     def test_vote_documents_in_the_index_fail(self, monkeypatch):
         self._patch(monkeypatch, self._Store(held={"bill-votes"}))
