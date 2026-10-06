@@ -520,7 +520,7 @@ async def websocket_chat_endpoint(
     - Client sends: {"type": "user_message", "payload": {"message": "...", "page_context": {...}}}
     - Server sends: {"type": "stream_start"}
     - Server sends: {"type": "stream_chunk", "payload": {"text": "..."}}
-    - Server sends: {"type": "stream_end", "payload": {"citations": [...], "confidence": 0.85, "requires_human": false}}
+    - Server sends: {"type": "stream_end", "payload": {"citations": [...], "confidence": 0.85, "requires_human": false, "bill_votes_tool_used": false}}
 
     Human Handoff Events:
     - Server sends: {"type": "agent_joined", "payload": {"agent_name": "..."}}
@@ -822,6 +822,7 @@ async def handle_user_message(
         confidence = 0.0
         requires_human = False
         retrieval_count = 0
+        bill_votes_tool_used = False
 
         async for chunk in agent.process_message_stream(
             message=message,
@@ -856,6 +857,7 @@ async def handle_user_message(
                 # Get retrieval count from metadata
                 if chunk.metadata:
                     retrieval_count = getattr(chunk.metadata, "retrieval_count", 0)
+                    bill_votes_tool_used = bool(getattr(chunk.metadata, "bill_votes_tool_used", False))
 
                 # Calculate confidence
                 confidence = calculate_confidence(
@@ -873,6 +875,8 @@ async def handle_user_message(
                         "citations": citations,
                         "confidence": confidence,
                         "requires_human": requires_human,
+                        # True when live OpenStates bill/vote data answered (votes are not in the index)
+                        "bill_votes_tool_used": bill_votes_tool_used,
                     }
                 })
 

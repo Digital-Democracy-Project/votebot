@@ -1,0 +1,177 @@
+[
+  {
+    "name": "FL",
+    "discover": {
+      "jurisdiction": "FL"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?",
+        "min_citations": 1
+      },
+      {
+        "message": "Which version of the bill text are you answering from, and what is its date?",
+        "expect_any": [
+          "introduced",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
+        ],
+        "min_citations": 1
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  },
+  {
+    "name": "WA",
+    "discover": {
+      "jurisdiction": "WA"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?",
+        "min_citations": 1
+      },
+      {
+        "message": "Which version of the bill text are you answering from, and what is its date?",
+        "expect_any": [
+          "introduced",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
+        ],
+        "min_citations": 1
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  },
+  {
+    "name": "US",
+    "discover": {
+      "jurisdiction": "US"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?",
+        "min_citations": 1
+      },
+      {
+        "message": "Which version of the bill text are you answering from, and what is its date?",
+        "expect_any": [
+          "introduced",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
+        ],
+        "min_citations": 1
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  },
+  {
+    "name": "VA",
+    "discover": {
+      "jurisdiction": "VA"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?",
+        "min_citations": 1
+      },
+      {
+        "message": "Which version of the bill text are you answering from, and what is its date?",
+        "expect_any": [
+          "introduced",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
+        ],
+        "min_citations": 1
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  },
+  {
+    "name": "MI",
+    "discover": {
+      "jurisdiction": "MI"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?",
+        "min_citations": 1
+      },
+      {
+        "message": "Which version of the bill text are you answering from, and what is its date?",
+        "expect_any": [
+          "introduced",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
+        ],
+        "min_citations": 1
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  }
+]

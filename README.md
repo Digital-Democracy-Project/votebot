@@ -736,6 +736,30 @@ Top jurisdictions (bills): MI 100%, WA 100%, VA 100%, FL 100%, US 100%, MA 100%,
 
 See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-sample) for detailed failure analysis.
 
+## WebSocket Smoke Test
+
+`scripts/smoke_ws.py` opens `/ws/chat` the way the widget does and checks the streamed answer, citations and confidence for a list of bills. It needs no Webflow credentials and works against either index, so it is the check for the canonical-index cutover and for a rollback to `votebot-large`.
+
+```bash
+# The five-jurisdiction cutover check (FL, WA, US, VA, MI). The cases pick an embedded bill themselves
+# (`discover`), so nothing needs filling in; discovery and --retrieval read the index and need the target's .env keys.
+python scripts/smoke_ws.py --url wss://<votebot-host>/ws/chat --cases scripts/smoke_cases.json --retrieval
+
+# Without --retrieval and discovery (cases that name their bill): citations-only isolation, no keys needed
+python scripts/smoke_ws.py --url wss://<votebot-host>/ws/chat --cases my_cases.json
+
+# Against the legacy index (skips the citation isolation and live-votes-tool checks, which are for the canonical index)
+python scripts/smoke_ws.py --index legacy --cases my_legacy_cases.json
+```
+
+Per question it checks the frame order, a non-empty answer, `confidence >= --min-confidence`, and optional per-question assertions: `expect_any` / `expect_none` / `expect_regex` on the answer (use text the question does not contain, or the check passes on any reply), `min_citations`, and `expect_votes_tool`. **Votes are not embedded in the new index**, so a vote question must be answered by the live OpenStates tool: the `stream_end` frame carries `bill_votes_tool_used`, and `expect_votes_tool: true` fails the question if retrieval answered instead (asserted only with `--index canonical`; on the legacy index either path may answer). Bill isolation on the canonical index fails if a citation carries another bill's id, and a question that requires citations must have at least one that carries *this* bill's id, so zero evidence cannot pass.
+
+With `--retrieval` it also checks that every chunk retrieved for the bill carries that bill's id, that the `--expect-types` document types are present (default `bill-text`), that `bill-text` chunks carry the `document_id` api-v3 calls current, and that the index holds **no** documents of the `--forbid-types` (default `bill-votes,bill-version-diff`, neither of which is embedded). That check first runs a positive control (a `bill-text` query through the same path must find something), so a wrong index, namespace or filter cannot pass it by returning nothing. `--retrieval` reads the index from the machine running the script, so it only proves the target if both use the same `PINECONE_INDEX_NAME`/`NAMESPACE` (the script says so when it runs). Without it the report says isolation was judged from citations only. A case may give only a `ddp_url` plus `--resolve-base` to resolve its page context through `/content/resolve`. The exit status is non-zero if any case fails; `--timeout` bounds each frame and `--turn-timeout` a whole question.
+
+"What changed from the previous version" is not a smoke question: diffs are not in the index, so it cannot be answered from retrieval.
+
+The protocol itself is covered offline by `tests/unit/test_websocket_protocol.py` (handshake, streaming frames including `bill_votes_tool_used`, `context_update`, `ping`, `empty_message`, page-context hand-off to the agent), and the script's own logic by `tests/unit/test_smoke_ws.py`, which runs it against a local server with a faked agent.
+
 ## User Analytics & Production Monitoring
 
 VoteBot uses an event-based logging system that captures user behavior, query outcomes, and conversation metrics for offline analytics and quality evaluation.
