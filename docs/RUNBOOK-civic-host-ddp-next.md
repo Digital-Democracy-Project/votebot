@@ -10,7 +10,9 @@ step starts with a read-only check and every value that is not in a repo is mark
 | | Old VoteBot (Webflow) | New VoteBot (ddp-next) |
 |---|---|---|
 | Server | the existing civic server | the new-infrastructure server: ddp-broker-py, ddp-open-states, ddp-sync (new), and this |
-| Code | frozen on the branch `legacy-webflow`, nothing merged into it | `main`, with Webflow removed |
+| Code | frozen on the branch `legacy-webflow`, nothing merged into it | `main` (Webflow code is still in it but never runs here; removing it is VOTEBOT-17) |
+| How it runs | systemd on the old server | **a container**, in its own compose project, built on the host |
+| Front door | the old server's nginx; `votebot.digitaldemocracyproject.org`, proxied by Cloudflare | **the broker's nginx**: two paths on `mapapp.digitaldemocracyproject.org` (DNS-only in Cloudflare) |
 | Index | `votebot-large` | `ddp-knowledge-base` |
 | Data pipeline | the old ddp-sync, also frozen on a branch | the new ddp-sync on the new server |
 | Slack handoff | stays here | **off** until the new copy gets its own Slack setup (only one copy may hold the Slack connection) |
@@ -22,6 +24,13 @@ Decisions recorded:
   server and no `/next` path. (The earlier plan for that is gone.)
 - **Rate limiting of connections: no, not now.** Monitor first (section 5). Bot protection for suspicious
   traffic, without affecting real visitors, is section 5 (Cloudflare first, an invisible check later if needed).
+- **Container, own compose project, built on this host** like the broker, api-v3 and ddp-sync (the host's Python
+  is 3.9; VoteBot needs 3.11 or newer). Not part of the broker's compose project: the broker's deploy recreates
+  containers, which would drop open chats.
+- **The broker's nginx serves VoteBot** as `/ws/chat` and `/votebot/` on the broker's existing hostname, through a
+  change in the broker repo (`ddp-broker-py` PR #410). No tunnel, no new hostname, no new certificate. That hostname
+  is DNS-only, so Cloudflare's proxy (and its bot filtering) is not in the path.
+- **Memory: swap file now (2 GB), instance resize later in a planned window** (a resize stops the whole box).
 - **Answers link to our own pages**: `DDP_SITE_BASE_URL` (VOTEBOT-15 part 2).
 - **Organization positions from our own data**: ddp-broker-py (VOTEBOT-15 part 2).
 
@@ -33,8 +42,9 @@ Order of work: section 1 (read-only), section 2 (freeze the old copy), section 3
 section 4 (the website and its origins), then 5 (bot protection and monitoring), 6 (verify), 7 (cutover and rollback).
 
 **Ground rules for every change on a host.** Back up first, with a timestamp, and note the backup in the ticket
-(`sudo cp -a <file> <file>.bak-$(date +%Y%m%d-%H%M)`). Run `sudo nginx -t` before every
-`sudo systemctl reload nginx`, and afterwards re-check that the routes that worked before still do. Abort and
+(`sudo cp -a <file> <file>.bak-$(date +%Y%m%d-%H%M)`). The broker's nginx runs in a container whose template is read
+at start, so a change means testing the template in a throwaway container first and then recreating that container
+(see 3.7); afterwards re-check that the routes that worked before still do. Abort and
 roll back (restore the backups, reload/restart, repeat the earlier checks) if a route that worked changes
 status, a restarted service does not come back within a minute, free memory drops as in 1.1, disk use grows
 unexpectedly, or an answer comes from the wrong index. The prod agent may abort at any point and should report
@@ -42,7 +52,7 @@ what was and was not changed.
 
 **Baseline health of everything else on the server.** Before the first change, write down that these answer
 (whatever the real checks are for the broker, api-v3/ddp-open-states and ddp-sync: a status endpoint or a `curl`
-and the `systemctl` state of each) and repeat them after installing Redis, after starting VoteBot, after every
+and the container health of each, `docker ps`) and repeat them after installing Redis, after starting VoteBot, after every
 nginx reload and after cutover. A VoteBot-only test cannot show damage to its neighbours.
 
 | Service | Check | Baseline | After Redis | After VoteBot | After nginx | After cutover |
@@ -58,7 +68,8 @@ nginx reload and after cutover. A VoteBot-only test cannot show damage to its ne
 ```bash
 free -m; swapon --show; df -h /; nproc
 ss -ltnp | grep -E ':(80|443|8000|8001|8002|6379)\b'     # what already listens where
-systemctl list-units --type=service --state=running | grep -E 'broker|openstates|sync|redis|nginx|votebot'
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'      # the services here run as containers, not under systemd
+systemctl list-units --type=service --state=running | grep -E 'redis|nginx' || true
 ps -eo pid,rss,cmd --sort=-rss | head -12                  # the biggest memory users right now
 ```
 
@@ -70,7 +81,7 @@ move or add memory; do not guess.
 | Check | Found |
 |---|---|
 | free memory and swap, idle and during a scorecard run |  |
-| a free local port for VoteBot (this runbook uses `8002`; 8000/8001 are used elsewhere in the fleet) |  |
+| the broker's Docker network name, and the in-network names and ports of `web`, api-v3 and nginx (api-v3 listens on the host's 8002; no host port is needed for VoteBot) |  |
 | is there a Redis, on which port, and what uses it |  |
 | nginx: which hostnames/server blocks exist, who owns the config |  |
 | is Cloudflare in front of this server's hostnames |  |
@@ -128,167 +139,155 @@ Rollback of the whole project is "send the website back to the old copy": it is 
 
 ## 3. Install the new VoteBot (new server)
 
-### 3.1 Code and user
+Everything on this host runs in Docker and is built on the host, and the host's Python (3.9) is too old for VoteBot
+(3.11 or newer), so VoteBot is a container too: **its own compose project**, defined by `infrastructure/docker/docker-compose.prod.yml` in this repo (reviewed and
+versioned like the other projects here: the broker's compose file lives in its checkout too), joined to the
+broker's Docker network, reached by the broker's nginx by its container name `votebot-ddp-next`. VoteBot is the only
+part of this server that takes anonymous input from the public; the container runs as a non-root user (uid 1000) and
+publishes no host port.
 
-VoteBot is the only part of this server that takes anonymous input from the public, so run it as its own user
-with nothing else in reach:
+### 3.1 Memory first: a 2 GB swap file (decided 2026-10-06)
+
+About 2.4 GB is available and there is no swap. Back up `/etc/fstab`, then:
 
 ```bash
-sudo useradd --system --create-home --shell /usr/sbin/nologin votebot
-sudo -u votebot git clone git@github.com:Digital-Democracy-Project/votebot.git /home/votebot/votebot
-cd /home/votebot/votebot && sudo -u votebot python3 -m venv venv && sudo -u votebot venv/bin/pip install -e .
+sudo fallocate -l 2G /swapfile        # if unsupported on this filesystem: sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf && sudo sysctl -p /etc/sysctl.d/99-swappiness.conf
+free -m; swapon --show
 ```
 
-Deploy from `main` once the Webflow removal has merged. Until then, `main` plus the settings below works (the
-Webflow code is simply never called on this index).
+Rollback: `sudo swapoff /swapfile && sudo rm /swapfile` and restore the fstab backup. A later instance resize is a
+planned, whole-box downtime and is not part of this runbook.
 
-### 3.2 Its own Redis
+### 3.2 Build the image on the host
 
-A separate `redis-server` process (its own systemd unit, data directory and port), never the broker's instance
-and never a database number on it, so the broker's jobs and VoteBot cannot affect each other and nothing here can
-flush the broker's data. VoteBot keeps only a button cache and the handoff thread map in it, so no persistence
-is needed:
-
-```conf
-# /etc/redis/votebot.conf
-bind 127.0.0.1
-port 6380
-save ""
-appendonly no
-maxmemory 256mb
-maxmemory-policy allkeys-lru
+```bash
+cd /opt/votebot && git fetch origin && git checkout <the main SHA to deploy; record it>
+docker compose -f infrastructure/docker/docker-compose.prod.yml build      # after 3.3; watch `free -m`
 ```
 
-`REDIS_URL=redis://127.0.0.1:6380/0`. It listens on the local address only, so no password is needed. Do not run
-any `redis-cli` command against port 6379.
+The repo's own `infrastructure/docker/Dockerfile`, target `production` (Python 3.11-slim, non-root uid 1000, a health
+check on `/votebot/v1/health/live`; about 400 MB and 75 MiB of memory at idle). Its dependencies come from
+`pyproject.toml`, and a `.dockerignore` keeps `.env`, `.git` and the rest out of the build context. Do **not** use the
+repo's `docker-compose.yml`: it is development only. Build in a quiet
+moment after 3.1. Before building, check `free -m` (at least about 800 MB available) and `df -h /` plus `docker system df`
+(at least 5 GB free); if either is short, or available memory falls below about 500 MB during the build, stop and report.
 
-### 3.3 `/home/votebot/votebot/.env` (mode 600, owner `votebot`)
+### 3.3 `/opt/votebot/.env` (git-ignored; owner root, mode 600; a fresh file, nothing copied from the old server)
 
 ```bash
 ENVIRONMENT=production
 API_KEY=<new random key>
-OPENAI_API_KEY=<...>
+OPENAI_API_KEY=<a key from a dedicated OpenAI project for this deployment>
 PINECONE_API_KEY=<...>
-PINECONE_INDEX_NAME=ddp-knowledge-base        # exactly this name; anything else keeps the legacy mode and logs a warning
-PINECONE_NAMESPACE=default                    # confirm it matches what the new ddp-sync writes
-DDP_BROKER_API_ROOT=<from 1.2>
+PINECONE_INDEX_NAME=ddp-knowledge-base          # exactly this; the index name ddp-sync writes (KNOWLEDGE_BASE_INDEX_NAME)
+PINECONE_NAMESPACE=<ddp-sync's PINECONE_NAMESPACE; default is "default">
+DDP_BROKER_API_ROOT=<an address that serves the broker's public GETs and is not rejected as DisallowedHost; see 1.2>
 USE_DDP_OPENSTATES_REPLICA=true
-DDP_OPENSTATES_API_ROOT=<from 1.2>
-DDP_OPENSTATES_BEARER_TOKEN=<from 1.2>
-DDP_SITE_BASE_URL=<the new site's production URL once decided; dev URL until then; unset = links stay as they were>
-ALLOWED_ORIGINS=["https://dev.digitaldemocracyproject.org"]   # JSON array; add the production origin at cutover (4.1)
-REDIS_URL=redis://127.0.0.1:6380/0
-QUERY_LOG_DIR=/home/votebot/votebot/logs/queries
-VOTEBOT_QUICK_ACTION_BUTTONS=<as on the old server>
+DDP_OPENSTATES_API_ROOT=http://10.0.0.11:8002     # api-v3 through the host address, as ddp-sync reaches it
+DDP_OPENSTATES_BEARER_TOKEN=<...>
+DDP_SITE_BASE_URL=https://dev.digitaldemocracyproject.org     # production host once decided; unset is a safe no-op
+ALLOWED_ORIGINS=["https://dev.digitaldemocracyproject.org"]   # JSON array; REPLACES the code default; no Webflow origins
+REDIS_URL=redis://votebot-redis:6379/0
+QUERY_LOG_DIR=/app/logs/queries
+VOTEBOT_QUICK_ACTION_BUTTONS=false           # first deployment; flip to true after verification (a restart)
+DDP_OPENSTATES_AUTH_HEADER=x-api-key         # api-v3 itself accepts only X-API-Key (a Bearer token is refused with 403)
 SLACK_BOT_TOKEN=
 SLACK_APP_TOKEN=
 ```
 
-No Webflow keys or collection ids at all. Slack is left empty on purpose (one Slack connection per app token).
-This is a fresh `.env`; nothing here is inherited from the old server's file.
+No `WEBFLOW_*` variables at all. The empty Slack lines are deliberate (one Slack connection per app token; human
+handoff stays with the old copy). **Create it with `umask 077`, edit it as root (`sudo -e`), then check `stat -c '%U %a' /opt/votebot/.env` shows `root 600`. How secrets reach this file follows however ddp-sync's are provisioned on this
+host; never write a key value into a note, a ticket or shell history.** The broker address warning: the broker's own
+health check fails with `DisallowedHost` because Django rejects requests addressed to an internal container name, so
+`DDP_BROKER_API_ROOT` cannot simply be `http://web:8000`; use the address ddp-sync uses, or have the broker's
+`ALLOWED_HOSTS` extended.
 
-### 3.4 Service
+### 3.4 The compose project
 
-```ini
-# /etc/systemd/system/votebot.service
-[Unit]
-Description=VoteBot (ddp-next)
-After=network.target
+`infrastructure/docker/docker-compose.prod.yml` (project name `votebot-ddp-next`): the `votebot` container
+(`votebot-ddp-next`, built from the Dockerfile above, `mem_limit` 768 MB, `env_file` `/opt/votebot/.env`, a bind mount
+`${VOTEBOT_LOG_DIR:-/opt/votebot-logs}` at `/app/logs`, joined to the broker's Docker network `ddp-broker-py_default`) and
+`votebot-redis` (128 MB dataset cap inside a 256 MB container limit, no persistence). The log directory must exist and be owned by uid 1000:
+`sudo install -d -o 1000 -g 1000 /opt/votebot-logs/queries`. Deploying is the same routine as the other projects:
+`cd /opt/votebot && git pull --ff-only`, `docker compose -f infrastructure/docker/docker-compose.prod.yml build`, then `... up -d`.
 
-[Service]
-User=votebot
-WorkingDirectory=/home/votebot/votebot
-Environment=PYTHONPATH=src
-EnvironmentFile=/home/votebot/votebot/.env
-ExecStart=/home/votebot/votebot/venv/bin/uvicorn votebot.main:app --host 127.0.0.1 --port 8002 --workers 1
-Restart=on-failure
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/home/votebot/votebot/logs
-MemoryMax=1G
-TasksMax=200
-LimitNOFILE=4096
+**Preflight, before the first `up`** (each answers yes/no; stop on a no): no container already named `votebot-ddp-next` or
+`votebot-redis` (`docker ps -a --filter name=votebot`); the network exists (`docker network ls | grep ddp-broker-py_default`);
+`/opt/votebot/.env` exists, is mode 600, and has every key filled (check by name only: `grep -c '^NAME=.' /opt/votebot/.env`);
+`/opt/votebot-logs/queries` exists and is owned by uid 1000, and a write as that user works
+(`sudo -u '#1000' touch /opt/votebot-logs/queries/.t && sudo rm /opt/votebot-logs/queries/.t`); `free -m` shows at least
+about 600 MB available and `df -h /` has room. VoteBot also logs an ERROR at startup ("Query log directory is NOT writable")
+if the log directory is wrong, but it keeps answering: look for that line.
 
-[Install]
-WantedBy=multi-user.target
-```
+**Rollback tag.** `build` overwrites the image `votebot-ddp-next:local`, so before every rebuild tag the running one with its
+commit: `docker tag votebot-ddp-next:local votebot-ddp-next:<sha of the running commit>`. Rolling back is then: retag that
+image as `:local` and run `up -d --no-build votebot` (so Compose uses the retagged image instead of rebuilding), or `git checkout <previous sha>`,
+rebuild and `up -d`. Before the first rebuild, confirm the previous tag exists: `docker image ls votebot-ddp-next`. Record the known-good SHA in the ticket.
+The env file is read by the compose file itself (`env_file: ../../.env`, resolved relative to the compose file, so `/opt/votebot/.env` when the
+repo is at `/opt/votebot`); no `--env-file` flag is needed, and no command needs `docker compose config`, which would print the secrets.
 
-**One worker, deliberately.** A session's chat history is kept in the memory of the worker that served it; with
-two workers a reconnect that lands on the other one restores nothing (noted on VOTEBOT-15). One worker is plenty
-for this load, and it keeps conversations intact.
+VoteBot has a Redis of its own (never the broker's, never the host's 6379): only a button cache and a handoff map
+live in it, so no persistence. **One worker, on purpose**: a session's chat history is kept in the memory of the
+worker that served it, and the image's default command runs one. Restarting the container ends open chats and their
+history: expected, and the widget reconnects.
 
-`EnvironmentFile=` without a leading `-` makes the unit refuse to start if the file is missing, so a missing
-`.env` fails closed. The working directory is VoteBot's own, so the only `.env` it can ever read is its own.
-`MemoryMax` bounds what a problem in VoteBot can take from the broker's server; check it is not too tight when
-you test (section 6). Restarting the service ends open chats and their history (it is kept in the worker's memory):
-that is expected, and the widget reconnects.
+### 3.5 Start it and verify it INSIDE the Docker network, before any nginx change
+
+(Redis restarting or evicting keys loses only cached quick-action answers, which are regenerated on demand, and open
+human-handoff thread mappings; chat history lives in VoteBot's own memory and is lost only when VoteBot restarts.)
 
 ```bash
-sudo mkdir -p /home/votebot/votebot/logs && sudo chown votebot: /home/votebot/votebot/logs
-sudo systemctl daemon-reload && sudo systemctl enable --now votebot
-journalctl -u votebot -n 40 --no-pager | grep -E 'VoteBot started'     # pinecone_index_name=ddp-knowledge-base, bill_filter_key=ocd_bill_id
-curl -s http://127.0.0.1:8002/votebot/v1/health/ready
+docker compose -f infrastructure/docker/docker-compose.prod.yml up -d
+docker logs votebot-ddp-next 2>&1 | grep -E 'VoteBot started|PINECONE_INDEX_NAME|Traceback|Error'
+docker exec votebot-ddp-next python -c "import aiofiles, websockets, httpx; print('deps ok')"
+docker exec votebot-ddp-next python -c "import httpx; print(httpx.get('http://localhost:8000/votebot/v1/health/ready').text)"
 ```
 
-### 3.5 Logs
+The startup line must show `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id`, with no warning
+about an unrecognised index (a wrong name makes Pinecone create an EMPTY index: confirm the index exists with vectors
+in the namespace first, read-only, as in section 1.2's check). Then section 6, run from inside the container.
 
-VoteBot writes one JSONL file per day under `QUERY_LOG_DIR`, including visitors' messages and addresses. Keep
-them 14 days and compress, so they neither fill the shared disk nor keep people's messages longer than needed:
+### 3.6 Logs
+
+Query logs are one JSONL file per day in `/opt/votebot-logs/queries` (visitors' messages and addresses). Keep
+14 days and compress, so they neither fill the shared disk nor keep messages longer than needed:
 
 ```conf
-# /etc/logrotate.d/votebot
-/home/votebot/votebot/logs/queries/*.jsonl {
+# /etc/logrotate.d/votebot-ddp-next
+/opt/votebot-logs/queries/*.jsonl {
     daily
     rotate 14
     compress
     missingok
     notifempty
-    su votebot votebot
 }
 ```
 
-Check `df -h /` after the first week and name who looks at it.
+Container logs are rotated by the `json-file` options in 3.4. Check `df -h /` after the first week and name who looks.
 
-### 3.6 nginx (new hostname, behind Cloudflare)
+### 3.7 nginx: the broker's, through the broker repo (PR #410)
 
-A new subdomain for VoteBot on this server (name to be chosen: `<votebot-host>`), proxied to `127.0.0.1:8002`.
-Before editing: back up the config, check the name is not already used
-(`sudo nginx -T | grep -n server_name | grep <votebot-host>`), and check the certificate covers it. Use
-`nginx -t` and then `reload` (never `restart`), and repeat the baseline health checks of section 0 straight after.
-There are **no connection limits** for now (decision above).
+The broker's nginx container renders its template when it starts. VoteBot's two locations (`/ws/chat`, `/votebot/`) are
+in `ddp-broker-py` PR #410, written with the broker's own patterns: the upstream address is a variable (BROKER-115), so
+nginx starts without VoteBot and finds a recreated container again; and the locations declare their own `add_header` so
+the wide-open CORS header set at the top of that server is not added a second time to VoteBot's responses (two
+`Access-Control-Allow-Origin` headers make browsers reject them). Apply it **only after VoteBot is verified in 3.5 and
+the PR is merged**, in a quiet window:
 
-```nginx
-server {
-    server_name <votebot-host>;
-    # listen/ssl lines as for the other hostnames on this server
+1. Test the merged template in a throwaway container with the production nginx service's image, mounts and environment:
+   `docker run --rm <same mounts and -e flags> nginx:stable-alpine nginx -t` must report "test is successful".
+2. Recreate only the nginx container, in the broker's own project: `docker compose up -d --no-deps --force-recreate nginx` (never the whole
+   project; a few seconds of broker downtime), then repeat the baseline health checks and check the broker's own public routes. Before the
+   recreate, confirm the new template renders in the real container's network: `docker exec <nginx container> getent hosts votebot-ddp-next`
+   resolves once VoteBot is running. If any check fails, restore the previous template and recreate again.
+3. Public checks: `curl -s https://mapapp.digitaldemocracyproject.org/votebot/v1/features` and the smoke test against
+   `wss://mapapp.digitaldemocracyproject.org/ws/chat`.
 
-    location /ws/chat {
-        proxy_pass http://127.0.0.1:8002;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_read_timeout 86400;
-    }
-    location /votebot/ {
-        proxy_pass http://127.0.0.1:8002;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-If Cloudflare is in front, the logged client address is Cloudflare's unless nginx restores the real one
-(`set_real_ip_from` for each current Cloudflare range, IPv4 and IPv6, from cloudflare.com/ips, and
-`real_ip_header CF-Connecting-IP;`). `set_real_ip_from` only believes the header when the connection comes from
-those ranges, so a visitor reaching the server directly cannot spoof it; still check whether the server can be
-reached directly at all (if it can, restrict port 443 to Cloudflare's ranges in the security group). Refresh the
-ranges when Cloudflare publishes changes. Do this now: section 5's monitoring depends on it.
+Rollback: revert the broker change and recreate nginx; VoteBot keeps running untouched. No DNS or certificate work is
+needed: `mapapp.digitaldemocracyproject.org` and its certificate already exist.
 
 ## 4. The website
 
@@ -303,13 +302,13 @@ and host, to be supplied by NEXT-36 / Ramon.** Webflow origins are not listed he
 
 The widget file is the same for both copies. Find where ddp-next serves static files (1.2) and where the bundle
 should live there; record the answer and the copy procedure in `chat-widget/README.md` ("How a change reaches
-production"). After every copy, purge the Cloudflare cache for `ddp-chat.min.js`, and check the served file's
-hash equals the repo's (`sha256sum chat-widget/dist/ddp-chat.min.js` against `curl -s <url> | sha256sum`).
+production"). If the file is served through Cloudflare's proxy, purge its cache after every copy, and in any case
+check the served file's hash equals the repo's (`sha256sum chat-widget/dist/ddp-chat.min.js` against `curl -s <url> | sha256sum`).
 
 The new site configures the widget with the new copy:
 
 ```javascript
-window.DDPChatConfig = { wsUrl: 'wss://<votebot-host>/ws/chat', pageContext: { type: 'bill', id: 'HB 219',
+window.DDPChatConfig = { wsUrl: 'wss://mapapp.digitaldemocracyproject.org/ws/chat', pageContext: { type: 'bill', id: 'HB 219',
   jurisdiction: 'FL', session: '2026', ocd_bill_id: '<uuid>' } };
 ```
 
@@ -321,45 +320,45 @@ open keeps its old connection until it is reloaded.
 
 ## 5. Bot protection and monitoring (no limits now)
 
-There is no limit on opening chat connections, by decision. Every chat message costs OpenAI and Pinecone calls,
-so watch for abuse and have a plan.
+There is no limit on opening chat connections, by decision. Every chat message costs OpenAI and Pinecone calls, so
+watch for abuse and have a plan. **The VoteBot path is on `mapapp.digitaldemocracyproject.org`, which is DNS-only in
+Cloudflare: Cloudflare's proxy, and so its built-in bot filtering, is not in the path.** nginx sees real visitor
+addresses directly (VoteBot logs the first `X-Forwarded-For` value).
 
-**Watch (a few minutes a week at first).** Messages per visitor address, from VoteBot's own logs (needs the
-real-IP step in 3.6; check the field name with `head -1` first):
+**Watch (a few minutes a week at first).** Messages per visitor address, from VoteBot's own logs (check the field name
+with `head -1` first):
 
 ```bash
-cd /home/votebot/votebot/logs/queries
+cd /opt/votebot-logs/queries
 jq -r 'select(.event_type=="message_received") | .client_ip' $(date +%F).jsonl | sort | uniq -c | sort -rn | head
 ```
 
-Look for one address sending hundreds of messages, many short sessions from one address, or identical
-messages. Also set a **monthly usage limit and an email alert in the OpenAI dashboard**: it is the one real
-backstop for cost, needs no code, and works whatever the cause. Give the new VoteBot **its own OpenAI project
-and API key** so the limit applies to it alone, and find out whether reaching the limit only alerts or
-actually blocks requests (and which other products would be affected if the key were shared).
+Look for one address sending hundreds of messages, many short sessions from one address, or identical messages. Also
+set a **monthly usage limit and an email alert in the OpenAI dashboard**: it is the one real backstop for cost, needs no
+code, and works whatever the cause. Give the new VoteBot **its own OpenAI project and API key** so the limit applies to
+it alone, and find out whether reaching the limit only alerts or actually blocks requests.
 
 **If bots show up, in this order:**
 
-1. **Cloudflare's built-in bot filtering on the VoteBot hostname (no code).** It scores each visitor and
-   challenges only automated-looking ones; people never see anything. Turn on Bot Fight Mode (or the
-   equivalent managed bot rules on this plan) for `<votebot-host>`, then check **in a browser** that the chat
-   still opens and the socket connects, and that the new website's own calls to VoteBot are not challenged
-   (add a skip rule for them if they are). A challenge cannot appear in the middle of an open socket, which
-   is why the check has to happen before the chat opens.
-2. **Cloudflare Turnstile (a small code change).** An invisible check that runs when the chat opens: free,
-   and only suspicious visitors ever see a prompt. The widget would obtain a token and VoteBot would verify it
-   before accepting the connection. Only worth building if step 1 is not enough; open a ticket then.
+1. **Cloudflare Turnstile (a small code change).** An invisible check that runs in the browser when the chat opens: free,
+   and only suspicious visitors ever see a prompt. The widget obtains a token and VoteBot verifies it with Cloudflare
+   before accepting the connection. It does **not** need the hostname to be proxied. Open a ticket then.
+2. **A proxied hostname for the chat** (orange cloud), which brings Cloudflare's bot filtering and rate rules: needs a
+   name for it, a certificate for that name on the broker's nginx, and a Cloudflare setting that lets the socket
+   through. Also possible when ddp-next serves the site from this server and the site's own hostname is proxied.
 3. A per-visitor cap on messages (application code) only if an abuser opens one connection and floods it.
 
 ## 6. Verify
 
-**What this section needs from code.** `scripts/smoke_ws.py` (VOTEBOT-16, in `main`). Links to our own `/explore/...` pages need `DDP_SITE_BASE_URL` and organization positions from the broker need `DDP_BROKER_API_ROOT`; both are VOTEBOT-15 part 2 (PR #16, merged). Legislator answers and "what changed" read api-v3 live (VOTEBOT-15 part 3, PR #17) and need `USE_DDP_OPENSTATES_REPLICA=true`. Deploy a version of `main` that contains all of them before running this section, or the checks below will fail for the right reason. The startup line to check (`journalctl -u votebot | grep 'VoteBot started'`) is a structured log that includes `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id` (`src/votebot/main.py`).
+**What this section needs from code.** `scripts/smoke_ws.py` (VOTEBOT-16, in `main`). Links to our own `/explore/...` pages need `DDP_SITE_BASE_URL` and organization positions from the broker need `DDP_BROKER_API_ROOT`; both are VOTEBOT-15 part 2 (PR #16, merged). Legislator answers and "what changed" read api-v3 live (VOTEBOT-15 part 3, PR #17) and need `USE_DDP_OPENSTATES_REPLICA=true`. Deploy a version of `main` that contains all of them before running this section, or the checks below will fail for the right reason. The startup line to check (`docker logs votebot-ddp-next | grep 'VoteBot started'`) is a structured log that includes `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id` (`src/votebot/main.py`).
 
 ```bash
-python scripts/smoke_ws.py --url wss://<votebot-host>/ws/chat --cases <real cases> --retrieval
+# first INSIDE the Docker network (before the nginx change), then through nginx
+docker exec votebot-ddp-next python scripts/smoke_ws.py --url ws://localhost:8000/ws/chat --cases scripts/smoke_cases.json --retrieval
+docker exec votebot-ddp-next python scripts/smoke_ws.py --url wss://mapapp.digitaldemocracyproject.org/ws/chat --cases scripts/smoke_cases.json
 ```
 
-(run it on the new server with its `.env` loaded for `--retrieval`; the README's "WebSocket Smoke Test" explains
+(the image contains `scripts/` and the container has its `.env`, which `--retrieval` needs; the README's "WebSocket Smoke Test" explains
 the checks; the canonical index must already contain embedded bills, since Pinecone creates a missing index on
 first use and an empty one answers nothing). It prints the index and namespace it read; confirm they are
 `ddp-knowledge-base` and the namespace the new ddp-sync writes, and that an answer never cites old-index content.
@@ -367,18 +366,20 @@ first use and an empty one answers nothing). It prints the index and namespace i
 Failure paths, once, before cutover: stop the broker briefly in a quiet moment (or point `DDP_BROKER_API_ROOT` at a
 closed port and restart) and confirm answers still come, just without organization positions; restart VoteBot in
 the middle of a chat and confirm the widget reconnects; send an `/content/resolve` request from an origin that is
-not allowed and confirm it is refused; confirm the journal shows no Slack or Webflow activity. A small load check:
+not allowed and confirm it is refused; confirm `docker logs votebot-ddp-next` shows no Slack or Webflow activity. A small load check:
 run the smoke script from a few terminals at once and watch memory, CPU, `df` and the broker's response time; abort
 if the broker slows noticeably. Then, in a browser on the dev origin: open a bill page with the chat,
 ask a question, and confirm the answer links to our own `/explore/...` page, the "who supports" question lists
-organizations from the broker, and the console shows no CORS error. In the journal, check there is **no**
+organizations from the broker, and the console shows no CORS error. In `docker logs votebot-ddp-next`, check there is **no**
 "Slack service started" line and that the request was logged by this copy.
 
 ## 7. Cutover and rollback
 
 - **Cutover** (SYNC-92 owns the criteria and the soak): point the new site's `wsUrl` (and any `?ddp_url=` links)
-  at `<votebot-host>`, add the production origin (4.1), purge the widget cache. The Webflow site keeps using the
-  old copy meanwhile.
+  at `wss://mapapp.digitaldemocracyproject.org/ws/chat`, add the production origin (4.1), purge the widget cache if it
+  is proxied. The Webflow site keeps using the old copy meanwhile (its page contexts need the old index). Once Webflow
+  is retired, repointing `votebot.digitaldemocracyproject.org` (proxied, currently at the old server) at this server is
+  an alternative cutover lever, but it needs that name and its certificate on the broker's nginx.
 - **Rehearse first, on the dev site**: switch it to the new copy and back, timing each way, including how long
   ddp-next takes to deploy the change and a tab reload, and test the old copy right before (its chat, its index,
   Slack handoff, the Webflow page). Do not cut over until the way back has been shown to work.
@@ -386,16 +387,17 @@ organizations from the broker, and the console shows no CORS error. In the journ
   rehearsal worked. Roll back at once if after cutover chat errors repeat, the broker slows, memory or disk
   pressure appears, an answer comes from the wrong index, or Slack/Webflow activity shows up on the new copy.
 - **Rollback**: point the new site's `wsUrl` back to the old copy and purge the cache. Nothing on the old server
-  was changed, so there is nothing to restore. To remove the new copy entirely: `sudo systemctl disable --now votebot`
-  and delete its nginx server block (`nginx -t`, reload).
+  was changed, so there is nothing to restore. To remove the new copy entirely: `docker compose -f
+  infrastructure/docker/docker-compose.prod.yml down`, revert the broker nginx change and recreate nginx (3.7).
 
 ## 8. Checklist for the ticket
 
 - [ ] 1.1 to 1.3 filled in, differences reported
 - [ ] Section 2: `legacy-webflow` branch and tag in votebot and ddp-sync, old checkouts pinned, paths recorded
-- [ ] Section 3: new copy running (`bill_filter_key=ocd_bill_id` in the startup log, no Slack), own Redis (port 6380, not the broker's), memory and log limits in place, real client IP restored behind Cloudflare
+- [ ] 3.1 swap added; 3.2 to 3.5: image built on the host, container running and verified INSIDE the Docker network (`bill_filter_key=ocd_bill_id` in the startup log, no Slack), own Redis container, memory limits and log rotation in place
+- [ ] 3.7: broker PR #410 merged, template tested in a throwaway container, nginx recreated in a quiet window, public smoke test passing
 - [ ] Baseline health table filled in and unchanged after each step
 - [ ] 4.1 production origin supplied and added at cutover; 4.2 widget path documented in `chat-widget/README.md`
-- [ ] Section 5: weekly monitoring owner named; OpenAI usage limit and alert set; Cloudflare bot filtering tried only if needed
+- [ ] Section 5: weekly monitoring owner named; OpenAI usage limit and alert set; Turnstile or a proxied hostname only if needed
 - [ ] Section 6 verified with real bills, failure paths and the small load check done; rollback rehearsed on the dev site
 - [ ] Hand back to NEXT-36 (which `wsUrl`) and SYNC-92
