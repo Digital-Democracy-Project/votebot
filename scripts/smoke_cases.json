@@ -1,0 +1,147 @@
+[
+  {
+    "name": "FL (replace the placeholder ocd_bill_id and gov_id)",
+    "page_context": {
+      "type": "bill",
+      "id": "HB 1",
+      "jurisdiction": "FL",
+      "session": "2026",
+      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?"
+      },
+      {
+        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "expect_any": [
+          "introduced",
+          "amendment",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "version"
+        ]
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  },
+  {
+    "name": "WA (biennium session code, e.g. 2025-2026)",
+    "page_context": {
+      "type": "bill",
+      "id": "HB 1",
+      "jurisdiction": "WA",
+      "session": "2025-2026",
+      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?"
+      },
+      {
+        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "expect_any": [
+          "introduced",
+          "amendment",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "version"
+        ]
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  },
+  {
+    "name": "US (federal: session is the Congress number)",
+    "page_context": {
+      "type": "bill",
+      "id": "HR 1",
+      "jurisdiction": "US",
+      "session": "119",
+      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?"
+      },
+      {
+        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "expect_any": [
+          "introduced",
+          "amendment",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "version"
+        ]
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  },
+  {
+    "name": "VA",
+    "page_context": {
+      "type": "bill",
+      "id": "HB 1",
+      "jurisdiction": "VA",
+      "session": "2026",
+      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?"
+      },
+      {
+        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "expect_any": [
+          "introduced",
+          "amendment",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "version"
+        ]
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  },
+  {
+    "name": "MI (biennium session code, e.g. 2025-2026)",
+    "page_context": {
+      "type": "bill",
+      "id": "HB 4001",
+      "jurisdiction": "MI",
+      "session": "2025-2026",
+      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    },
+    "questions": [
+      {
+        "message": "What does this bill do?"
+      },
+      {
+        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "expect_any": [
+          "introduced",
+          "amendment",
+          "engrossed",
+          "enrolled",
+          "chaptered",
+          "version"
+        ]
+      }
+    ],
+    "expect_types": [
+      "bill-text"
+    ]
+  }
+]

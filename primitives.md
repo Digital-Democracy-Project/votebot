@@ -277,6 +277,12 @@ Same index and namespace as DDP-Sync (`votebot-large` today; `ddp-knowledge-base
 
 ---
 
+## Smoke test (`scripts/smoke_ws.py`, VOTEBOT-16)
+
+Real `/ws/chat` client for cutover/rollback checks (`--cases` JSON, `--url`, `--index canonical|legacy`, `--retrieval`, `--expect-types`); `check_turn`, `retrieval_checks`, `run_case`, `main`. Tests: `tests/unit/test_websocket_protocol.py` (route protocol with a `FakeAgent` and the FastAPI test client — **reuse that fixture** for any new websocket behaviour) and `tests/unit/test_smoke_ws.py` (script against a local uvicorn server). Don't write another websocket client for ops checks.
+
+---
+
 ## Discipline checklist for every new PLAN
 
 Before sketching a new dataclass / retrieval phase / helper / prompt section:

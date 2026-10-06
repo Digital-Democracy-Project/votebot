@@ -730,6 +730,27 @@ Top jurisdictions (bills): MI 100%, WA 100%, VA 100%, FL 100%, US 100%, MA 100%,
 
 See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-sample) for detailed failure analysis.
 
+## WebSocket Smoke Test
+
+`scripts/smoke_ws.py` opens `/ws/chat` the way the widget does and checks the streamed answer, citations and confidence for a list of bills. It needs no Webflow credentials and works against either index, so it is the check for the canonical-index cutover and for a rollback to `votebot-large`.
+
+```bash
+# One case per bill (edit scripts/smoke_cases.json: FL, WA, US, VA, MI templates ship with a placeholder ocd_bill_id)
+python scripts/smoke_ws.py --url wss://api.digitaldemocracyproject.org/ws/chat --cases scripts/smoke_cases.json
+
+# Also check the retrieved chunks themselves (reads the index: needs the target's .env keys, and the same PINECONE_INDEX_NAME)
+python scripts/smoke_ws.py --cases scripts/smoke_cases.json --retrieval --expect-types bill-text
+
+# Against the legacy index (skips the citation isolation check, which relies on canonical ids)
+python scripts/smoke_ws.py --index legacy --cases my_legacy_cases.json
+```
+
+Per question it checks the frame order, a non-empty answer, `confidence >= --min-confidence`, optional `expect_any` / `expect_none` strings (use them for "a bill whose votes changed shows the new votes", and a version question that must name its version) and that no citation belongs to another bill. With `--retrieval` it also checks that every chunk retrieved for the bill carries that bill's id, that the `--expect-types` document types are present, and that `bill-text` chunks carry the `document_id` api-v3 calls current. A case may give only a `ddp_url` plus `--resolve-base` to resolve its page context through `/content/resolve`. The exit status is non-zero if any case fails.
+
+Which document types exist depends on what DDP-Sync has written: today the canonical index holds `bill-text` and `organization` only, so `--expect-types` defaults to `bill-text`; add `bill-votes` / `bill-version-diff` once those are embedded.
+
+The protocol itself is covered offline by `tests/unit/test_websocket_protocol.py` (handshake, streaming frames, `context_update`, `ping`, `empty_message`, page-context hand-off to the agent), and the script's own logic by `tests/unit/test_smoke_ws.py`, which runs it against a local server with a faked agent.
+
 ## User Analytics & Production Monitoring
 
 VoteBot uses an event-based logging system that captures user behavior, query outcomes, and conversation metrics for offline analytics and quality evaluation.
