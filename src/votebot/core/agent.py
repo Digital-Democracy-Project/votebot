@@ -1,6 +1,7 @@
 """Single conversational agent for VoteBot."""
 
 import asyncio
+import contextvars
 import re
 import time
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from votebot.services.broker_lookup import (
     format_org_details,
 )
 from votebot.services.bill_votes import BillVotesService
+from votebot.services.legislators import UNAVAILABLE, LegislatorLookupService, format_legislators
 from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
 from votebot.services.openstates_client import openstates_base_url, openstates_headers
 from votebot.services.web_search import WebSearchService, WebSearchResult
@@ -44,6 +46,42 @@ from votebot.utils.intent import (
 )
 
 logger = structlog.get_logger()
+
+
+# When the enrichment lookups of the message being processed (broker, legislators) must be done by
+# (a `time.monotonic()` value): ONE budget per message, not one per lookup.
+_enrichment_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar("enrichment_deadline", default=None)
+
+
+def _enrichment_budget_left() -> float:
+    """Seconds the next enrichment lookup may take. The services stop themselves at the deadline and
+    return what they have; this is the hard stop a second later."""
+    deadline = _enrichment_deadline.get()
+    return BUDGET_SECONDS + 1.0 if deadline is None else max(0.1, deadline - time.monotonic()) + 1.0
+
+
+# Words that are not part of a person's name even when capitalised: US states (a "Why Florida?" is not a person).
+US_STATES = frozenset(
+    "alabama alaska arizona arkansas california colorado connecticut delaware florida georgia hawaii idaho illinois "
+    "indiana iowa kansas kentucky louisiana maine maryland massachusetts michigan minnesota mississippi missouri "
+    "montana nebraska nevada ohio oklahoma oregon pennsylvania tennessee texas utah vermont virginia wisconsin "
+    "wyoming congress senate house".split()
+)
+
+# Capitalised words that are titles or question words, never part of a name ("Rep. Smith", "Who Moody")
+NAME_STOPWORDS = frozenset(
+    "who whom whose what which when where why how is are was were did does do can could would should will tell show "
+    "explain give list find senator sen rep reps representative representatives congressman congressmen congresswoman "
+    "congressperson legislator legislators delegate speaker assemblyman assemblywoman assemblymember lawmaker mr mrs "
+    "ms dr hon".split()
+)
+
+# A word that says the message is about a legislator, so a name in it is worth looking up.
+LEGISLATOR_CUES = re.compile(
+    r"(?<!\w)(senators?|sen\.|representatives?|reps?\.|congress(?:man|men|woman|women|person|people)|legislators?|"
+    r"assembly(?:man|woman|member)s?|delegates?|lawmakers?|speaker)(?!\w)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -101,6 +139,7 @@ class VoteBotAgent:
         self.bill_votes = BillVotesService(self.settings)
         self.webflow_lookup = WebflowLookupService(self.settings)
         self.broker_lookup = BrokerLookupService(self.settings)
+        self.legislators = LegislatorLookupService(self.settings)
 
     def _normalize_button(self, button: str | None) -> str | None:
         """Apply the feature flag and validate the button type.
@@ -498,6 +537,7 @@ class VoteBotAgent:
             AgentResult with the response and metadata
         """
         _start_time = time.perf_counter()
+        _enrichment_deadline.set(time.monotonic() + BUDGET_SECONDS)  # one budget for this message's lookups
 
         # Normalize button — feature flag off OR unknown type means "no button"
         effective_button = self._normalize_button(button)
@@ -571,6 +611,8 @@ class VoteBotAgent:
             ],
             current_document_id=retrieval_result.current_document_id,
         )
+        if retrieval_result.notes:
+            retrieved_context = "\n\n".join([*retrieval_result.notes, retrieved_context])
 
         # Step 3: If user is disputing/verifying vote info, fetch directly from OpenStates
         vote_verification_context = ""
@@ -627,6 +669,11 @@ class VoteBotAgent:
         # 4. vote_verification_context (OpenStates votes)
         # 5. retrieved_context (RAG results)
         full_context = retrieved_context
+        if self.settings.bill_filter_key == "ocd_bill_id":
+            # Legislators are not in the canonical-id index: their facts come live from api-v3
+            legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
+            if legislator_info_context:
+                full_context = f"{legislator_info_context}\n\n{full_context}"
         if vote_verification_context:
             # Put verification context first - it's the authoritative source
             full_context = f"{vote_verification_context}\n\n{full_context}"
@@ -832,6 +879,7 @@ class VoteBotAgent:
             StreamChunkData objects with text fragments
         """
         _start_time = time.perf_counter()
+        _enrichment_deadline.set(time.monotonic() + BUDGET_SECONDS)  # one budget for this message's lookups
 
         # Normalize button — feature flag off OR unknown type means "no button"
         effective_button = self._normalize_button(button)
@@ -924,6 +972,8 @@ class VoteBotAgent:
             ],
             current_document_id=retrieval_result.current_document_id,
         )
+        if retrieval_result.notes:
+            retrieved_context = "\n\n".join([*retrieval_result.notes, retrieved_context])
 
         # Step 2b: Pre-fetch bill info if query mentions a specific bill
         # (This is done before streaming since tool calls can't interrupt streams)
@@ -947,10 +997,12 @@ class VoteBotAgent:
 
         # Step 2c: Pre-fetch legislator info if query mentions a person on a bill page
         legislator_info_context = ""
-        if page_context and page_context.type == "bill":
+        if self.settings.bill_filter_key == "ocd_bill_id":
+            legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
+        elif page_context and page_context.type == "bill":
             legislator_info_context = await self._prefetch_legislator_info(message)
-            if legislator_info_context:
-                logger.info("Pre-fetched legislator info for streaming")
+        if legislator_info_context:
+            logger.info("Pre-fetched legislator info for streaming")
 
         # Step 2d: If user is disputing/verifying vote info, fetch directly from OpenStates
         vote_verification_context = ""
@@ -1975,13 +2027,14 @@ class VoteBotAgent:
         if not org_id:
             logger.debug("No broker organization id in page_context for org bill lookup")
             return ""
+        deadline = _enrichment_deadline.get()
         try:
             org, positions = await asyncio.wait_for(
                 asyncio.gather(
-                    self.broker_lookup.get_org_details(org_id),
-                    self.broker_lookup.get_org_bill_positions(org_id),
+                    self.broker_lookup.get_org_details(org_id, deadline),
+                    self.broker_lookup.get_org_bill_positions(org_id, deadline),
                 ),
-                BUDGET_SECONDS,
+                _enrichment_budget_left(),
             )
         except asyncio.TimeoutError:
             logger.warning("Broker org positions took too long; answering without them", org_id=org_id)
@@ -1994,9 +2047,9 @@ class VoteBotAgent:
         try:
             positions = await asyncio.wait_for(
                 self.broker_lookup.get_bill_org_positions(
-                    page_context.jurisdiction, page_context.session, page_context.id
+                    page_context.jurisdiction, page_context.session, page_context.id, _enrichment_deadline.get()
                 ),
-                BUDGET_SECONDS,
+                _enrichment_budget_left(),
             )
         except asyncio.TimeoutError:
             logger.warning("Broker bill positions took too long; answering without them")
@@ -2322,6 +2375,78 @@ class VoteBotAgent:
 
         return None
 
+    @staticmethod
+    def _candidate_person_name(message: str) -> str | None:
+        """A person's name guessed from a message: its capitalised words that are not common ones
+        (e.g. "How did Ashley Moody vote?" -> "Ashley Moody"), or None."""
+        common_words = {
+            "how", "did", "what", "about", "the", "this", "vote", "on", "and",
+            "senator", "rep", "representative", "congressman", "congresswoman",
+            "she", "he", "they", "is", "a", "us", "u.s."
+        }
+        name_parts = [w for w in message.split() if len(w) > 1 and w[0].isupper() and w.lower() not in common_words]
+        return " ".join(name_parts) or None
+
+    @classmethod
+    def _legislator_name_in(cls, message: str, require_cue: bool) -> str | None:
+        """A name in the message worth a live `/people` lookup, or None.
+
+        The capitalised words of a message are only a guess at a name ("Summarize this bill" gives
+        "Summarize"), and each guess costs a live call, so: acronyms (HB, AARP), state names, titles
+        and question words are dropped, and unless the message has a legislator cue ("senator",
+        "representative"...) the name must be at least two words ("How did Ashley Moody vote?").
+        `require_cue` demands the cue.
+        """
+        cued = bool(LEGISLATOR_CUES.search(message))
+        if require_cue and not cued:
+            return None
+        guess = cls._candidate_person_name(message)
+        if not guess:
+            return None
+        tokens = [t.strip("?.,!;:()\"'") for t in guess.split()]
+        tokens = [t for t in tokens if t and not t.isupper() and t.lower() not in US_STATES | NAME_STOPWORDS]
+        first_word = message.split()[0].strip("?.,!") if message.split() else ""
+        if not cued and len(tokens) >= 3 and tokens[0] == first_word:
+            tokens = tokens[1:]  # "Tell Ashley Moody ..." -> "Ashley Moody"
+        if len(tokens) < (1 if cued else 2):
+            return None
+        return " ".join(tokens)
+
+    async def _legislator_context_from_api_v3(self, message: str, page_context: PageContext | None) -> str:
+        """Legislator facts read live from api-v3 (canonical-id index: legislators are not embedded).
+
+        A legislator page is answered about its legislator: by OpenStates person id when
+        `page_context.id` is one ("ocd-person/..."), else by the page's title (the name). On other
+        pages a name in the message is looked up on a bill page (as before) or when the message
+        has a legislator cue ("senator", "representative", ...), so an ordinary question that happens
+        to contain a capitalised word is not sent to api-v3. Several matches are listed for the
+        model to ask which one; a failure or a slow api-v3 costs the context, never the answer.
+        """
+        page_type = page_context.type if page_context else "general"
+
+        async def lookup() -> str:
+            if page_type == "legislator":
+                person_id = page_context.id if (page_context.id or "").startswith("ocd-person/") else None
+                if person_id:
+                    match = await self.legislators.find_by_id(person_id)
+                    return format_legislators(match) if match is not None else UNAVAILABLE
+                name, jurisdiction = page_context.title, page_context.jurisdiction
+            else:
+                # A bill page may name a legislator without a cue word ("How did Ashley Moody vote?"),
+                # other pages need the cue; see _legislator_name_in
+                name, jurisdiction = self._legislator_name_in(message, require_cue=page_type != "bill"), None
+            if not name:
+                return ""
+            match = await self.legislators.find_by_name(name, jurisdiction)
+            # None is api-v3 failing (the model is told so); no people is a name that is nobody
+            return format_legislators(match, asked=name) if match is not None else UNAVAILABLE
+
+        try:
+            return await asyncio.wait_for(lookup(), _enrichment_budget_left())
+        except asyncio.TimeoutError:
+            logger.warning("Legislator lookup took too long; telling the model it is unavailable")
+            return UNAVAILABLE
+
     async def _prefetch_legislator_info(self, message: str) -> str:
         """
         Pre-fetch legislator info from OpenStates when a name is mentioned.
@@ -2337,26 +2462,9 @@ class VoteBotAgent:
         """
         import httpx
 
-        # Extract potential name from message
-        common_words = {
-            "how", "did", "what", "about", "the", "this", "vote", "on", "and",
-            "senator", "rep", "representative", "congressman", "congresswoman",
-            "she", "he", "they", "is", "a", "us", "u.s."
-        }
-
-        # Get capitalized words that might be names
-        words = message.split()
-        name_parts = []
-        for w in words:
-            # Keep capitalized words that aren't common
-            if len(w) > 1 and w[0].isupper() and w.lower() not in common_words:
-                name_parts.append(w)
-
-        if not name_parts:
+        search_name = self._candidate_person_name(message)
+        if not search_name:
             return ""
-
-        # Construct search name (e.g., "Ashley Moody")
-        search_name = " ".join(name_parts)
 
         logger.info("Looking up legislator info", name=search_name)
 
@@ -2516,7 +2624,10 @@ class VoteBotAgent:
                 return ""
             try:
                 return format_org_details(
-                    await asyncio.wait_for(self.broker_lookup.get_org_details(org_id), BUDGET_SECONDS)
+                    await asyncio.wait_for(
+                        self.broker_lookup.get_org_details(org_id, _enrichment_deadline.get()),
+                        _enrichment_budget_left(),
+                    )
                 )
             except asyncio.TimeoutError:
                 return ""

@@ -6,9 +6,9 @@ tests fail if a query is sent without the filter that selects the intended versi
 
 from __future__ import annotations
 
+from tests.unit.test_ocd_bill_id_retrieval import BILL, _matches, _service
 from votebot.api.schemas.chat import PageContext
 from votebot.services.bill_versions import BillVersion
-from tests.unit.test_ocd_bill_id_retrieval import BILL, _FakeVersions, _matches, _service
 
 SAME_PASSAGE = "Section 1. The department shall administer the program."
 
@@ -42,14 +42,8 @@ def _chunk(doc_id, doc_type="bill-text", content=SAME_PASSAGE, **extra):
     )
 
 
-# Three versions that share the same passage verbatim, plus the diffs the embedding hook writes.
-POOL = [
-    _chunk("101"),
-    _chunk("102"),
-    _chunk("103"),
-    _chunk("102", "bill-version-diff", content="+ added in engrossed", from_version_note="Introduced"),
-    _chunk("103", "bill-version-diff", content="+ added in enrolled", from_version_note="Engrossed"),
-]
+# Three versions that share the same passage verbatim. (Diffs are not embedded: they are read live.)
+POOL = [_chunk("101"), _chunk("102"), _chunk("103")]
 
 
 def _store(calls: list):
@@ -162,25 +156,13 @@ class TestFallbackKeepsTheVersionScope:
         assert all(f and f.get("ocd_bill_id") == BILL for f in calls if f and f.get("document_type") != "organization")
 
 
-class TestWhatChangedUsesTheDiffDocuments:
-    async def test_a_changelog_question_queries_bill_version_diff_for_the_current_version(self):
+class TestWhatChangedIsNotSearchedInTheIndex:
+    """Diffs are read live from api-v3 (tests/unit/test_live_version_diffs.py); nothing is searched."""
+
+    async def test_a_changelog_question_sends_no_diff_or_changelog_query_to_the_index(self):
         calls: list = []
-        result = await _svc(calls).retrieve("what changed in this bill?", _bill_context())
-
-        diff_filter = next(f for f in calls if f and f.get("document_type") == "bill-version-diff")
-        assert diff_filter == {"ocd_bill_id": BILL, "document_id": "103", "document_type": "bill-version-diff"}
-        assert not any(f and f.get("document_type") == "bill-changelog" for f in calls)
-        assert result.chunks[0].metadata["document_type"] == "bill-version-diff"  # diffs lead
-        assert result.chunks[0].metadata["from_version_note"] == "Engrossed"
-
-    async def test_what_changed_in_the_engrossed_version_answers_from_that_diff(self):
-        calls: list = []
-        result = await _svc(calls).retrieve("what changed in the engrossed version?", _bill_context())
-
-        diff = result.chunks[0]
-        assert diff.metadata["document_type"] == "bill-version-diff" and diff.metadata["document_id"] == "102"
-        # Both versions are named by the document's own labels: Introduced -> Engrossed.
-        assert (diff.metadata["from_version_note"], diff.metadata["version_note"]) == ("Introduced", "Engrossed")
+        await _svc(calls).retrieve("what changed in this bill?", _bill_context())
+        assert not any(f and f.get("document_type") in ("bill-version-diff", "bill-changelog") for f in calls)
 
     async def test_a_normal_question_does_not_pull_in_diffs(self):
         calls: list = []
