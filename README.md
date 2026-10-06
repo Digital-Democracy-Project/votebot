@@ -735,23 +735,24 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#failure-analysis-100-document-s
 `scripts/smoke_ws.py` opens `/ws/chat` the way the widget does and checks the streamed answer, citations and confidence for a list of bills. It needs no Webflow credentials and works against either index, so it is the check for the canonical-index cutover and for a rollback to `votebot-large`.
 
 ```bash
-# One case per bill (edit scripts/smoke_cases.json: FL, WA, US, VA, MI templates ship with a placeholder ocd_bill_id)
-python scripts/smoke_ws.py --url wss://api.digitaldemocracyproject.org/ws/chat --cases scripts/smoke_cases.json
+# The five-jurisdiction cutover check (FL, WA, US, VA, MI). The cases pick an embedded bill themselves
+# (`discover`), so nothing needs filling in; discovery and --retrieval read the index and need the target's .env keys.
+python scripts/smoke_ws.py --url wss://<votebot-host>/ws/chat --cases scripts/smoke_cases.json --retrieval
 
-# Also check the retrieved chunks themselves (reads the index: needs the target's .env keys, and the same PINECONE_INDEX_NAME)
-python scripts/smoke_ws.py --cases scripts/smoke_cases.json --retrieval --expect-types bill-text
+# Without --retrieval and discovery (cases that name their bill): citations-only isolation, no keys needed
+python scripts/smoke_ws.py --url wss://<votebot-host>/ws/chat --cases my_cases.json
 
-# Against the legacy index (skips the citation isolation check, which relies on canonical ids)
+# Against the legacy index (skips the citation isolation and live-votes-tool checks, which are for the canonical index)
 python scripts/smoke_ws.py --index legacy --cases my_legacy_cases.json
 ```
 
-Per question it checks the frame order, a non-empty answer, `confidence >= --min-confidence`, optional `expect_any` / `expect_none` strings (use them for "a bill whose votes changed shows the new votes", and a version question that must name its version) and that no citation belongs to another bill. With `--retrieval` it also checks that every chunk retrieved for the bill carries that bill's id, that the `--expect-types` document types are present, and that `bill-text` chunks carry the `document_id` api-v3 calls current. A case may give only a `ddp_url` plus `--resolve-base` to resolve its page context through `/content/resolve`. The exit status is non-zero if any case fails.
+Per question it checks the frame order, a non-empty answer, `confidence >= --min-confidence`, and optional per-question assertions: `expect_any` / `expect_none` / `expect_regex` on the answer (use text the question does not contain, or the check passes on any reply), `min_citations`, and `expect_votes_tool`. **Votes are not embedded in the new index**, so a vote question must be answered by the live OpenStates tool: the `stream_end` frame carries `bill_votes_tool_used`, and `expect_votes_tool: true` fails the question if retrieval answered instead (asserted only with `--index canonical`; on the legacy index either path may answer). Bill isolation on the canonical index fails if a citation carries another bill's id, and a question that requires citations must have at least one that carries *this* bill's id, so zero evidence cannot pass.
 
-A question's `min_citations` (default 0, since the model only cites when it chooses to; the shipped templates set 1 on the first question) fails a turn that cites too little, and the report says how many citations carried a bill id, so a pass with few identifiable citations is visible. `--timeout` bounds each frame and the retrieval check, `--turn-timeout` a whole question.
+With `--retrieval` it also checks that every chunk retrieved for the bill carries that bill's id, that the `--expect-types` document types are present (default `bill-text`), that `bill-text` chunks carry the `document_id` api-v3 calls current, and that the index holds **no** documents of the `--forbid-types` (default `bill-votes,bill-version-diff`, neither of which is embedded). `--retrieval` reads the index from the machine running the script, so it only proves the target if both use the same `PINECONE_INDEX_NAME`/`NAMESPACE` (the script says so when it runs). Without it the report says isolation was judged from citations only. A case may give only a `ddp_url` plus `--resolve-base` to resolve its page context through `/content/resolve`. The exit status is non-zero if any case fails; `--timeout` bounds each frame and `--turn-timeout` a whole question.
 
-Which document types exist depends on what DDP-Sync has written: today the canonical index holds `bill-text` and `organization` only, so `--expect-types` defaults to `bill-text`; add `bill-votes` / `bill-version-diff` once those are embedded.
+"What changed from the previous version" is not a smoke question: diffs are not in the index, so it cannot be answered from retrieval.
 
-The protocol itself is covered offline by `tests/unit/test_websocket_protocol.py` (handshake, streaming frames, `context_update`, `ping`, `empty_message`, page-context hand-off to the agent), and the script's own logic by `tests/unit/test_smoke_ws.py`, which runs it against a local server with a faked agent.
+The protocol itself is covered offline by `tests/unit/test_websocket_protocol.py` (handshake, streaming frames including `bill_votes_tool_used`, `context_update`, `ping`, `empty_message`, page-context hand-off to the agent), and the script's own logic by `tests/unit/test_smoke_ws.py`, which runs it against a local server with a faked agent.
 
 ## User Analytics & Production Monitoring
 

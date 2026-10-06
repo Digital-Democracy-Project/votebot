@@ -39,18 +39,25 @@ class FakeAgent:
     answer = ["The bill ", "does X."]
     citations = DEFAULT_CITATIONS
     fail = False
+    votes_tool_used = False
+    responder = None  # message -> (answer chunks, bill_votes_tool_used), to answer per question
 
     async def process_message_stream(self, **kwargs):
         FakeAgent.calls.append(kwargs)
         if FakeAgent.fail:
             raise RuntimeError("boom")
-        for text in FakeAgent.answer:
+        answer, tool_used = (
+            FakeAgent.responder(kwargs["message"]) if FakeAgent.responder else (FakeAgent.answer, FakeAgent.votes_tool_used)
+        )
+        for text in answer:
             yield StreamChunkData(text=text)
         yield StreamChunkData(
             text="",
             done=True,
             citations=FakeAgent.citations,
-            metadata=ResponseMetadata(model="fake", tokens_used=1, retrieval_count=3, latency_ms=1.0),
+            metadata=ResponseMetadata(
+                model="fake", tokens_used=1, retrieval_count=3, latency_ms=1, bill_votes_tool_used=tool_used
+            ),
         )
 
 
@@ -59,6 +66,7 @@ def client(monkeypatch):
     FakeAgent.calls = []
     FakeAgent.fail = False
     FakeAgent.citations = DEFAULT_CITATIONS
+    FakeAgent.votes_tool_used, FakeAgent.responder = False, None
     ws.sessions.clear()
     monkeypatch.setattr(ws, "VoteBotAgent", FakeAgent)
     monkeypatch.setattr(ws, "get_slack_service", lambda: SimpleNamespace(is_configured=False))
@@ -142,6 +150,15 @@ class TestStreaming:
         ]
         assert 0.5 < end["confidence"] <= 1.0  # retrieved docs + a citation raise it above the base
         assert end["requires_human"] is False
+        assert end["bill_votes_tool_used"] is False
+
+    def test_stream_end_reports_when_the_live_votes_tool_answered(self, client):
+        FakeAgent.votes_tool_used = True
+        with client.websocket_connect("/ws/chat?session_id=s1") as conn:
+            conn.receive_json()
+            conn.send_json(_user_message("How did the vote go?"))
+            end = _read_until(conn, "stream_end")[-1]["payload"]
+        assert end["bill_votes_tool_used"] is True
 
     def test_an_agent_failure_is_reported_as_a_processing_error(self, client):
         FakeAgent.fail = True

@@ -1,12 +1,8 @@
 [
   {
-    "name": "FL (replace the placeholder ocd_bill_id and gov_id)",
-    "page_context": {
-      "type": "bill",
-      "id": "HB 1",
-      "jurisdiction": "FL",
-      "session": "2026",
-      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    "name": "FL",
+    "discover": {
+      "jurisdiction": "FL"
     },
     "questions": [
       {
@@ -14,15 +10,23 @@
         "min_citations": 1
       },
       {
-        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "message": "Which version of the bill text are you answering from, and what is its date?",
         "expect_any": [
           "introduced",
-          "amendment",
           "engrossed",
           "enrolled",
           "chaptered",
-          "version"
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
         ]
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
       }
     ],
     "expect_types": [
@@ -30,13 +34,9 @@
     ]
   },
   {
-    "name": "WA (biennium session code, e.g. 2025-2026)",
-    "page_context": {
-      "type": "bill",
-      "id": "HB 1",
-      "jurisdiction": "WA",
-      "session": "2025-2026",
-      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    "name": "WA",
+    "discover": {
+      "jurisdiction": "WA"
     },
     "questions": [
       {
@@ -44,15 +44,23 @@
         "min_citations": 1
       },
       {
-        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "message": "Which version of the bill text are you answering from, and what is its date?",
         "expect_any": [
           "introduced",
-          "amendment",
           "engrossed",
           "enrolled",
           "chaptered",
-          "version"
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
         ]
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
       }
     ],
     "expect_types": [
@@ -60,13 +68,9 @@
     ]
   },
   {
-    "name": "US (federal: session is the Congress number)",
-    "page_context": {
-      "type": "bill",
-      "id": "HR 1",
-      "jurisdiction": "US",
-      "session": "119",
-      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    "name": "US",
+    "discover": {
+      "jurisdiction": "US"
     },
     "questions": [
       {
@@ -74,15 +78,23 @@
         "min_citations": 1
       },
       {
-        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "message": "Which version of the bill text are you answering from, and what is its date?",
         "expect_any": [
           "introduced",
-          "amendment",
           "engrossed",
           "enrolled",
           "chaptered",
-          "version"
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
         ]
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
       }
     ],
     "expect_types": [
@@ -91,12 +103,8 @@
   },
   {
     "name": "VA",
-    "page_context": {
-      "type": "bill",
-      "id": "HB 1",
-      "jurisdiction": "VA",
-      "session": "2026",
-      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    "discover": {
+      "jurisdiction": "VA"
     },
     "questions": [
       {
@@ -104,15 +112,23 @@
         "min_citations": 1
       },
       {
-        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "message": "Which version of the bill text are you answering from, and what is its date?",
         "expect_any": [
           "introduced",
-          "amendment",
           "engrossed",
           "enrolled",
           "chaptered",
-          "version"
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
         ]
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
       }
     ],
     "expect_types": [
@@ -120,13 +136,9 @@
     ]
   },
   {
-    "name": "MI (biennium session code, e.g. 2025-2026)",
-    "page_context": {
-      "type": "bill",
-      "id": "HB 4001",
-      "jurisdiction": "MI",
-      "session": "2025-2026",
-      "ocd_bill_id": "00000000-0000-0000-0000-000000000000"
+    "name": "MI",
+    "discover": {
+      "jurisdiction": "MI"
     },
     "questions": [
       {
@@ -134,15 +146,23 @@
         "min_citations": 1
       },
       {
-        "message": "Which version of this bill are you reading, and what changed from the previous version?",
+        "message": "Which version of the bill text are you answering from, and what is its date?",
         "expect_any": [
           "introduced",
-          "amendment",
           "engrossed",
           "enrolled",
           "chaptered",
-          "version"
+          "amendment",
+          "passed"
+        ],
+        "expect_regex": [
+          "\\d{4}-\\d{2}-\\d{2}",
+          "(January|February|March|April|May|June|July|August|September|October|November|December) \\d{1,2}, \\d{4}"
         ]
+      },
+      {
+        "message": "How did the vote on this bill go?",
+        "expect_votes_tool": true
       }
     ],
     "expect_types": [

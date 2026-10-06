@@ -1035,6 +1035,7 @@ class VoteBotAgent:
                         retrieval_count=retrieval_result.total_retrieved,
                         latency_ms=0,  # Calculated by caller
                         cached=False,
+                        bill_votes_tool_used=bill_votes_tool_used_in_stream,
                     ),
                 )
 

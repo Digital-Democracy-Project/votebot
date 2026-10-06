@@ -15,13 +15,24 @@ credentials and works against either index; point it at an instance with --url.
 Checks, per case and question:
   * stream_start, one or more stream_chunk, stream_end, and no `error` frame
   * a non-empty answer and confidence >= --min-confidence
-  * `expect_any` (at least one, case-insensitive) / `expect_none` strings in the answer
-  * `min_citations` (default 0: the model only cites when it chooses to; set 1 on questions that
-    must be grounded in the bill)
-  * bill isolation: no citation's id carries another bill's id (canonical index)
+  * `expect_any` (at least one, case-insensitive) / `expect_none` strings in the answer, and
+    `expect_regex` (the answer must match at least one pattern). Use text the question does not
+    itself contain, or the check passes on any reply.
+  * `min_citations` (default 0: the model only cites when it chooses to)
+  * `expect_votes_tool`: true asserts the live OpenStates tool answered (`bill_votes_tool_used` in
+    `stream_end`); false asserts it did not. Votes are not in the new index, so on --index canonical
+    a vote question must be answered this way. The flag is not asserted on --index legacy, where
+    either path may answer.
+  * bill isolation on the canonical index: no citation carries another bill's id, and a question that
+    requires citations must have at least one that carries THIS bill's id (zero evidence fails)
   * with --retrieval: every chunk retrieved for the bill carries that bill's id, the expected
-    document types are present, and `bill-text` chunks of the current version carry the
-    `document_id` api-v3 calls current
+    document types are present, `bill-text` chunks of the current version carry the `document_id`
+    api-v3 calls current, and the index holds NO document of the --forbid-types (by default
+    `bill-votes` and `bill-version-diff`, which are not embedded in the new index)
+  * a case may give `discover: {"jurisdiction": "FL"}` instead of a bill: the script then picks a bill
+    that is actually embedded for that jurisdiction (needs the .env keys), so no ids have to be filled in
+
+Without --retrieval the chunk-level isolation is NOT proven and the report says so.
 
 Exit status is 0 only if every check passed.
 """
@@ -64,6 +75,7 @@ class Turn:
     answer: str = ""
     citations: list[dict] = field(default_factory=list)
     confidence: float | None = None
+    bill_votes_tool_used: bool | None = None
     error: dict | None = None
 
 
@@ -76,7 +88,7 @@ async def ask(url: str, session_id: str, message: str, page_context: dict, timeo
         while True:
             frame = json.loads(await asyncio.wait_for(conn.recv(), timeout))
             kind = frame.get("type")
-            if kind == "session_info":
+            if kind in ("session_info", "session_restored"):  # sent on connect; restored from the 2nd question on
                 continue
             turn.frames.append(kind)
             payload = frame.get("payload") or {}
@@ -85,6 +97,7 @@ async def ask(url: str, session_id: str, message: str, page_context: dict, timeo
             elif kind == "stream_end":
                 turn.citations = payload.get("citations") or []
                 turn.confidence = payload.get("confidence")
+                turn.bill_votes_tool_used = payload.get("bill_votes_tool_used")
                 return turn
             elif kind == "error":
                 turn.error = payload
@@ -108,13 +121,25 @@ def check_turn(turn: Turn, question: dict, bill_id: str | None, min_confidence: 
     for banned in question.get("expect_none") or []:
         if banned.lower() in lowered:
             problems.append(f"answer mentions {banned!r}")
+    patterns = question.get("expect_regex") or []
+    if patterns and not any(re.search(p, turn.answer, re.IGNORECASE) for p in patterns):
+        problems.append(f"answer matches none of {patterns}")
     if len(turn.citations) < question.get("min_citations", 0):
         problems.append(f"{len(turn.citations)} citations, expected at least {question['min_citations']}")
+    expected_tool = question.get("expect_votes_tool")
+    if canonical and expected_tool is not None and turn.bill_votes_tool_used is not expected_tool:
+        problems.append(
+            f"bill_votes_tool_used is {turn.bill_votes_tool_used}, expected {expected_tool} "
+            "(votes are not in the new index; the live tool must answer)"
+        )
     if canonical and bill_id:
-        for citation in turn.citations:
-            others = {u for u in UUID_RE.findall(str(citation.get("document_id", "")).lower()) if u != bill_id.lower()}
+        ids = [set(UUID_RE.findall(str(c.get("document_id", "")).lower())) for c in turn.citations]
+        for citation, found in zip(turn.citations, ids, strict=True):
+            others = found - {bill_id.lower()}
             if others:
                 problems.append(f"citation {citation.get('document_id')} belongs to another bill ({sorted(others)[0]})")
+        if question.get("min_citations", 0) > 0 and not any(bill_id.lower() in found for found in ids):
+            problems.append("no citation carries this bill's id: nothing shows the answer came from this bill")
     return problems
 
 
@@ -129,6 +154,39 @@ async def resolve_page_context(http_base: str, ddp_url: str) -> dict:
         response = await client.get(f"{http_base}/votebot/v1/content/resolve", params={"url": ddp_url})
         response.raise_for_status()
         return response.json()
+
+
+async def discover_bill(jurisdiction: str) -> dict:
+    """An embedded bill for the jurisdiction, as a page context (needs the .env keys)."""
+    from votebot.config import get_settings
+    from votebot.services.vector_store import VectorStoreService
+
+    hits = await VectorStoreService(get_settings()).query(
+        query="bill", top_k=1, filter={"document_type": "bill-text", "jurisdiction": jurisdiction.upper()}
+    )
+    meta = hits[0].metadata if hits else {}
+    if not (meta.get("ocd_bill_id") and meta.get("gov_id")):
+        raise RuntimeError(f"no embedded bill-text found for {jurisdiction.upper()} in the index")
+    return {
+        "type": "bill",
+        "id": meta["gov_id"],
+        "jurisdiction": jurisdiction.upper(),
+        "session": meta.get("session_code"),
+        "ocd_bill_id": meta["ocd_bill_id"],
+    }
+
+
+async def forbidden_types_check(forbid_types: list[str]) -> list[str]:
+    """A true negative: the index holds no document of these types at all."""
+    from votebot.config import get_settings
+    from votebot.services.vector_store import VectorStoreService
+
+    store = VectorStoreService(get_settings())
+    problems = []
+    for doc_type in forbid_types:
+        if await store.query(query="bill", top_k=1, filter={"document_type": doc_type}):
+            problems.append(f"the index holds {doc_type} documents; it must not (votes and diffs are not embedded)")
+    return problems
 
 
 async def retrieval_checks(case: dict, page_context: dict, expect_types: list[str]) -> tuple[list[str], list[str]]:
@@ -178,6 +236,9 @@ async def run_case(case: dict, args: argparse.Namespace) -> Result:
             if not args.resolve_base:
                 return Result(result.name, ["case has ddp_url only; pass --resolve-base to resolve it"])
             page_context = await resolve_page_context(args.resolve_base, case["ddp_url"])
+        if not page_context and case.get("discover"):
+            page_context = await discover_bill(case["discover"]["jurisdiction"])
+            result.notes.append(f"discovered {page_context['id']} ({page_context['ocd_bill_id']}), session {page_context['session']}")
         page_context = page_context or {"type": "general"}
         bill_id = page_context.get("ocd_bill_id")
         if bill_id == PLACEHOLDER_BILL:
@@ -217,6 +278,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--retrieval", action="store_true", help="also check the retrieved chunks (needs the .env keys)")
     parser.add_argument("--expect-types", type=lambda s: [t for t in s.split(",") if t], default=["bill-text"],
                         help="comma-separated document types retrieval must return (cases may override)")
+    parser.add_argument("--forbid-types", type=lambda s: [t for t in s.split(",") if t],
+                        default=["bill-votes", "bill-version-diff"],
+                        help="document types the canonical index must not hold (checked with --retrieval)")
     return parser.parse_args(argv)
 
 
@@ -229,6 +293,12 @@ async def main(argv: list[str] | None = None) -> int:
               "PINECONE_INDEX_NAME and PINECONE_NAMESPACE are the same")
     print()
     results = [await run_case(case, args) for case in cases]
+    if args.retrieval and args.index == "canonical" and args.forbid_types:
+        try:
+            absent = Result("index holds no " + " or ".join(args.forbid_types), await forbidden_types_check(args.forbid_types))
+        except Exception as e:  # noqa: BLE001
+            absent = Result("index holds no " + " or ".join(args.forbid_types), [f"{type(e).__name__}: {e}"])
+        results.append(absent)
     for r in results:
         print(f"{'PASS' if r.ok else 'FAIL'}  {r.name}")
         for line in r.notes:
@@ -237,6 +307,9 @@ async def main(argv: list[str] | None = None) -> int:
             print(f"      ! {line}")
     failed = [r for r in results if not r.ok]
     print(f"\n{len(results) - len(failed)}/{len(results)} cases passed")
+    if not args.retrieval:
+        print("Note: bill isolation was judged from citations only. Run with --retrieval (needs the .env keys) "
+              "to prove it on the retrieved chunks and to check the index holds no vote or diff documents.")
     return 1 if failed else 0
 
 

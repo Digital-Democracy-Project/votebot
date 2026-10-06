@@ -190,6 +190,10 @@ class ResponseMetadata(BaseModel):
         default=False,
         description="Whether the response was served from cache",
     )
+    bill_votes_tool_used: bool = Field(
+        default=False,
+        description="Whether live OpenStates bill/vote data was fetched for this response (streaming path)",
+    )
 
 
 class ChatResponse(BaseModel):
