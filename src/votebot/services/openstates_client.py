@@ -34,8 +34,14 @@ def openstates_base_url(settings: Settings) -> str:
 
 
 def openstates_headers(settings: Settings) -> dict[str, str]:
-    """Auth header for OpenStates requests, matching `openstates_base_url`'s routing."""
+    """Auth header for OpenStates requests, matching `openstates_base_url`'s routing.
+
+    Exactly one shape is ever sent: the public API's and api-v3's `x-api-key`, or ddp-api's proxy's
+    `Authorization: Bearer` (the replica flag with `DDP_OPENSTATES_AUTH_HEADER=bearer`, the default).
+    """
     if settings.use_ddp_openstates_replica:
         token = settings.ddp_openstates_bearer_token.get_secret_value()
+        if settings.ddp_openstates_auth_header == "x-api-key":
+            return {"x-api-key": token}
         return {"Authorization": f"Bearer {token}"}
     return {"x-api-key": settings.openstates_api_key.get_secret_value()}
