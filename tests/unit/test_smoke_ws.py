@@ -21,7 +21,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 
-from tests.unit.test_websocket_protocol import BILL, FakeAgent
+from tests.unit.test_websocket_protocol import BILL, DEFAULT_CITATIONS, FakeAgent
 from votebot.api.routes import websocket as ws
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "smoke_ws.py"
@@ -35,7 +35,7 @@ OTHER = "b4a8d1e2-2222-4333-8444-555566667777"
 
 @pytest.fixture
 def server(monkeypatch):
-    FakeAgent.calls, FakeAgent.fail = [], False
+    FakeAgent.calls, FakeAgent.fail, FakeAgent.citations = [], False, DEFAULT_CITATIONS
     ws.sessions.clear()
     monkeypatch.setattr(ws, "VoteBotAgent", FakeAgent)
     monkeypatch.setattr(ws, "get_slack_service", lambda: SimpleNamespace(is_configured=False))
@@ -83,11 +83,8 @@ class TestAgainstALocalServer:
         assert FakeAgent.calls[0]["page_context"].ocd_bill_id == BILL
 
     def test_a_citation_of_another_bill_fails_isolation(self, server, tmp_path, capsys):
-        FakeAgent.citations = [FakeAgent.citations[0].model_copy(update={"document_id": f"bill-text:{OTHER}:12-chunk-0"})]
-        try:
-            assert _run(tmp_path, server, [_case()]) == 1
-        finally:
-            FakeAgent.citations = [FakeAgent.citations[0].model_copy(update={"document_id": f"bill-text:{BILL}:11"})]
+        FakeAgent.citations = [DEFAULT_CITATIONS[0].model_copy(update={"document_id": f"bill-text:{OTHER}:12-chunk-0"})]
+        assert _run(tmp_path, server, [_case()]) == 1
         assert "belongs to another bill" in capsys.readouterr().out
 
     def test_an_answer_missing_the_expected_text_fails(self, server, tmp_path, capsys):
@@ -124,6 +121,30 @@ class TestAgainstALocalServer:
         assert _run(tmp_path, server, [_case(), failing]) == 1
         out = capsys.readouterr().out
         assert "PASS  FL HB 1" in out and "FAIL  bad" in out and "1/2 cases passed" in out
+
+
+class TestCitationsAndTimeouts:
+    def test_min_citations_fails_a_turn_that_cites_nothing(self, server, tmp_path, capsys):
+        FakeAgent.citations = []
+        case = _case(questions=[{"message": "What does this bill do?", "min_citations": 1}])
+        assert _run(tmp_path, server, [case]) == 1
+        assert "0 citations, expected at least 1" in capsys.readouterr().out
+
+    def test_the_report_says_how_many_citations_carried_a_bill_id(self, server, tmp_path, capsys):
+        assert _run(tmp_path, server, [_case()]) == 0
+        assert "1/1 citations carry a bill id" in capsys.readouterr().out
+
+    def test_the_target_is_printed(self, server, tmp_path, capsys):
+        _run(tmp_path, server, [_case()])
+        assert f"target {server}" in capsys.readouterr().out
+
+    def test_a_turn_that_stalls_is_a_failed_case_not_a_hang(self, server, tmp_path, capsys, monkeypatch):
+        async def stall(*a, **k):
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(smoke, "ask", stall)
+        assert _run(tmp_path, server, [_case()], "--turn-timeout", "0.2") == 1
+        assert "TimeoutError" in capsys.readouterr().out
 
 
 class TestCheckTurn:

@@ -21,20 +21,23 @@ from votebot.core.agent import StreamChunkData
 BILL = "a3f7c0d1-1111-4222-8333-444455556666"
 
 
+DEFAULT_CITATIONS = [
+    Citation(
+        source="OpenStates archive",
+        document_id=f"bill-text:{BILL}:11",
+        excerpt="Section 1 ...",
+        url="https://example.test/hb1",
+        relevance_score=0.9,
+    )
+]
+
+
 class FakeAgent:
     """Stands in for VoteBotAgent: records what it was given and streams a canned answer."""
 
     calls: list[dict] = []
     answer = ["The bill ", "does X."]
-    citations = [
-        Citation(
-            source="OpenStates archive",
-            document_id=f"bill-text:{BILL}:11",
-            excerpt="Section 1 ...",
-            url="https://example.test/hb1",
-            relevance_score=0.9,
-        )
-    ]
+    citations = DEFAULT_CITATIONS
     fail = False
 
     async def process_message_stream(self, **kwargs):
@@ -55,6 +58,7 @@ class FakeAgent:
 def client(monkeypatch):
     FakeAgent.calls = []
     FakeAgent.fail = False
+    FakeAgent.citations = DEFAULT_CITATIONS
     ws.sessions.clear()
     monkeypatch.setattr(ws, "VoteBotAgent", FakeAgent)
     monkeypatch.setattr(ws, "get_slack_service", lambda: SimpleNamespace(is_configured=False))

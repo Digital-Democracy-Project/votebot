@@ -747,6 +747,8 @@ python scripts/smoke_ws.py --index legacy --cases my_legacy_cases.json
 
 Per question it checks the frame order, a non-empty answer, `confidence >= --min-confidence`, optional `expect_any` / `expect_none` strings (use them for "a bill whose votes changed shows the new votes", and a version question that must name its version) and that no citation belongs to another bill. With `--retrieval` it also checks that every chunk retrieved for the bill carries that bill's id, that the `--expect-types` document types are present, and that `bill-text` chunks carry the `document_id` api-v3 calls current. A case may give only a `ddp_url` plus `--resolve-base` to resolve its page context through `/content/resolve`. The exit status is non-zero if any case fails.
 
+A question's `min_citations` (default 0, since the model only cites when it chooses to; the shipped templates set 1 on the first question) fails a turn that cites too little, and the report says how many citations carried a bill id, so a pass with few identifiable citations is visible. `--timeout` bounds each frame and the retrieval check, `--turn-timeout` a whole question.
+
 Which document types exist depends on what DDP-Sync has written: today the canonical index holds `bill-text` and `organization` only, so `--expect-types` defaults to `bill-text`; add `bill-votes` / `bill-version-diff` once those are embedded.
 
 The protocol itself is covered offline by `tests/unit/test_websocket_protocol.py` (handshake, streaming frames, `context_update`, `ping`, `empty_message`, page-context hand-off to the agent), and the script's own logic by `tests/unit/test_smoke_ws.py`, which runs it against a local server with a faked agent.

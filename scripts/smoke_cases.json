@@ -10,7 +10,8 @@
     },
     "questions": [
       {
-        "message": "What does this bill do?"
+        "message": "What does this bill do?",
+        "min_citations": 1
       },
       {
         "message": "Which version of this bill are you reading, and what changed from the previous version?",
@@ -39,7 +40,8 @@
     },
     "questions": [
       {
-        "message": "What does this bill do?"
+        "message": "What does this bill do?",
+        "min_citations": 1
       },
       {
         "message": "Which version of this bill are you reading, and what changed from the previous version?",
@@ -68,7 +70,8 @@
     },
     "questions": [
       {
-        "message": "What does this bill do?"
+        "message": "What does this bill do?",
+        "min_citations": 1
       },
       {
         "message": "Which version of this bill are you reading, and what changed from the previous version?",
@@ -97,7 +100,8 @@
     },
     "questions": [
       {
-        "message": "What does this bill do?"
+        "message": "What does this bill do?",
+        "min_citations": 1
       },
       {
         "message": "Which version of this bill are you reading, and what changed from the previous version?",
@@ -126,7 +130,8 @@
     },
     "questions": [
       {
-        "message": "What does this bill do?"
+        "message": "What does this bill do?",
+        "min_citations": 1
       },
       {
         "message": "Which version of this bill are you reading, and what changed from the previous version?",

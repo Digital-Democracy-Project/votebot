@@ -16,6 +16,8 @@ Checks, per case and question:
   * stream_start, one or more stream_chunk, stream_end, and no `error` frame
   * a non-empty answer and confidence >= --min-confidence
   * `expect_any` (at least one, case-insensitive) / `expect_none` strings in the answer
+  * `min_citations` (default 0: the model only cites when it chooses to; set 1 on questions that
+    must be grounded in the bill)
   * bill isolation: no citation's id carries another bill's id (canonical index)
   * with --retrieval: every chunk retrieved for the bill carries that bill's id, the expected
     document types are present, and `bill-text` chunks of the current version carry the
@@ -106,12 +108,20 @@ def check_turn(turn: Turn, question: dict, bill_id: str | None, min_confidence: 
     for banned in question.get("expect_none") or []:
         if banned.lower() in lowered:
             problems.append(f"answer mentions {banned!r}")
+    if len(turn.citations) < question.get("min_citations", 0):
+        problems.append(f"{len(turn.citations)} citations, expected at least {question['min_citations']}")
     if canonical and bill_id:
         for citation in turn.citations:
             others = {u for u in UUID_RE.findall(str(citation.get("document_id", "")).lower()) if u != bill_id.lower()}
             if others:
                 problems.append(f"citation {citation.get('document_id')} belongs to another bill ({sorted(others)[0]})")
     return problems
+
+
+def citation_coverage(turn: Turn, bill_id: str | None) -> str:
+    """How many citations carried a bill id at all: isolation says nothing about the rest."""
+    carrying = sum(1 for c in turn.citations if UUID_RE.search(str(c.get("document_id", "")).lower()))
+    return f"{carrying}/{len(turn.citations)} citations carry a bill id (isolation checked on those)"
 
 
 async def resolve_page_context(http_base: str, ddp_url: str) -> dict:
@@ -129,6 +139,7 @@ async def retrieval_checks(case: dict, page_context: dict, expect_types: list[st
 
     settings = get_settings()
     key = settings.bill_filter_key
+    expect_note = f"document types checked: {', '.join(expect_types) or 'none'}"
     wanted = page_context.get(key)
     if not wanted:
         return [f"retrieval check needs page_context[{key!r}] for the {settings.pinecone_index_name} index"], []
@@ -136,7 +147,10 @@ async def retrieval_checks(case: dict, page_context: dict, expect_types: list[st
     service = RetrievalService(settings)
     question = (case.get("questions") or [DEFAULT_QUESTION])[0]["message"]
     result = await service.retrieve(question, PageContext(**{k: v for k, v in page_context.items() if k in PageContext.model_fields}))
-    problems, notes = [], [f"index {settings.pinecone_index_name}, {len(result.chunks)} chunks"]
+    problems, notes = [], [
+        f"this machine's index {settings.pinecone_index_name!r} namespace {settings.pinecone_namespace!r} "
+        f"(filter key {key}), {len(result.chunks)} chunks; {expect_note}"
+    ]
     if not result.chunks:
         return ["retrieval returned no chunks"], notes
 
@@ -170,12 +184,19 @@ async def run_case(case: dict, args: argparse.Namespace) -> Result:
             return Result(result.name, ["case still has the placeholder ocd_bill_id; use a bill that is embedded"])
         session_id = uuid.uuid4().hex[:12]
         for question in case.get("questions") or [DEFAULT_QUESTION]:
-            turn = await ask(args.url, session_id, question["message"], page_context, args.timeout)
+            turn = await asyncio.wait_for(
+                ask(args.url, session_id, question["message"], page_context, args.timeout), args.turn_timeout
+            )
             for problem in check_turn(turn, question, bill_id, args.min_confidence, args.index == "canonical"):
                 result.problems.append(f"{question['message']!r}: {problem}")
-            result.notes.append(f"{question['message']!r}: {len(turn.answer)} chars, {len(turn.citations)} citations, confidence {turn.confidence}")
+            result.notes.append(
+                f"{question['message']!r}: {len(turn.answer)} chars, confidence {turn.confidence}, "
+                + citation_coverage(turn, bill_id)
+            )
         if args.retrieval:
-            problems, notes = await retrieval_checks(case, page_context, case.get("expect_types") or args.expect_types)
+            problems, notes = await asyncio.wait_for(
+                retrieval_checks(case, page_context, case.get("expect_types") or args.expect_types), args.timeout
+            )
             result.problems += problems
             result.notes += notes
     except Exception as e:  # noqa: BLE001 -- a connection or timeout problem is a failed case, not a crash
@@ -191,7 +212,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="which index the instance reads; canonical enables the citation isolation check")
     parser.add_argument("--resolve-base", help="HTTP base of the instance, to resolve cases that give only a ddp_url")
     parser.add_argument("--min-confidence", type=float, default=0.5)
-    parser.add_argument("--timeout", type=float, default=90.0, help="seconds to wait for each frame")
+    parser.add_argument("--timeout", type=float, default=90.0, help="seconds to wait for each frame, and for the retrieval check")
+    parser.add_argument("--turn-timeout", type=float, default=240.0, help="seconds allowed for a whole question")
     parser.add_argument("--retrieval", action="store_true", help="also check the retrieved chunks (needs the .env keys)")
     parser.add_argument("--expect-types", type=lambda s: [t for t in s.split(",") if t], default=["bill-text"],
                         help="comma-separated document types retrieval must return (cases may override)")
@@ -201,6 +223,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 async def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cases = json.loads(args.cases.read_text())
+    print(f"target {args.url} ({args.index} index expected), cases {args.cases}, {len(cases)} case(s)")
+    if args.retrieval:
+        print("--retrieval reads the index from THIS machine's .env: it proves the target only if its "
+              "PINECONE_INDEX_NAME and PINECONE_NAMESPACE are the same")
+    print()
     results = [await run_case(case, args) for case in cases]
     for r in results:
         print(f"{'PASS' if r.ok else 'FAIL'}  {r.name}")
