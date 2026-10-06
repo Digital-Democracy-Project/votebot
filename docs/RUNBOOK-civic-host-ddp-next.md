@@ -172,7 +172,8 @@ The repo's own `infrastructure/docker/Dockerfile`, target `production` (Python 3
 check on `/votebot/v1/health/live`; about 400 MB and 75 MiB of memory at idle). Its dependencies come from
 `pyproject.toml`, and a `.dockerignore` keeps `.env`, `.git` and the rest out of the build context. Do **not** use the
 repo's `docker-compose.yml`: it is development only. Build in a quiet
-moment after 3.1; if available memory falls below about 300 MB, stop the build and report.
+moment after 3.1. Before building, check `free -m` (at least about 800 MB available) and `df -h /` plus `docker system df`
+(at least 5 GB free); if either is short, or available memory falls below about 500 MB during the build, stop and report.
 
 ### 3.3 `/opt/votebot/.env` (git-ignored; owner root, mode 600; a fresh file, nothing copied from the old server)
 
@@ -198,7 +199,7 @@ SLACK_APP_TOKEN=
 ```
 
 No `WEBFLOW_*` variables at all. The empty Slack lines are deliberate (one Slack connection per app token; human
-handoff stays with the old copy). **How secrets reach this file follows however ddp-sync's are provisioned on this
+handoff stays with the old copy). **Create it with `umask 077`, edit it as root (`sudo -e`), then check `stat -c '%U %a' /opt/votebot/.env` shows `root 600`. How secrets reach this file follows however ddp-sync's are provisioned on this
 host; never write a key value into a note, a ticket or shell history.** The broker address warning: the broker's own
 health check fails with `DisallowedHost` because Django rejects requests addressed to an internal container name, so
 `DDP_BROKER_API_ROOT` cannot simply be `http://web:8000`; use the address ddp-sync uses, or have the broker's
@@ -223,7 +224,10 @@ if the log directory is wrong, but it keeps answering: look for that line.
 
 **Rollback tag.** `build` overwrites the image `votebot-ddp-next:local`, so before every rebuild tag the running one with its
 commit: `docker tag votebot-ddp-next:local votebot-ddp-next:<sha of the running commit>`. Rolling back is then: retag that
-image as `:local` and `up -d`, or `git checkout <previous sha>`, rebuild and `up -d`. Record the known-good SHA in the ticket.
+image as `:local` and run `up -d --no-build votebot` (so Compose uses the retagged image instead of rebuilding), or `git checkout <previous sha>`,
+rebuild and `up -d`. Before the first rebuild, confirm the previous tag exists: `docker image ls votebot-ddp-next`. Record the known-good SHA in the ticket.
+The env file is read by the compose file itself (`env_file: ../../.env`, resolved relative to the compose file, so `/opt/votebot/.env` when the
+repo is at `/opt/votebot`); no `--env-file` flag is needed, and no command needs `docker compose config`, which would print the secrets.
 
 VoteBot has a Redis of its own (never the broker's, never the host's 6379): only a button cache and a handoff map
 live in it, so no persistence. **One worker, on purpose**: a session's chat history is kept in the memory of the
@@ -275,8 +279,10 @@ the PR is merged**, in a quiet window:
 
 1. Test the merged template in a throwaway container with the production nginx service's image, mounts and environment:
    `docker run --rm <same mounts and -e flags> nginx:stable-alpine nginx -t` must report "test is successful".
-2. Recreate only the nginx container (a few seconds of broker downtime), then repeat the baseline health checks and check
-   the broker's own public routes.
+2. Recreate only the nginx container, in the broker's own project: `docker compose up -d --no-deps --force-recreate nginx` (never the whole
+   project; a few seconds of broker downtime), then repeat the baseline health checks and check the broker's own public routes. Before the
+   recreate, confirm the new template renders in the real container's network: `docker exec <nginx container> getent hosts votebot-ddp-next`
+   resolves once VoteBot is running. If any check fails, restore the previous template and recreate again.
 3. Public checks: `curl -s https://mapapp.digitaldemocracyproject.org/votebot/v1/features` and the smoke test against
    `wss://mapapp.digitaldemocracyproject.org/ws/chat`.
 
