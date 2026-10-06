@@ -143,7 +143,7 @@ class TestShippedCases:
             assert len(votes) == 1 and "vote" in votes[0]["message"]
             # citations are required of the case as a whole, never of one answer: whether the model writes a
             # citation in a single answer is its choice (the first gate 3 run failed on exactly that)
-            assert case["min_grounded_answers"] == 1
+            assert case["min_cited_answers"] == 1
             assert all("min_citations" not in q and "expect_regex" not in q for q in case["questions"])
             assert all("what changed" not in q["message"].lower() for q in case["questions"])
             assert "bill-votes" not in case["expect_types"] and "bill-version-diff" not in case["expect_types"]
@@ -173,7 +173,7 @@ class TestCitationsAndTimeouts:
         assert _run(tmp_path, server, [case]) == 1
         assert "0 citations, expected at least 1" in capsys.readouterr().out
 
-    def test_min_grounded_answers_passes_when_one_of_several_answers_cites_the_bill(self, server, tmp_path, capsys):
+    def test_min_cited_answers_passes_when_one_of_several_answers_cites_the_bill(self, server, tmp_path, capsys):
         FakeAgent.responder = None
         calls = {"n": 0}
         original = smoke.ask
@@ -188,31 +188,56 @@ class TestCitationsAndTimeouts:
         smoke.ask, restore = ask_once_cited, original
         try:
             case = _case(questions=[{"message": "What does this bill do?"}, {"message": "And the sponsors?"}])
-            case["min_grounded_answers"] = 1
+            case["min_cited_answers"] = 1
             assert _run(tmp_path, server, [case]) == 0
         finally:
             smoke.ask = restore
 
-    def test_min_grounded_answers_fails_when_no_answer_cites_the_bill(self, server, tmp_path, capsys):
+    def test_min_cited_answers_fails_when_no_answer_cites_the_bill(self, server, tmp_path, capsys):
         FakeAgent.citations = []
         case = _case(questions=[{"message": "What does this bill do?"}, {"message": "And the sponsors?"}])
-        case["min_grounded_answers"] = 1
+        case["min_cited_answers"] = 1
         assert _run(tmp_path, server, [case]) == 1
-        assert "0 answers show they came from this bill, expected at least 1" in capsys.readouterr().out
+        assert "0 answers cited this bill in each of 3 attempts, expected at least 1" in capsys.readouterr().out
 
-    def test_an_answer_that_names_the_bill_is_grounded_without_a_citation(self, server, tmp_path):
+    def test_a_case_that_fails_only_for_lack_of_a_citation_is_run_again_and_can_pass(self, server, tmp_path, capsys):
         FakeAgent.citations = []
-        FakeAgent.responder = lambda m: (["Here is what H.B. 1 does."], False)
-        case = _case(questions=[{"message": "What does this bill do?"}])
-        case["min_grounded_answers"] = 1
-        assert _run(tmp_path, server, [case]) == 0
+        original = smoke.ask
+        calls = {"n": 0}
 
-    def test_an_answer_naming_another_bill_is_not_grounded(self, server, tmp_path):
+        async def cited_on_second_attempt(*a, **k):
+            turn = await original(*a, **k)
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                turn.citations = [{"document_id": f"{BILL}-v1", "source": "x"}]
+            return turn
+
+        smoke.ask = cited_on_second_attempt
+        try:
+            case = _case()
+            case["min_cited_answers"] = 1
+            assert _run(tmp_path, server, [case]) == 0
+        finally:
+            smoke.ask = original
+        assert "attempt 1: no answer cited this bill" in capsys.readouterr().out
+
+    def test_naming_the_bill_is_not_evidence_and_attempts_are_bounded(self, server, tmp_path, capsys):
         FakeAgent.citations = []
-        FakeAgent.responder = lambda m: (["HB 10 and HB 11 are unrelated."], False)
-        case = _case(questions=[{"message": "What does this bill do?"}])
-        case["min_grounded_answers"] = 1
-        assert _run(tmp_path, server, [case]) == 1  # "HB 10" must not satisfy "HB 1"
+        FakeAgent.responder = lambda m: (["Here is what HB 1 does: the bill does X."], False)  # the page context supplies the number
+        case = _case()
+        case["min_cited_answers"] = 1
+        assert _run(tmp_path, server, [case], "--citation-attempts", "2") == 1
+        out = capsys.readouterr().out
+        assert "0 answers cited this bill in each of 2 attempts" in out
+        assert len(FakeAgent.calls) == 2  # one question, two attempts
+
+    def test_another_problem_ends_the_case_without_a_retry(self, server, tmp_path):
+        FakeAgent.citations = []
+        FakeAgent.responder = lambda m: (["The bill does X."], False)
+        case = _case(questions=[{"message": "What does this bill do?", "expect_any": ["will never appear"]}])
+        case["min_cited_answers"] = 1
+        assert _run(tmp_path, server, [case]) == 1
+        assert len(FakeAgent.calls) == 1
 
     def test_a_cited_answer_whose_citations_carry_no_bill_id_is_not_isolation_evidence(self, server, tmp_path, capsys):
         FakeAgent.citations = [DEFAULT_CITATIONS[0].model_copy(update={"document_id": "https://flsenate.gov/x"})]
