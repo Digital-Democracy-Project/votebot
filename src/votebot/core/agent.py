@@ -17,6 +17,7 @@ from votebot.api.schemas.chat import (
 from votebot.config import Settings, get_settings
 from votebot.core.prompts import build_system_prompt, format_retrieved_chunks
 from votebot.core.retrieval import RetrievalService
+from votebot.services.bill_versions import current_version
 from votebot.services.bill_votes import BillVotesService
 from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
 from votebot.services.openstates_client import openstates_base_url, openstates_headers
@@ -106,6 +107,31 @@ class VoteBotAgent:
         from votebot.services.button_cache import ALL_BUTTON_TYPES
         return button if button in ALL_BUTTON_TYPES else None
 
+    async def _button_cache_scope(self, page_context: PageContext) -> tuple[str, str | None] | None:
+        """(cache id, current version's document_id) for this page's bill, or None = do not cache.
+
+        Legacy index: the bill's slug, version None (DDP-Sync's invalidation event clears it).
+        Canonical-id index (VOTEBOT-15): the OpenStates bill id, and the id of the bill's CURRENT
+        version, which is stored with the entry and compared on every hit. A new version makes the
+        stored one stale by itself, so nothing has to publish an invalidation for that index, and
+        the existing `ButtonCache` key shape and `DELETE /cache/button/{id}` keep working. When
+        api-v3 cannot say which version is current, nothing is cached or served from cache.
+        "Current" comes from `BillVersionService`'s 120 s in-process cache, the same lookup
+        retrieval uses, so a cached answer is never staler than an uncached one would be.
+        """
+        if self.settings.bill_filter_key != "ocd_bill_id":
+            slug = getattr(page_context, "slug", None)
+            return (slug, None) if slug else None
+        ocd_bill_id = getattr(page_context, "ocd_bill_id", None)
+        if not ocd_bill_id:
+            return None
+        try:
+            current = current_version(await self.retrieval.bill_versions.get_versions(ocd_bill_id))
+        except Exception as e:  # noqa: BLE001 -- a version lookup problem must cost the cache, not the answer
+            logger.warning("ButtonCache: could not determine the current version", error=str(e))
+            return None
+        return (ocd_bill_id, current.document_id) if current else None
+
     async def _maybe_serve_from_button_cache(
         self,
         *,
@@ -136,9 +162,6 @@ class VoteBotAgent:
         """
         if not button:
             return None
-        slug = getattr(page_context, "slug", None)
-        if not slug:
-            return None
         from votebot.services.button_cache import (
             CACHEABLE_TYPES,
             LEGACY_GROUNDING_STATUS,
@@ -146,8 +169,15 @@ class VoteBotAgent:
         )
         if button not in CACHEABLE_TYPES:
             return None
+        scope = await self._button_cache_scope(page_context)
+        if not scope:
+            return None
+        slug, version = scope
         cached = await get_button_cache().get(slug, button)
         if not cached:
+            return None
+        if version and cached.get("document_id") != version:
+            logger.info("ButtonCache: stale version, regenerating", slug=slug, button_type=button)
             return None
         # Reconstruct Citation objects from the stored dicts so the streaming
         # caller's citation pipeline doesn't have to know about the cache shape.
@@ -238,16 +268,18 @@ class VoteBotAgent:
         """
         if not button:
             return
-        slug = getattr(page_context, "slug", None)
-        if not slug:
-            return
         from votebot.services.button_cache import CACHEABLE_TYPES, get_button_cache
         if button not in CACHEABLE_TYPES:
             return
+        scope = await self._button_cache_scope(page_context)
+        if not scope:
+            return
+        slug, version = scope
         await get_button_cache().set(
             slug,
             button,
             {
+                **({"document_id": version} if version else {}),
                 "response": response_text,
                 "citations": [
                     {
@@ -1530,6 +1562,7 @@ class VoteBotAgent:
     async def _resolve_bill_from_title(
         self,
         message: str,
+        page_context: PageContext | None = None,
     ) -> tuple[str | None, str | None]:
         """
         Resolve a bill identifier from a title/name by searching Pinecone.
@@ -1538,8 +1571,13 @@ class VoteBotAgent:
         beautiful bill act") instead of its number ("HR 1"), search Pinecone
         for matching bill documents and extract the identifier from metadata.
 
+        On the canonical-id index there are no `bill` summary documents, so the bill's text is
+        searched instead and the identifier comes from its `gov_id`; a general page that names a
+        jurisdiction (and session) limits the search to it.
+
         Args:
             message: The user's message containing a bill title
+            page_context: Optional page context, used for the jurisdiction scope
 
         Returns:
             Tuple of (bill_identifier, jurisdiction) — either may be None
@@ -1553,17 +1591,27 @@ class VoteBotAgent:
         if not has_bill_term:
             return None, None
 
+        canonical = self.settings.bill_filter_key == "ocd_bill_id"
+        search_filter = {"document_type": "bill-text" if canonical else "bill"}
+        if canonical and page_context:
+            search_filter.update(self.retrieval._legislative_scope(page_context))
+
         try:
             results = await self.bill_votes.vector_store.query(
                 query=message,
                 top_k=1,
-                filter={"document_type": "bill"},
+                filter=search_filter,
             )
 
             if results and results[0].score > 0.7:
                 metadata = results[0].metadata
-                bill_prefix = metadata.get("bill_prefix", "")
-                bill_number = metadata.get("bill_number", "")
+                if canonical:
+                    # "HB 363" -> prefix "HB", number "363": the same pieces the legacy path reads
+                    parts = (metadata.get("gov_id") or "").split()
+                    bill_prefix, bill_number = (parts[0], "".join(parts[1:])) if len(parts) > 1 else ("", "")
+                else:
+                    bill_prefix = metadata.get("bill_prefix", "")
+                    bill_number = metadata.get("bill_number", "")
                 jurisdiction = metadata.get("jurisdiction", "")
 
                 if bill_prefix and bill_number:
@@ -1620,7 +1668,7 @@ class VoteBotAgent:
 
         # Method 2: Resolve bill from title via Pinecone search
         if not bill_identifier:
-            bill_identifier, jurisdiction = await self._resolve_bill_from_title(message)
+            bill_identifier, jurisdiction = await self._resolve_bill_from_title(message, page_context)
 
         # Method 3: Search USER messages in conversation history for bill identifiers.
         # Bot messages are excluded to avoid resolving to a tangentially-mentioned bill
@@ -2051,7 +2099,7 @@ class VoteBotAgent:
         # If still no bill identifier, try resolving from title via Pinecone
         # This handles cases like "he didn't vote yes on the big beautiful bill"
         if not bill_identifier:
-            resolved_id, resolved_jurisdiction = await self._resolve_bill_from_title(message)
+            resolved_id, resolved_jurisdiction = await self._resolve_bill_from_title(message, page_context)
             if resolved_id:
                 bill_identifier = resolved_id
                 if resolved_jurisdiction and not jurisdiction:
@@ -2060,7 +2108,7 @@ class VoteBotAgent:
             if not bill_identifier and conversation_history:
                 for msg in reversed(conversation_history[-6:]):
                     content = msg.get("content", "")
-                    resolved_id, resolved_jurisdiction = await self._resolve_bill_from_title(content)
+                    resolved_id, resolved_jurisdiction = await self._resolve_bill_from_title(content, page_context)
                     if resolved_id:
                         bill_identifier = resolved_id
                         if resolved_jurisdiction and not jurisdiction:
