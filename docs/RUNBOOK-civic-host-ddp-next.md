@@ -221,7 +221,7 @@ for this load, and it keeps conversations intact.
 `EnvironmentFile=` without a leading `-` makes the unit refuse to start if the file is missing, so a missing
 `.env` fails closed. The working directory is VoteBot's own, so the only `.env` it can ever read is its own.
 `MemoryMax` bounds what a problem in VoteBot can take from the broker's server; check it is not too tight when
-you test (3.6). Restarting the service ends open chats and their history (it is kept in the worker's memory):
+you test (section 6). Restarting the service ends open chats and their history (it is kept in the worker's memory):
 that is expected, and the widget reconnects.
 
 ```bash
@@ -325,7 +325,7 @@ There is no limit on opening chat connections, by decision. Every chat message c
 so watch for abuse and have a plan.
 
 **Watch (a few minutes a week at first).** Messages per visitor address, from VoteBot's own logs (needs the
-real-IP step in 3.5; check the field name with `head -1` first):
+real-IP step in 3.6; check the field name with `head -1` first):
 
 ```bash
 cd /home/votebot/votebot/logs/queries
