@@ -88,7 +88,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `OPENAI_API_KEY` | OpenAI API key | Yes |
 | `PINECONE_API_KEY` | Pinecone API key | Yes |
 | `PINECONE_ENVIRONMENT` | Pinecone environment (default: us-east-1) | Yes |
-| `PINECONE_INDEX_NAME` | Pinecone index name (default: `votebot-large`). **Also decides how bills are filtered in retrieval:** the legacy `votebot-large` index is keyed by `webflow_id`; any other index (e.g. `ddp-knowledge-base`) is keyed by `ocd_bill_id`. Switching the index, or rolling back, is this one setting. | Yes |
+| `PINECONE_INDEX_NAME` | Pinecone index name (default: `votebot-large`). **Also decides how bills are filtered in retrieval:** `votebot-large` is keyed by `webflow_id`; exactly `ddp-knowledge-base` (the name in `CANONICAL_PINECONE_INDEX_NAME`, overridable with `CANONICAL_PINECONE_INDEX_NAME`) is keyed by `ocd_bill_id`. The value is stripped and lowercased, and empty means unset. Any other name keeps `webflow_id` retrieval and logs a startup warning. The startup log shows the index and the chosen key. Switching the index, or rolling back, is this one setting. | Yes |
 | `PINECONE_NAMESPACE` | Pinecone namespace (default: default) | No |
 | `API_KEY` | API key for authentication | Yes |
 | `WEBFLOW_VOTEBOT_API_KEY` | Webflow CMS API key (read-only, used at query time by `/content/resolve` and runtime CMS lookups) | Yes |

@@ -45,7 +45,7 @@ The single retrieval orchestrator. **Do not add raw Pinecone calls outside this 
   - `_ocd_mode` (property) — True when `settings.bill_filter_key == "ocd_bill_id"`. **The one switch**: it follows the index name, so there is no second setting to forget on rollback
   - `_identity_filter(filters) -> dict` — the bill-pinning part of a built filter, for follow-up queries on other document types (votes). Use it instead of reading `filters["webflow_id"]` directly
   - `_legislative_scope(page_context) -> dict` — `jurisdiction` (upper-case code) + `session_code` for a general page that names them; canonical-id index only. Governs `bill-text`/`bill-votes` **only**: the scoped query returns that jurisdiction's, and the unscoped query excludes those two types (`$nin`), so other jurisdictions' bills stay out while legislators/organizations (no `session_code`) stay in
-  - `_lookup_ocd_bill_context(bill_info, page_context) -> PageContext | None` — canonical-id counterpart of `_lookup_bill_slug`: a bill named on a general page, found by `gov_id` + jurisdiction (+ session). **Declines to guess** when the name matches more than one bill (every session has its own "HB 1"; session codes do not sort reliably as text, e.g. "2026D" after "2026")
+  - `_lookup_ocd_bill_context(bill_info, page_context) -> PageContext | None` — canonical-id counterpart of `_lookup_bill_slug`: a bill named on a general page, found by `gov_id` + jurisdiction (+ session; the page's jurisdiction wins over one guessed from the query, which matches state names/codes as whole words only), reading `BILL_LOOKUP_TOP_K` chunks so the other session is seen. **Declines to guess** when the name matches more than one bill (every session has its own "HB 1"; session codes do not sort reliably as text, e.g. "2026D" after "2026")
   - `_deduplicate(results) -> list[SearchResult]` — the key is `(metadata["document_id"], hash(content[:500]))`: bill versions share most of their text, and merging identical passages across versions would erase which version they came from
   - `retrieve_for_bill(query, bill_id, jurisdiction) -> RetrievalResult`
   - `retrieve_for_legislator(query, legislator_id, jurisdiction) -> RetrievalResult`
@@ -272,7 +272,7 @@ Same index and namespace as DDP-Sync (`votebot-large` today; `ddp-knowledge-base
 | `quick_action_buttons_enabled` | `false` | Summary/Pros&Cons/Status buttons + Redis cache |
 | `enhanced_citation_prompt` | `false` | Stricter citation instruction variant |
 | `query_log_enabled` | `true` | JSONL event logging (`QueryLogger.log_event`) |
-| `pinecone_index_name` | `"votebot-large"` | Which index is read **and**, via `bill_filter_key`, how a bill is pinned in filters (`votebot-large` → `webflow_id`, anything else → `ocd_bill_id`). Rollback is this one value |
+| `pinecone_index_name` | `"votebot-large"` | Which index is read **and**, via `bill_filter_key`, how a bill is pinned in filters. Normalized (strip + lowercase; empty = default). Exactly `canonical_pinecone_index_name` (`ddp-knowledge-base`) → `ocd_bill_id`; every other name → `webflow_id`, with a startup warning (`Settings.index_is_recognized`). Rollback is this one value |
 | `ddp_broker_api_root` | `""` | ddp-broker-py base URL for `/content/resolve` on ddp-next URLs; empty → 503 for those URLs only |
 
 ---

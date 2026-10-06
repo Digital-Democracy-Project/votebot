@@ -58,10 +58,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Button cache subscriber startup failed", exc_info=True)
 
+    if not settings.index_is_recognized:
+        logger.warning(
+            "PINECONE_INDEX_NAME is neither the legacy nor the canonical index; "
+            "using legacy webflow_id retrieval",
+            pinecone_index_name=settings.pinecone_index_name,
+            canonical_pinecone_index_name=settings.canonical_pinecone_index_name,
+        )
+
     logger.info(
         "VoteBot started (chat-only mode)",
         version=settings.app_version,
         environment=settings.environment,
+        pinecone_index_name=settings.pinecone_index_name,
+        bill_filter_key=settings.bill_filter_key,
         quick_action_buttons_enabled=settings.quick_action_buttons_enabled,
     )
 

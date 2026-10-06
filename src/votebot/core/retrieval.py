@@ -44,6 +44,14 @@ STATE_MAPPINGS = {
 }
 
 
+# Two-letter codes that are also ordinary words, so only the capitalised form names a jurisdiction.
+CODES_THAT_ARE_WORDS = frozenset({"us", "ma", "al"})
+
+# How many chunks the "which bill is this?" lookup reads. A bill has many chunks, so a small top_k
+# can be filled by one session's and never see the other's, defeating the ambiguity check.
+BILL_LOOKUP_TOP_K = 100
+
+
 @dataclass
 class ExtractedBillInfo:
     """Bill information extracted from query text."""
@@ -801,7 +809,11 @@ class RetrievalService:
         # Extract jurisdiction from query
         jurisdiction = None
         for name, code in STATE_MAPPINGS.items():
-            if name in query_lower:
+            # Whole words only: "al" is not in "actually", nor "ma" in "summarize". Codes that are
+            # also ordinary words ("tell us about HB 5") count only when written in capitals.
+            haystack = query if name in CODES_THAT_ARE_WORDS else query_lower
+            needle = name.upper() if name in CODES_THAT_ARE_WORDS else name
+            if re.search(rf"\b{re.escape(needle)}\b", haystack):
                 jurisdiction = code
                 break
 
@@ -1168,7 +1180,8 @@ class RetrievalService:
         session when the page names one. Without a jurisdiction, or when the identifier matches more
         than one bill, no guess is made. Returns a bill `PageContext`, or None.
         """
-        jurisdiction = bill_info.jurisdiction or page_context.jurisdiction
+        # The page's jurisdiction wins over one guessed from the query text
+        jurisdiction = page_context.jurisdiction or bill_info.jurisdiction
         if not jurisdiction:
             return None
         lookup = {
@@ -1180,7 +1193,9 @@ class RetrievalService:
             lookup["session_code"] = page_context.session
 
         results = await self.vector_store.query(
-            query=f"{bill_info.bill_prefix} {bill_info.bill_number}", top_k=10, filter=lookup
+            query=f"{bill_info.bill_prefix} {bill_info.bill_number}",
+            top_k=BILL_LOOKUP_TOP_K,
+            filter=lookup,
         )
         matches = [r for r in results if r.metadata.get("ocd_bill_id")]
         bill_ids = {r.metadata["ocd_bill_id"] for r in matches}
