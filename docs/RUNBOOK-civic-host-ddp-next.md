@@ -79,7 +79,7 @@ move or add memory; do not guess.
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<broker port>/api/organizations/   # the broker, locally: 200
-curl -s "http://127.0.0.1:<broker port>/api/bills/resolve/?jurisdiction=FL&session=2026&gov_id=HB%201" # {"bill_openstates_id": ...} or 404
+curl -s "http://127.0.0.1:<broker port>/api/bills/resolve/?jurisdiction=FL&session=2026&gov_id=HB%201" # 200 {"bill_openstates_id": "<uuid>"} or 404 {"detail": "Bill not found"} (ddp-broker-py `resolve_bill`: GET, public, all three parameters required)
 ```
 
 Record the broker's local URL (this becomes `DDP_BROKER_API_ROOT`; calling it over the local network instead of
@@ -352,6 +352,8 @@ actually blocks requests (and which other products would be affected if the key 
 3. A per-visitor cap on messages (application code) only if an abuser opens one connection and floods it.
 
 ## 6. Verify
+
+**What this section needs from code.** `scripts/smoke_ws.py` (VOTEBOT-16, in `main`). Links to our own `/explore/...` pages need `DDP_SITE_BASE_URL` and organization positions from the broker need `DDP_BROKER_API_ROOT`; both are VOTEBOT-15 part 2 (PR #16, merged). Legislator answers and "what changed" read api-v3 live (VOTEBOT-15 part 3, PR #17) and need `USE_DDP_OPENSTATES_REPLICA=true`. Deploy a version of `main` that contains all of them before running this section, or the checks below will fail for the right reason. The startup line to check (`journalctl -u votebot | grep 'VoteBot started'`) is a structured log that includes `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id` (`src/votebot/main.py`).
 
 ```bash
 python scripts/smoke_ws.py --url wss://<votebot-host>/ws/chat --cases <real cases> --retrieval
