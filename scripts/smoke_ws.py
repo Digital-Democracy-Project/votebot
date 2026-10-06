@@ -18,7 +18,11 @@ Checks, per case and question:
   * `expect_any` (at least one, case-insensitive) / `expect_none` strings in the answer, and
     `expect_regex` (the answer must match at least one pattern). Use text the question does not
     itself contain, or the check passes on any reply.
-  * `min_citations` (default 0: the model only cites when it chooses to)
+  * `min_citations` (default 0: the model only cites when it chooses to, so a per-answer minimum
+    is flaky; prefer the case-level `min_cited_answers`)
+  * `min_cited_answers` (case level): at least this many of the case's answers must cite THIS bill
+    (canonical index). One answer citing it is evidence the answer path reads the bill; the model's
+    choice to write a citation in any single answer is not something a smoke test can require.
   * `expect_votes_tool`: true asserts the live OpenStates tool answered (`bill_votes_tool_used` in
     `stream_end`); false asserts it did not. Votes are not in the new index, so on --index canonical
     a vote question must be answered this way. The flag is not asserted on --index legacy, where
@@ -249,15 +253,23 @@ async def run_case(case: dict, args: argparse.Namespace) -> Result:
         if bill_id == PLACEHOLDER_BILL:
             return Result(result.name, ["case still has the placeholder ocd_bill_id; use a bill that is embedded"])
         session_id = uuid.uuid4().hex[:12]
+        cited_answers = 0
         for question in case.get("questions") or [DEFAULT_QUESTION]:
             turn = await asyncio.wait_for(
                 ask(args.url, session_id, question["message"], page_context, args.timeout), args.turn_timeout
             )
             for problem in check_turn(turn, question, bill_id, args.min_confidence, args.index == "canonical"):
                 result.problems.append(f"{question['message']!r}: {problem}")
+            if bill_id and any(bill_id.lower() in str(c.get("document_id", "")).lower() for c in turn.citations):
+                cited_answers += 1
             result.notes.append(
                 f"{question['message']!r}: {len(turn.answer)} chars, confidence {turn.confidence}, "
                 + citation_coverage(turn, bill_id)
+            )
+        wanted_cited = case.get("min_cited_answers", 0)
+        if args.index == "canonical" and cited_answers < wanted_cited:
+            result.problems.append(
+                f"{cited_answers} answers cited this bill, expected at least {wanted_cited}: nothing shows an answer came from it"
             )
         if args.retrieval:
             problems, notes = await asyncio.wait_for(
