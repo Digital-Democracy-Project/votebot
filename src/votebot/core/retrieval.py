@@ -10,6 +10,7 @@ from votebot.config import Settings, get_settings
 from votebot.services.bill_versions import BillVersionService, current_version
 from votebot.services.vector_store import SearchResult, VectorStoreService
 from votebot.services.webflow_lookup import WebflowLookupService
+from votebot.utils.ddp_urls import ddp_bill_url_from_metadata
 from votebot.utils.intent import detect_version_request
 
 logger = structlog.get_logger()
@@ -314,7 +315,7 @@ class RetrievalService:
         )
 
         return RetrievalResult(
-            chunks=final_results,
+            chunks=self._link_to_ddp_pages(final_results),
             query_used=query,
             filters_applied=filters,
             total_retrieved=len(final_results),
@@ -1153,6 +1154,34 @@ class RetrievalService:
         )
 
         return filters
+
+    def _link_to_ddp_pages(self, chunks: list[SearchResult]) -> list[SearchResult]:
+        """Point bill chunks at their page on our site (canonical-id index, `DDP_SITE_BASE_URL` set).
+
+        The chunk's `url` becomes the page URL, so the source header the model is told to cite, the
+        citation match and the citation's link all agree; the legislature's own URL is kept as
+        `source_url` (the page links to it). Anything else, or an unset base URL, is untouched.
+        """
+        base = self.settings.ddp_site_base_url
+        if not (base and self._ocd_mode):
+            return chunks
+        linked = []
+        for chunk in chunks:
+            page_url = ddp_bill_url_from_metadata(base, chunk.metadata)
+            if page_url:
+                original = chunk.metadata.get("url")
+                chunk = SearchResult(
+                    id=chunk.id,
+                    content=chunk.content,
+                    score=chunk.score,
+                    metadata={
+                        **chunk.metadata,
+                        "url": page_url,
+                        **({"source_url": original} if original and not chunk.metadata.get("source_url") else {}),
+                    },
+                )
+            linked.append(chunk)
+        return linked
 
     def _legislative_scope(self, page_context: PageContext) -> dict:
         """Jurisdiction and session filter for a general page that names them (canonical-id index only).

@@ -16,6 +16,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Organization-Aware Retrieval**: Scoped retrieval on org pages via `webflow_id`/`slug` filters (mirrors bill/legislator pattern), plus query-based detection for org queries on non-org pages. Fetches all related chunks for complete bill position data
 - **Legislator Slug Resolution**: Automatically resolves legislator slugs from Webflow pages to OpenStates person IDs via Webflow CMS lookup, enabling correct Pinecone filtering even when only the URL slug is available
 - **Webflow CMS Runtime Lookup**: Bidirectional Webflow CMS pre-fetch — fetches authoritative org positions for bill→org queries (99.1%) and bill positions for org→bill queries (100%), bypassing Pinecone similarity thresholds
+- **Positions from the broker (canonical-id index)**: organization positions on a bill, a bill-page organization's bills, and organization details on a dispute come from ddp-broker-py's public reads (`/api/bill-organization-positions/current/`, `/api/organizations/{id}/positions/`, `/api/organizations/{id}/`), not Webflow. Needs `DDP_BROKER_API_ROOT`; a broker problem costs the enrichment, never the answer
 - **Webflow CMS Verification on Disputes**: When users challenge information, fetches authoritative details from Webflow CMS for the current page entity (bill facts, legislator party/chamber/district, org type/website) and injects as high-priority context
 - **Bill Info Tool**: Real-time OpenStates lookups for full bill details (status, sponsors, votes) on bills not in the RAG system
   - Automatic jurisdiction detection from message text ("Virginia HB 2724" → VA)
@@ -96,6 +97,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `WEBFLOW_BILLS_COLLECTION_ID` | Webflow bills collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
 | `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
 | `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
+| `DDP_SITE_BASE_URL` | Base URL of our own site (ddp-next), e.g. `https://digitaldemocracyproject.org`. On the canonical-id index, bill sources and citations link to `{base}/explore/{JURISDICTION}/{SESSION}/{IDENTIFIER}` instead of the legislature's URL (that page links to the legislature). No default host: unset leaves links unchanged | No |
 | `DDP_BROKER_API_ROOT` | Base URL of ddp-broker-py. `/content/resolve` uses its public bill endpoints to turn a ddp-next bill URL into an OpenStates bill id. No code default; unset means ddp-next URLs return 503 (Webflow URLs are unaffected) | For ddp-next bill URLs |
 | `CONGRESS_API_KEY` | Congress.gov API key | For federal bills |
 | `OPENSTATES_API_KEY` | OpenStates API key | For state bills |
