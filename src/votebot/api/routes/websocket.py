@@ -398,8 +398,17 @@ def _page_context_from_payload(page_context_data: dict) -> PageContext:
         url=page_context_data.get("url"),
         slug=page_context_data.get("slug"),
         webflow_id=page_context_data.get("webflow_id"),
-        ocd_bill_id=page_context_data.get("ocd_bill_id"),
+        ocd_bill_id=_valid_ocd_bill_id(page_context_data.get("ocd_bill_id")),
     )
+
+
+def _valid_ocd_bill_id(value: object) -> str | None:
+    """The bare OpenStates UUID, or None. The widget payload is client-supplied; /content/resolve
+    validates the same shape before returning one."""
+    try:
+        return str(uuid.UUID(str(value))) if value else None
+    except ValueError:
+        return None
 
 
 async def _emit_conversation_ended(session_id: str, session: dict) -> None:

@@ -3,13 +3,15 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# The original index, keyed by Webflow item id. Every other index is the canonical-id index
-# (PLAN-enterprise-search.md 5.6: `ddp-knowledge-base`), keyed by the OpenStates bill id.
+# The original index, keyed by Webflow item id.
 LEGACY_PINECONE_INDEX_NAME = "votebot-large"
+# The canonical-id index (PLAN-enterprise-search.md 5.6), keyed by the OpenStates bill id. Only this
+# exact name (after strip + lowercase) switches retrieval to that mode.
+CANONICAL_PINECONE_INDEX_NAME = "ddp-knowledge-base"
 
 
 class Settings(BaseSettings):
@@ -82,6 +84,7 @@ class Settings(BaseSettings):
     pinecone_environment: str = "us-east-1"
     # Also decides how bills are identified in retrieval filters: see `bill_filter_key`.
     pinecone_index_name: str = LEGACY_PINECONE_INDEX_NAME
+    canonical_pinecone_index_name: str = CANONICAL_PINECONE_INDEX_NAME
     pinecone_namespace: str = "default"
 
     # Redis (for caching and session storage)
@@ -147,16 +150,44 @@ class Settings(BaseSettings):
     slack_app_token: SecretStr = Field(default=SecretStr(""))
     slack_support_channel: str = "#votebot-support"
 
+    @field_validator("pinecone_index_name", "canonical_pinecone_index_name", mode="before")
+    @classmethod
+    def _normalize_index_name(cls, value: object, info) -> object:
+        """Strip and lowercase, so `Votebot-Large ` is the index it was meant to be.
+
+        An empty value means unset and falls back to the default for that field.
+        """
+        if not isinstance(value, str):
+            return value
+        value = value.strip().lower()
+        if value:
+            return value
+        return (
+            LEGACY_PINECONE_INDEX_NAME
+            if info.field_name == "pinecone_index_name"
+            else CANONICAL_PINECONE_INDEX_NAME
+        )
+
+    @property
+    def index_is_recognized(self) -> bool:
+        """False when the index name is neither the legacy nor the canonical one."""
+        return self.pinecone_index_name in (
+            LEGACY_PINECONE_INDEX_NAME,
+            self.canonical_pinecone_index_name,
+        )
+
     @property
     def bill_filter_key(self) -> Literal["webflow_id", "ocd_bill_id"]:
         """Metadata key that pins a bill in retrieval filters, chosen by the index.
 
         Derived from `pinecone_index_name` rather than being a second setting, so rolling back
         to the legacy index is one change and the filter key can never disagree with the index.
+        Only the configured canonical index selects `ocd_bill_id`; any other name (a dev index, a
+        typo) keeps the legacy `webflow_id` behaviour instead of silently switching mode.
         """
-        if self.pinecone_index_name == LEGACY_PINECONE_INDEX_NAME:
-            return "webflow_id"
-        return "ocd_bill_id"
+        if self.pinecone_index_name == self.canonical_pinecone_index_name:
+            return "ocd_bill_id"
+        return "webflow_id"
 
 
 @lru_cache
