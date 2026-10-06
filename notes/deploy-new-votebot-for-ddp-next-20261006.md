@@ -5,7 +5,7 @@
 **From:** Ramon's planning agent (no access to either server, Pinecone, the broker or api-v3; **nothing below has been run anywhere**).
 **Ask:** deploy the new VoteBot on the new-infrastructure server, verify it, and report back. **Do not switch the website to it and do not touch the old copy beyond the freeze in step 2.** Stop at every "STOP" and report instead of improvising.
 
-The full reference is `docs/RUNBOOK-civic-host-ddp-next.md` on `main` (`git show origin/main:docs/RUNBOOK-civic-host-ddp-next.md`). This note is the short, ordered version of it plus what changed since. Where they differ, tell us.
+The full reference is `docs/RUNBOOK-civic-host-ddp-next.md` on `main` (it is in the clone you make in step 3.1: `/home/votebot/votebot/docs/`; or read it on GitHub). This note is the short, ordered version of it plus what changed since. Where they differ, tell us.
 
 ## The layout (decided by Ramon, 2026-10-05)
 
@@ -29,7 +29,7 @@ The full reference is `docs/RUNBOOK-civic-host-ddp-next.md` on `main` (`git show
 
 ## Prerequisites: check before you start
 
-1. `git fetch origin && git log --oneline origin/main | head -20` must show the merges of **PR #17** (legislators and "what changed" live from api-v3) **and PR #19** (declares `aiofiles`, see below). If either is missing, **STOP and tell us**; deploy the SHA of `main` that contains both and record it.
+1. **There is no VoteBot checkout on the new server** (the broker EC2 has never had this repo), so this check is done right after the clone in step 3.1, before anything is installed: `git log --oneline origin/main | head -20` must show the merges of **PR #17** (legislators and "what changed" live from api-v3) **and PR #19** (declares `aiofiles`, see below). At the time of writing `main` is at `72279d8` and contains both. If either is missing, **STOP and tell us**; deploy the SHA of `main` that contains both and record it. Webflow code is still present in `main` but is never used by this copy (no Webflow keys, canonical index): nothing needs removing before deploying.
 2. The canonical index must **already hold embedded bills** (ddp-sync, SYNC-83/SYNC-91). Check read-only in step 3.4. If it is empty or missing: **STOP**. Pinecone *creates a missing index on first use*, so starting VoteBot against a wrong or misspelled index name would silently create an empty one.
 3. A free local port for VoteBot (this note uses `8002`) and the broker's and api-v3's **local** URLs (step 1).
 
@@ -67,6 +67,8 @@ curl -s "http://127.0.0.1:<broker port>/api/bills/resolve/?jurisdiction=FL&sessi
 ## Step 3: build the new copy (new server)
 
 ### 3.1 User and code
+
+**Repo access first.** The clone below uses SSH. Check the server can read the repo (`sudo -u votebot git ls-remote git@github.com:Digital-Democracy-Project/votebot.git` after creating the user and, if needed, a **read-only deploy key** for it). If it cannot, **STOP and ask Ramon**: do not paste a personal access token into the shell or a file. An alternative that needs no credentials on the server is a tarball made elsewhere (`git archive --format=tar.gz -o votebot-<sha>.tar.gz <sha>`), copied over and unpacked into `/home/votebot/votebot`; then skip the `git clone` and run the prerequisite check against the SHA you were given.
 
 ```bash
 sudo useradd --system --create-home --shell /usr/sbin/nologin votebot
