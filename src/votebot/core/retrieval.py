@@ -1031,10 +1031,10 @@ class RetrievalService:
         """
         # Phase 1: Search organization documents (scoped by page context if available)
         org_filter = {"document_type": "organization"}
-        if filters.get("webflow_id"):
-            org_filter["webflow_id"] = filters["webflow_id"]
-        elif filters.get("slug"):
-            org_filter["slug"] = filters["slug"]
+        for key in ("webflow_id", "broker_org_id", "slug"):
+            if filters.get(key):
+                org_filter[key] = filters[key]
+                break
 
         org_results = await self.vector_store.query(
             query=query,
@@ -1125,6 +1125,14 @@ class RetrievalService:
                 filters["legislator_id"] = page_context.id
             elif page_context.webflow_id:
                 filters["webflow_id"] = page_context.webflow_id
+            elif page_context.slug:
+                filters["slug"] = page_context.slug
+        elif page_context.type == "organization" and self._ocd_mode:
+            # Canonical-id index (SYNC-91): organization vectors carry the broker's organization id
+            # (a number) and the broker's slug, never a webflow_id. A Webflow-style context sends
+            # the slug as `id`, so only an all-digit id is taken for the broker id.
+            if page_context.id and page_context.id.isdigit():
+                filters["broker_org_id"] = page_context.id
             elif page_context.slug:
                 filters["slug"] = page_context.slug
         elif page_context.type == "organization":
