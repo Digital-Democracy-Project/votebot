@@ -205,6 +205,24 @@ health check fails with `DisallowedHost` because Django rejects requests address
 `DDP_BROKER_API_ROOT` cannot simply be `http://web:8000`; use the address ddp-sync uses, or have the broker's
 `ALLOWED_HOSTS` extended.
 
+#### 3.3.1 Rendering `.env` from Secrets Manager instead of typing it (VOTEBOT-14)
+
+Like ddp-sync, the host can resolve the secrets itself, so nobody types or pastes one:
+
+```bash
+cd /opt/votebot && infrastructure/render-env.sh --check    # fetch and validate; prints key NAMES only, writes nothing
+cd /opt/votebot && infrastructure/render-env.sh            # writes /opt/votebot/.env (mode 600, atomic), then `up -d` to apply
+```
+
+It merges the committed non-secret defaults (`infrastructure/docker/prod.env.defaults`) with the secrets from
+`votebot/credentials` (JSON keys `api_key`, `openai_api_key`, `pinecone_api_key`: the dedicated OpenAI project key and,
+if the plan allows, a read-only Pinecone key; never ddp-sync's) and the shared api-v3 key from `ddp-sync/credentials`
+(`rds_openstates_api_key`, sent as `X-API-Key`; `API_SOURCE_SECRET_ID=` empty skips it and reads `ddp_openstates_api_key`
+from the votebot secret instead). It fails before touching `.env` if any secret is missing or empty, and never prints a
+value. **Needs, outside git:** the secret `votebot/credentials` created in Secrets Manager, and the host's instance role
+allowed `secretsmanager:GetSecretValue` on it (`--check` fails with an access error until both are done). To rotate:
+change the secret, re-run the script, `docker compose ... up -d` (a restart ends open chats).
+
 ### 3.4 The compose project
 
 `infrastructure/docker/docker-compose.prod.yml` (project name `votebot-ddp-next`): the `votebot` container
