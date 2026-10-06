@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,6 +18,7 @@ from votebot.services.broker_lookup import (
     BillOrgPositions,
     BillPositionOfOrg,
     BrokerLookupService,
+    OrgBillPositions,
     OrgDetails,
     OrgPositionOnBill,
     format_bill_org_positions,
@@ -176,8 +178,9 @@ class TestBrokerOrganization:
     async def test_follows_pages_until_there_is_no_next(self, monkeypatch):
         pages = {"1": {"results": [self._row("HB 1")], "next": "x"}, "2": {"results": [self._row("HB 2", "oppose")], "next": None}}
         _mock_broker(monkeypatch, lambda request: _json(pages[request.url.params["page"]]))
-        rows = await _service_with_root().get_org_bill_positions("42")
-        assert [(r.gov_id, r.position) for r in rows] == [("HB 1", "support"), ("HB 2", "oppose")]
+        result = await _service_with_root().get_org_bill_positions("42")
+        assert [(r.gov_id, r.position) for r in result.positions] == [("HB 1", "support"), ("HB 2", "oppose")]
+        assert result.complete is True
 
     async def test_a_failure_on_the_first_page_is_none_and_on_a_later_page_keeps_what_we_have(self, monkeypatch):
         _mock_broker(monkeypatch, lambda request: _json({}, 500))
@@ -187,7 +190,8 @@ class TestBrokerOrganization:
             return _json({"results": [self._row("HB 1")], "next": "x"}) if request.url.params["page"] == "1" else _json({}, 500)
 
         _mock_broker(monkeypatch, handler)
-        assert [r.gov_id for r in await _service_with_root().get_org_bill_positions("42")] == ["HB 1"]
+        partial = await _service_with_root().get_org_bill_positions("42")
+        assert [r.gov_id for r in partial.positions] == ["HB 1"] and partial.complete is False
 
     async def test_pages_are_bounded(self, monkeypatch):
         calls = []
@@ -197,8 +201,8 @@ class TestBrokerOrganization:
             return _json({"results": [self._row("HB 1")], "next": "more"})
 
         _mock_broker(monkeypatch, handler)
-        await _service_with_root().get_org_bill_positions("42")
-        assert len(calls) == broker_lookup.MAX_POSITION_PAGES
+        result = await _service_with_root().get_org_bill_positions("42")
+        assert len(calls) == broker_lookup.MAX_POSITION_PAGES and result.complete is False
 
     async def test_details(self, monkeypatch):
         _mock_broker(monkeypatch, lambda request: _json({"id": 42, "name": "AARP", "org_type": "Nonprofit", "website": "https://aarp.org", "description": "d"}))
@@ -221,14 +225,16 @@ class TestFormatting:
 
     def test_org_positions_link_to_our_pages_only_with_a_base_url(self):
         rows = [BillPositionOfOrg("HB 219", "Fees", "FL", "2026", "support"), BillPositionOfOrg("SB 2", "Tax", "FL", "2026", "oppose")]
-        linked = format_org_bill_positions(OrgDetails("AARP"), rows, SITE)
+        linked = format_org_bill_positions(OrgDetails("AARP"), OrgBillPositions(rows), SITE)
         assert "- [HB 219 Fees](https://site.test/explore/FL/2026/HB%20219)" in linked and "### Bills Opposed" in linked
-        plain = format_org_bill_positions(OrgDetails("AARP"), rows, "")
+        plain = format_org_bill_positions(OrgDetails("AARP"), OrgBillPositions(rows), "")
         assert "- HB 219 Fees" in plain and "](" not in plain
+        assert "may be incomplete" not in plain
+        assert "may be incomplete" in format_org_bill_positions(OrgDetails("AARP"), OrgBillPositions(rows, complete=False), "")
 
     def test_org_positions_edge_cases(self):
         assert format_org_bill_positions(None, None) == ""
-        assert "No bill positions have been verified" in format_org_bill_positions(OrgDetails("AARP"), [])
+        assert "No bill positions have been verified" in format_org_bill_positions(OrgDetails("AARP"), OrgBillPositions([]))
 
     def test_details_text(self):
         text = format_org_details(OrgDetails("AARP", "Nonprofit", "https://aarp.org", "x" * 500))
@@ -243,7 +249,9 @@ def _agent(index: str = NEW_INDEX, base: str = SITE) -> VoteBotAgent:
     )
     a.broker_lookup = SimpleNamespace(
         get_bill_org_positions=AsyncMock(return_value=BillOrgPositions([OrgPositionOnBill("AARP", "support")])),
-        get_org_bill_positions=AsyncMock(return_value=[BillPositionOfOrg("HB 1", "T", "FL", "2026", "support")]),
+        get_org_bill_positions=AsyncMock(
+            return_value=OrgBillPositions([BillPositionOfOrg("HB 1", "T", "FL", "2026", "support")])
+        ),
         get_org_details=AsyncMock(return_value=OrgDetails("AARP", "Nonprofit")),
     )
     a.webflow_lookup = SimpleNamespace(
@@ -288,3 +296,18 @@ class TestAgentEnrichments:
         agent.webflow_lookup.get_bill_org_positions.assert_awaited_once()
         agent.webflow_lookup.get_org_bill_positions.assert_awaited_once()
         agent.broker_lookup.get_bill_org_positions.assert_not_called()
+
+
+class TestTimeBudget:
+    async def _slow(self, *a, **k):
+        await asyncio.sleep(5)
+
+    async def test_a_slow_broker_costs_the_enrichment_not_the_answer(self, monkeypatch):
+        monkeypatch.setattr("votebot.core.agent.BUDGET_SECONDS", 0.05)
+        agent = _agent()
+        agent.broker_lookup = SimpleNamespace(
+            get_bill_org_positions=self._slow, get_org_bill_positions=self._slow, get_org_details=self._slow
+        )
+        assert await agent._prefetch_bill_org_positions(PageContext(type="bill", id="HB 1", jurisdiction="FL", session="2026")) == ""
+        assert await agent._prefetch_org_bill_positions(PageContext(type="organization", id="42")) == ""
+        assert await agent._verify_from_webflow(PageContext(type="organization", id="42")) == ""

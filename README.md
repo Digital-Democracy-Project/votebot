@@ -396,7 +396,7 @@ VoteBot includes a real-time bill information lookup tool that enables fetching 
 |----------|-------------|---------|
 | `BILL_VOTES_TOOL_ENABLED` | Enable the bill info tool | `true` |
 | `BILL_VOTES_RAG_CONFIDENCE_THRESHOLD` | RAG confidence below which tool is enabled | `0.4` |
-| `WEBFLOW_ORG_LOOKUP_ENABLED` | Enable runtime Webflow CMS lookup for org positions | `true` |
+| `WEBFLOW_ORG_LOOKUP_ENABLED` | Enable the runtime organization-position lookups (Webflow CMS on the legacy index, ddp-broker-py on the canonical-id index): the switch to turn them off without redeploying | `true` |
 | `PDF_MAX_PAGES` | Maximum PDF pages to process per bill (0 = unlimited) | `1000` |
 
 ### Function Schema

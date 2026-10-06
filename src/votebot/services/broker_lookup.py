@@ -24,7 +24,8 @@ from votebot.utils.ddp_urls import ddp_bill_url
 
 logger = structlog.get_logger()
 
-TIMEOUT_SECONDS = 5.0  # these run before the answer starts streaming
+TIMEOUT_SECONDS = 5.0  # one request; these run before the answer starts streaming
+BUDGET_SECONDS = 8.0  # all the lookups for one message together (paging and the profile included)
 POSITIONS_PAGE_SIZE = 200  # the broker's maximum
 MAX_POSITION_PAGES = 3
 
@@ -49,6 +50,15 @@ class BillPositionOfOrg:
     session: str
     position: str  # "support" or "oppose"
     citation_url: str = ""
+
+
+@dataclass
+class OrgBillPositions:
+    """An organization's positions. `complete` is False when paging stopped early (a later page
+    failed, or the page cap was reached), so the answer does not present it as the whole history."""
+
+    positions: list[BillPositionOfOrg] = field(default_factory=list)
+    complete: bool = True
 
 
 @dataclass
@@ -106,7 +116,7 @@ class BrokerLookupService:
             ]
         )
 
-    async def get_org_bill_positions(self, org_id: str) -> list[BillPositionOfOrg] | None:
+    async def get_org_bill_positions(self, org_id: str) -> OrgBillPositions | None:
         """The verified positions one organization holds, newest finding per bill version."""
         positions: list[BillPositionOfOrg] = []
         for page in range(1, MAX_POSITION_PAGES + 1):
@@ -115,7 +125,7 @@ class BrokerLookupService:
             )
             rows = body.get("results") if body else None
             if not isinstance(rows, list):
-                return None if page == 1 else positions
+                return None if page == 1 else OrgBillPositions(positions, complete=False)
             positions += [
                 BillPositionOfOrg(
                     r.get("gov_id") or "",
@@ -129,8 +139,8 @@ class BrokerLookupService:
                 if isinstance(r, dict) and r.get("position") in ("support", "oppose")
             ]
             if not body.get("next"):
-                break
-        return positions
+                return OrgBillPositions(positions)
+        return OrgBillPositions(positions, complete=False)  # the page cap was reached
 
     async def get_org_details(self, org_id: str) -> OrgDetails | None:
         body = await self._get(f"/api/organizations/{org_id}/")
@@ -166,12 +176,13 @@ def format_bill_org_positions(result: BillOrgPositions | None) -> str:
 
 
 def format_org_bill_positions(
-    org: OrgDetails | None, positions: list[BillPositionOfOrg] | None, site_base_url: str = ""
+    org: OrgDetails | None, result: OrgBillPositions | None, site_base_url: str = ""
 ) -> str:
     """Markdown for the LLM context: the bills an organization supports or opposes, each linked to
     its page on the new site when `site_base_url` is set."""
-    if positions is None:
+    if result is None:
         return ""
+    positions = result.positions
     name = org.name if org else "this organization"
     if not positions:
         return (
@@ -188,6 +199,8 @@ def format_org_bill_positions(
                 url = ddp_bill_url(site_base_url, p.jurisdiction, p.session, p.gov_id)
                 lines.append(f"- [{label}]({url})" if url else f"- {label}")
             parts.append("\n".join(lines))
+    if not result.complete:
+        parts.append("Note: this list may be incomplete; say so if asked for every bill this organization has a position on.")
     return "\n\n".join(parts)
 
 
