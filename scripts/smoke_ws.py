@@ -20,9 +20,12 @@ Checks, per case and question:
     itself contain, or the check passes on any reply.
   * `min_citations` (default 0: the model only cites when it chooses to, so a per-answer minimum
     is flaky; prefer the case-level `min_cited_answers`)
-  * `min_cited_answers` (case level): at least this many of the case's answers must cite THIS bill
-    (canonical index). One answer citing it is evidence the answer path reads the bill; the model's
-    choice to write a citation in any single answer is not something a smoke test can require.
+  * `min_cited_answers` (case level): at least this many of the case's answers must carry a citation
+    with THIS bill's id. A citation can only come from a retrieved chunk, so it is evidence the answer
+    read the bill (the page context already hands the model the bill's name and number, so naming it
+    proves nothing). The model writes an explicit [Source: ...] only some of the time, so a case that
+    fails ONLY this check is run again, up to --citation-attempts times in all, in a fresh session; any
+    other failure ends the case at once.
   * `expect_votes_tool`: true asserts the live OpenStates tool answered (`bill_votes_tool_used` in
     `stream_end`); false asserts it did not. Votes are not in the new index, so on --index canonical
     a vote question must be answered this way. The flag is not asserted on --index legacy, where
@@ -237,6 +240,25 @@ async def retrieval_checks(case: dict, page_context: dict, expect_types: list[st
     return problems, notes
 
 
+async def run_questions(case: dict, page_context: dict, bill_id: str | None, args: argparse.Namespace):
+    """One pass over the case's questions in a fresh session: (problems, notes, answers citing this bill)."""
+    problems, notes, cited = [], [], 0
+    session_id = uuid.uuid4().hex[:12]
+    for question in case.get("questions") or [DEFAULT_QUESTION]:
+        turn = await asyncio.wait_for(
+            ask(args.url, session_id, question["message"], page_context, args.timeout), args.turn_timeout
+        )
+        for problem in check_turn(turn, question, bill_id, args.min_confidence, args.index == "canonical"):
+            problems.append(f"{question['message']!r}: {problem}")
+        if bill_id and any(bill_id.lower() in str(c.get("document_id", "")).lower() for c in turn.citations):
+            cited += 1
+        notes.append(
+            f"{question['message']!r}: {len(turn.answer)} chars, confidence {turn.confidence}, "
+            + citation_coverage(turn, bill_id)
+        )
+    return problems, notes, cited
+
+
 async def run_case(case: dict, args: argparse.Namespace) -> Result:
     result = Result(case.get("name") or "unnamed case")
     page_context = case.get("page_context")
@@ -252,24 +274,19 @@ async def run_case(case: dict, args: argparse.Namespace) -> Result:
         bill_id = page_context.get("ocd_bill_id")
         if bill_id == PLACEHOLDER_BILL:
             return Result(result.name, ["case still has the placeholder ocd_bill_id; use a bill that is embedded"])
-        session_id = uuid.uuid4().hex[:12]
-        cited_answers = 0
-        for question in case.get("questions") or [DEFAULT_QUESTION]:
-            turn = await asyncio.wait_for(
-                ask(args.url, session_id, question["message"], page_context, args.timeout), args.turn_timeout
-            )
-            for problem in check_turn(turn, question, bill_id, args.min_confidence, args.index == "canonical"):
-                result.problems.append(f"{question['message']!r}: {problem}")
-            if bill_id and any(bill_id.lower() in str(c.get("document_id", "")).lower() for c in turn.citations):
-                cited_answers += 1
-            result.notes.append(
-                f"{question['message']!r}: {len(turn.answer)} chars, confidence {turn.confidence}, "
-                + citation_coverage(turn, bill_id)
-            )
-        wanted_cited = case.get("min_cited_answers", 0)
-        if args.index == "canonical" and cited_answers < wanted_cited:
+        wanted = case.get("min_cited_answers", 0) if args.index == "canonical" else 0
+        for attempt in range(1, max(1, args.citation_attempts if wanted else 1) + 1):
+            problems, notes, cited = await run_questions(case, page_context, bill_id, args)
+            if problems or cited >= wanted:
+                break
+            if attempt < args.citation_attempts:
+                result.notes.append(f"attempt {attempt}: no answer cited this bill, running the case again")
+        result.problems += problems
+        result.notes += notes
+        if not problems and cited < wanted:
             result.problems.append(
-                f"{cited_answers} answers cited this bill, expected at least {wanted_cited}: nothing shows an answer came from it"
+                f"{cited} answers cited this bill in each of {args.citation_attempts} attempts, expected at least {wanted}: "
+                "nothing shows an answer came from it"
             )
         if args.retrieval:
             problems, notes = await asyncio.wait_for(
@@ -289,6 +306,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--index", choices=["canonical", "legacy"], default="canonical",
                         help="which index the instance reads; canonical enables the citation isolation check")
     parser.add_argument("--resolve-base", help="HTTP base of the instance, to resolve cases that give only a ddp_url")
+    parser.add_argument("--citation-attempts", type=int, default=3,
+                        help="runs of a case that fails only for lack of a citation (min_cited_answers). Default: 3")
     parser.add_argument("--min-confidence", type=float, default=0.5)
     parser.add_argument("--timeout", type=float, default=90.0, help="seconds to wait for each frame, and for the retrieval check")
     parser.add_argument("--turn-timeout", type=float, default=240.0, help="seconds allowed for a whole question")
