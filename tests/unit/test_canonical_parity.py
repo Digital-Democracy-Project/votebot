@@ -192,6 +192,15 @@ class TestButtonCacheOnTheCanonicalIndex:
         assert use_cache.client.store == {}
         assert await agent._maybe_serve_from_button_cache(page_context=ctx, button="summary") is None
 
+    @pytest.mark.parametrize("failure", [RuntimeError("api-v3 exploded"), TimeoutError(), AttributeError("bad body")])
+    async def test_a_version_lookup_that_raises_bypasses_the_cache_instead_of_failing(self, use_cache, failure):
+        agent = _button_agent()
+        agent.retrieval = SimpleNamespace(bill_versions=SimpleNamespace(get_versions=AsyncMock(side_effect=failure)))
+        ctx = PageContext(type="bill", ocd_bill_id=BILL)
+        await _populate(agent, ctx)
+        assert use_cache.client.store == {}
+        assert await agent._maybe_serve_from_button_cache(page_context=ctx, button="summary") is None
+
     async def test_a_page_without_an_ocd_bill_id_is_not_cached(self, use_cache):
         agent = _button_agent(versions=[_version("11")])
         await _populate(agent, PageContext(type="bill", slug="a-slug"))

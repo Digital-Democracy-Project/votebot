@@ -116,6 +116,8 @@ class VoteBotAgent:
         stored one stale by itself, so nothing has to publish an invalidation for that index, and
         the existing `ButtonCache` key shape and `DELETE /cache/button/{id}` keep working. When
         api-v3 cannot say which version is current, nothing is cached or served from cache.
+        "Current" comes from `BillVersionService`'s 120 s in-process cache, the same lookup
+        retrieval uses, so a cached answer is never staler than an uncached one would be.
         """
         if self.settings.bill_filter_key != "ocd_bill_id":
             slug = getattr(page_context, "slug", None)
@@ -123,7 +125,11 @@ class VoteBotAgent:
         ocd_bill_id = getattr(page_context, "ocd_bill_id", None)
         if not ocd_bill_id:
             return None
-        current = current_version(await self.retrieval.bill_versions.get_versions(ocd_bill_id))
+        try:
+            current = current_version(await self.retrieval.bill_versions.get_versions(ocd_bill_id))
+        except Exception as e:  # noqa: BLE001 -- a version lookup problem must cost the cache, not the answer
+            logger.warning("ButtonCache: could not determine the current version", error=str(e))
+            return None
         return (ocd_bill_id, current.document_id) if current else None
 
     async def _maybe_serve_from_button_cache(
