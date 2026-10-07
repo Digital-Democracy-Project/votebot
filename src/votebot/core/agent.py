@@ -2667,9 +2667,10 @@ class VoteBotAgent:
             if potential_code in state_names.values():
                 return potential_code
 
-        # Check for federal bill indicators
-        federal_keywords = ["federal", "congress", "us ", "u.s.", "united states"]
-        if any(kw in message_lower for kw in federal_keywords):
+        # Check for federal bill indicators. Whole words only: "us " as a substring is inside "status",
+        # "bonus", "campus", "focus", so the Status & votes button sent every Florida bill to the US lookup.
+        # The country is "US" written in capitals, or spelled out; the pronoun ("tell us") does not count.
+        if re.search(r"(?<!\w)(federal|congress|u\.s\.|united states)(?!\w)", message_lower) or re.search(r"\bUS\b", message):
             return "US"
 
         return None
