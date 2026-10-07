@@ -68,19 +68,26 @@ DIFF_NONE_NOTE = (
 
 
 def diff_scope_note(shown) -> str:
-    """Names the exact version pairs the diffs below compare, so the answer cannot claim a wider span.
+    """Names the exact version pairs the live diffs in this prompt compare, so the answer cannot claim more.
 
     api-v3 may hold a diff only for the latest steps of a bill, so "first version to latest" can be
     asked while one comparison was read; without this the answer says it covered the whole history.
+    `shown` is a list of (VersionDiff, characters shown or None when the whole diff is in the prompt).
     """
-    pairs = "; ".join(
-        f"{d.from_note or 'the version before it'} -> {d.note} ({d.stage}, {d.date})" for d in shown
-    )
+    parts = []
+    for diff, shown_chars in shown:
+        before = diff.from_note or "the version before it (its name is not recorded)"
+        detail = ", ".join(x for x in (diff.stage, diff.date) if x)
+        label = f"{before} -> {diff.note or 'this version'}" + (f" ({detail})" if detail else "")
+        if shown_chars is not None:
+            label += f" [only the first {shown_chars} of {len(diff.text)} characters of this diff were read]"
+        parts.append(label)
     return (
-        f"The only version comparison(s) read: {pairs}. When you describe what changed, name exactly these "
-        "versions. Do not describe changes between any other pair of versions; if the user asked about a longer "
-        "span (for example from the first version to the latest), say that only these comparison(s) were read "
-        "and that earlier steps were not compared."
+        "The live version records give only these comparison(s) for this question: " + "; ".join(parts) + ". "
+        "Name exactly these versions when you describe what changed from them, and do not present a comparison "
+        "of any other pair of versions as if you had read it. If the user asked about a longer span (for example "
+        "from the first version to the latest), say that only these comparison(s) were read and that earlier steps "
+        "were not compared. If a diff was only partly read, say the summary covers only that part."
     )
 
 
@@ -1252,8 +1259,8 @@ class RetrievalService:
             if remaining <= 0:
                 omitted += 1
                 continue
-            shown.append(diff)
             text = diff.text[:remaining]
+            shown.append((diff, len(text) if len(diff.text) > remaining else None))
             if len(diff.text) > remaining:
                 truncated += 1
                 text += f"\n[Diff truncated: first {len(text)} of {len(diff.text)} characters]"

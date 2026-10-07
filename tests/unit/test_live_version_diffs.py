@@ -176,7 +176,7 @@ class TestRetrievalPhaseFive:
     async def test_the_answer_is_told_exactly_which_versions_were_compared(self):
         # "first and latest" was answered as if the whole history had been compared; only the last pair was read
         result = await _retrieval().retrieve("What changed between the first and the latest version?", _bill())
-        (note,) = [n for n in result.notes if "version comparison(s) read" in n]
+        (note,) = [n for n in result.notes if "give only these comparison" in n]
         assert "Engrossed -> Enrolled (final_passage, 2026-04-01)" in note
         assert "only these comparison(s) were read" in note and "earlier steps were not compared" in note
         assert "Introduced" not in note  # not a pair that was compared
@@ -190,7 +190,7 @@ class TestRetrievalPhaseFive:
             _version("Amendment D", "2026-02-04", "amendment", 3, 204, big),
         ]}
         result = await _retrieval(api).retrieve("what changed in the amended version?", _bill())
-        (note,) = [n for n in result.notes if "version comparison(s) read" in n]
+        (note,) = [n for n in result.notes if "give only these comparison" in n]
         assert "Amendment A -> Amendment B" in note and "Amendment B -> Amendment C" in note
         assert "Amendment D" not in note  # it had no budget left, and has its own "omitted" note
 
@@ -198,8 +198,32 @@ class TestRetrievalPhaseFive:
         from votebot.core.retrieval import diff_scope_note
         from votebot.services.bill_versions import VersionDiff
 
-        shown = [VersionDiff("9", "Enrolled", "2026-04-01", "final_passage", None, None, "+ x")]
-        assert "the version before it -> Enrolled (final_passage, 2026-04-01)" in diff_scope_note(shown)
+        shown = [(VersionDiff("9", "Enrolled", "2026-04-01", "final_passage", None, None, "+ x"), None)]
+        note = diff_scope_note(shown)
+        assert "the version before it (its name is not recorded) -> Enrolled (final_passage, 2026-04-01)" in note
+
+    async def test_missing_stage_or_date_leaves_no_empty_brackets(self):
+        from votebot.core.retrieval import diff_scope_note
+        from votebot.services.bill_versions import VersionDiff
+
+        assert "A -> B)" not in diff_scope_note([(VersionDiff("9", "B", "", "", "A", "8", "+ x"), None)])
+        assert "A -> B." in diff_scope_note([(VersionDiff("9", "B", "", "", "A", "8", "+ x"), None)])
+
+    async def test_a_diff_that_was_cut_for_length_is_said_to_be_partly_read(self):
+        long_diff = "+" + "x" * 30000
+        api = {"versions": [API["versions"][0], _version("Enrolled", "2026-04-01", "final_passage", 1, 103, long_diff)]}
+        result = await _retrieval(api).retrieve("what changed in this bill?", _bill())
+        (note,) = [n for n in result.notes if "give only these comparison" in n]
+        assert f"only the first {DIFF_MAX_CHARS} of {len(long_diff)} characters of this diff were read" in note
+
+    async def test_the_note_is_about_the_live_records_not_every_source(self):
+        # a source that explicitly compares another pair is not forbidden: only presenting it as read here is
+        from votebot.core.retrieval import diff_scope_note
+        from votebot.services.bill_versions import VersionDiff
+
+        note = diff_scope_note([(VersionDiff("9", "B", "d", "s", "A", "8", "+ x"), None)])
+        assert "live version records" in note and "as if you had read it" in note
+        assert "Do not describe changes between any other pair" not in note
 
     async def test_an_ordinary_question_adds_no_notes(self):
         assert (await _retrieval().retrieve("what does this bill do?", _bill())).notes == []
