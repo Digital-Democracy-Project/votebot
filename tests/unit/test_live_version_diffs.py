@@ -209,6 +209,21 @@ class TestRetrievalPhaseFive:
         assert "A -> B)" not in diff_scope_note([(VersionDiff("9", "B", "", "", "A", "8", "+ x"), None)])
         assert "A -> B." in diff_scope_note([(VersionDiff("9", "B", "", "", "A", "8", "+ x"), None)])
 
+    async def test_one_comparison_gets_the_exact_heading_so_the_model_cannot_write_a_wider_one(self):
+        # VOTEBOT-22: live runs still headed an accurate answer "Earliest to Latest Version" (2 of 5)
+        from votebot.core.retrieval import diff_scope_note
+        from votebot.services.bill_versions import VersionDiff
+
+        note = diff_scope_note([(VersionDiff("9", "H 7089 er", "d", "final_passage", "H 7089 e2", "8", "+ x"), None)])
+        assert 'Start your answer with exactly this heading: "## What changed: H 7089 e2 -> H 7089 er"' in note
+
+    async def test_several_comparisons_get_no_single_heading(self):
+        from votebot.core.retrieval import diff_scope_note
+        from votebot.services.bill_versions import VersionDiff
+
+        shown = [(VersionDiff("9", "B", "", "", "A", "8", "+ x"), None), (VersionDiff("10", "C", "", "", "B", "9", "+ y"), None)]
+        assert "exactly this heading" not in diff_scope_note(shown)
+
     async def test_a_diff_that_was_cut_for_length_is_said_to_be_partly_read(self):
         long_diff = "+" + "x" * 30000
         api = {"versions": [API["versions"][0], _version("Enrolled", "2026-04-01", "final_passage", 1, 103, long_diff)]}

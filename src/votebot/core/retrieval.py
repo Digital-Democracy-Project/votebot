@@ -82,8 +82,16 @@ def diff_scope_note(shown) -> str:
         if shown_chars is not None:
             label += f" [only the first {shown_chars} of {len(diff.text)} characters of this diff were read]"
         parts.append(label)
+    heading = ""
+    if len(shown) == 1:
+        diff = shown[0][0]
+        before = diff.from_note or "the version before it"
+        # The model wrote its own heading ("Earliest to Latest Version") over a body that was accurate, in 2 of 5 live
+        # runs after the wording rule alone, so with one comparison the heading is given to it.
+        heading = f'Start your answer with exactly this heading: "## What changed: {before} -> {diff.note or "this version"}". '
     return (
         "The live version records give only these comparison(s) for this question: " + "; ".join(parts) + ". "
+        + heading +
         "Name exactly these versions when you describe what changed from them, and do not present a comparison "
         "of any other pair of versions as if you had read it. If the user asked about a longer span (for example "
         "from the first version to the latest), say that only these comparison(s) were read and that earlier steps "
