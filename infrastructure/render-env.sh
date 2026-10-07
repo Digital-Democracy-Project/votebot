@@ -11,7 +11,8 @@
 # By decision (2026-10-07) VoteBot reads the SAME shared secret as ddp-sync, `ddp-sync/credentials`
 # (VOTEBOT_SECRET_ID), which holds: api_key, openai_api_key, pinecone_api_key, rds_openstates_api_key
 # (-> DDP_OPENSTATES_BEARER_TOKEN: the setting name is historical, it is sent as X-API-Key) and, for
-# --with-slack, slack_bot_token and slack_app_token. To give VoteBot a secret of its own later, set
+# --with-slack, votebot_slack_bot_token and votebot_slack_app_token (a bare slack_bot_token in the same
+# secret belongs to something else and is never read). To give VoteBot a secret of its own later, set
 # VOTEBOT_SECRET_ID=votebot/credentials (same key names), and API_SOURCE_SECRET_ID=ddp-sync/credentials
 # to keep reading the api-v3 key from the shared one (API_SOURCE_SECRET_ID= empty reads
 # ddp_openstates_api_key from VoteBot's secret instead).
@@ -105,8 +106,8 @@ else:
 
 if os.environ["WITH_SLACK"] == "1":
     REQUIRED += [
-        (votebot, "slack_bot_token", "SLACK_BOT_TOKEN"),
-        (votebot, "slack_app_token", "SLACK_APP_TOKEN"),
+        (votebot, "votebot_slack_bot_token", "SLACK_BOT_TOKEN"),
+        (votebot, "votebot_slack_app_token", "SLACK_APP_TOKEN"),
     ]
 
 SAFE_VALUE = re.compile(r"[A-Za-z0-9._~+/=:@-]+")
