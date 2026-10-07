@@ -217,7 +217,10 @@ cd /opt/votebot && infrastructure/render-env.sh            # writes /opt/votebot
 It merges the committed non-secret defaults (`infrastructure/docker/prod.env.defaults`) with the secrets from the shared
 secret `ddp-sync/credentials` (decided 2026-10-07: VoteBot shares ddp-sync's keys): `api_key`, `openai_api_key`,
 `pinecone_api_key`, and `rds_openstates_api_key` (sent to api-v3 as `X-API-Key`). It fails before touching `.env` if any
-is missing or empty, and never prints a value. The host's instance role already reads this secret (ddp-sync's render
+is missing or empty, or has a character outside `A-Z a-z 0-9 . _ ~ + / = : @ -` (an env file cannot carry a space, quote, `#`, `$` or
+backslash losslessly, so such a value is refused by name instead of being written wrong; real API keys use none of them),
+and never prints a value: the secrets are fetched inside the script's Python process, never through a shell variable, so
+even `bash -x` shows none. The resulting `.env` does hold the secrets in plain text (mode 600, owned by the invoking user). The host's instance role already reads this secret (ddp-sync's render
 script runs the same way). To rotate: change the secret, re-run the script, `docker compose ... up -d` (a restart ends
 open chats). To give VoteBot a secret of its own later: `VOTEBOT_SECRET_ID=votebot/credentials` (same key names) and
 `API_SOURCE_SECRET_ID=ddp-sync/credentials` to keep the shared api-v3 key.
@@ -230,7 +233,8 @@ a `--check` first.
 `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` from the secret keys `slack_bot_token` and `slack_app_token` (confirm those two
 names exist in the secret with `--check --with-slack`, which prints names only; if the secret names them differently, change the
 two names in the `--with-slack` lines of the script by a PR). One Slack app token may be held by ONE running VoteBot, so:
-stop the old copy's Slack connection first, then render with `--with-slack`, `up -d --force-recreate votebot`, and run a real
+stop the old copy's Slack connection first and **confirm it is stopped before going on** (its service or process is
+down, or its Slack app shows no connection; record the time), then render with `--with-slack`, `up -d --force-recreate votebot`, and run a real
 human-handoff test (VOTEBOT-14).
 
 ### 3.4 The compose project
