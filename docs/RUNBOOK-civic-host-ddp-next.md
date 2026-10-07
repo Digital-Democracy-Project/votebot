@@ -207,21 +207,31 @@ health check fails with `DisallowedHost` because Django rejects requests address
 
 #### 3.3.1 Rendering `.env` from Secrets Manager instead of typing it (VOTEBOT-14)
 
-Like ddp-sync, the host can resolve the secrets itself, so nobody types or pastes one:
+Like ddp-sync, the host resolves the secrets itself, so nobody types or pastes one:
 
 ```bash
 cd /opt/votebot && infrastructure/render-env.sh --check    # fetch and validate; prints key NAMES only, writes nothing
 cd /opt/votebot && infrastructure/render-env.sh            # writes /opt/votebot/.env (mode 600, atomic), then `up -d` to apply
 ```
 
-It merges the committed non-secret defaults (`infrastructure/docker/prod.env.defaults`) with the secrets from
-`votebot/credentials` (JSON keys `api_key`, `openai_api_key`, `pinecone_api_key`: the dedicated OpenAI project key and,
-if the plan allows, a read-only Pinecone key; never ddp-sync's) and the shared api-v3 key from `ddp-sync/credentials`
-(`rds_openstates_api_key`, sent as `X-API-Key`; `API_SOURCE_SECRET_ID=` empty skips it and reads `ddp_openstates_api_key`
-from the votebot secret instead). It fails before touching `.env` if any secret is missing or empty, and never prints a
-value. **Needs, outside git:** the secret `votebot/credentials` created in Secrets Manager, and the host's instance role
-allowed `secretsmanager:GetSecretValue` on it (`--check` fails with an access error until both are done). To rotate:
-change the secret, re-run the script, `docker compose ... up -d` (a restart ends open chats).
+It merges the committed non-secret defaults (`infrastructure/docker/prod.env.defaults`) with the secrets from the shared
+secret `ddp-sync/credentials` (decided 2026-10-07: VoteBot shares ddp-sync's keys): `api_key`, `openai_api_key`,
+`pinecone_api_key`, and `rds_openstates_api_key` (sent to api-v3 as `X-API-Key`). It fails before touching `.env` if any
+is missing or empty, and never prints a value. The host's instance role already reads this secret (ddp-sync's render
+script runs the same way). To rotate: change the secret, re-run the script, `docker compose ... up -d` (a restart ends
+open chats). To give VoteBot a secret of its own later: `VOTEBOT_SECRET_ID=votebot/credentials` (same key names) and
+`API_SOURCE_SECRET_ID=ddp-sync/credentials` to keep the shared api-v3 key.
+
+**The file is rewritten in full on every run, so a hand edit of `.env` is lost.** Non-secret settings, including the
+cutover edits (`DDP_SITE_BASE_URL`, `ALLOWED_ORIGINS`), are changed in `prod.env.defaults` by a PR and re-rendered, with
+a `--check` first.
+
+**Slack, cutover day only.** The defaults leave Slack off. `infrastructure/render-env.sh --with-slack` also writes
+`SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` from the secret keys `slack_bot_token` and `slack_app_token` (confirm those two
+names exist in the secret with `--check --with-slack`, which prints names only; if the secret names them differently, change the
+two names in the `--with-slack` lines of the script by a PR). One Slack app token may be held by ONE running VoteBot, so:
+stop the old copy's Slack connection first, then render with `--with-slack`, `up -d --force-recreate votebot`, and run a real
+human-handoff test (VOTEBOT-14).
 
 ### 3.4 The compose project
 
