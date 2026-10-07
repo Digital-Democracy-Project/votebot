@@ -1256,12 +1256,13 @@ class VoteBotAgent:
             return citations
         if any(phrase in response.lower() for phrase in UNCERTAINTY_PHRASES):
             return citations
-        scope = retrieval_result.filters_applied
+        scope = {key: value for key, value in retrieval_result.filters_applied.items() if value not in (None, "")}
         if not scope:
             return citations
+        # fail closed: a chunk must CARRY every identity key (a missing key is not a match for a null value)
         page_chunks = [
             chunk for chunk in retrieval_result.chunks
-            if all(str(chunk.metadata.get(key)) == str(value) for key, value in scope.items())
+            if all(key in chunk.metadata and str(chunk.metadata[key]) == str(value) for key, value in scope.items())
         ]
         page_text = " ".join(filter(None, [page_context.id, page_context.title, page_context.jurisdiction]))
         cited = [
