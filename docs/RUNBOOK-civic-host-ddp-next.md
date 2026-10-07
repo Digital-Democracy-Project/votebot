@@ -292,18 +292,20 @@ in the namespace first, read-only, as in section 1.2's check). Then section 6, r
 
 ### 3.6 Logs
 
-Query logs are one JSONL file per day in `/opt/votebot-logs/queries` (visitors' messages and addresses). Keep
-14 days and compress, so they neither fill the shared disk nor keep messages longer than needed:
+Query logs are one JSONL file per day in `/opt/votebot-logs/queries` (visitors' messages and addresses). They are personal
+data, so they are aged out by `infrastructure/query-log-cleanup.sh` (VOTEBOT-20; decision 2026-10-07: a year at most): files
+older than 7 whole days are compressed (a file is compressed once it is 8 days old), files older than 365 whole days are
+deleted (at 366 days); `COMPRESS_DAYS`, `DELETE_DAYS`, `LOG_DIR` override the defaults. A failed compress or delete is
+printed and makes the script exit 1, which cron mails to the operator. The weekly quality report reads the last 7 days uncompressed. A plain logrotate rule does not fit: the files
+are already named by day. The operator installs it (needs sudo; a name with a dot is skipped by `run-parts`, so no `.sh`):
 
-```conf
-# /etc/logrotate.d/votebot-ddp-next
-/opt/votebot-logs/queries/*.jsonl {
-    daily
-    rotate 14
-    compress
-    missingok
-    notifempty
-}
+```bash
+cd /opt/votebot
+sudo infrastructure/query-log-cleanup.sh --dry-run          # lists what it would compress and delete; changes nothing
+sudo install -m 755 infrastructure/query-log-cleanup.sh /etc/cron.daily/votebot-query-log-cleanup
+sudo /etc/cron.daily/votebot-query-log-cleanup              # one real run, then:
+ls -l /opt/votebot-logs/queries | tail -5                   # today's file is still there and its size still grows
+docker logs votebot-ddp-next 2>&1 | grep -c 'Query log directory is NOT writable'    # expect 0
 ```
 
 Container logs are rotated by the `json-file` options in 3.4. Check `df -h /` after the first week and name who looks.
@@ -434,7 +436,7 @@ organizations from the broker, and the console shows no CORS error. In `docker l
 
 - [ ] 1.1 to 1.3 filled in, differences reported
 - [ ] Section 2: `legacy-webflow` branch and tag in votebot and ddp-sync, old checkouts pinned, paths recorded
-- [ ] 3.1 swap added; 3.2 to 3.5: image built on the host, container running and verified INSIDE the Docker network (`bill_filter_key=ocd_bill_id` in the startup log, no Slack), own Redis container, memory limits and log rotation in place
+- [ ] 3.1 swap added; 3.2 to 3.5: image built on the host, container running and verified INSIDE the Docker network (`bill_filter_key=ocd_bill_id` in the startup log, no Slack), own Redis container, memory limits in place, query-log cleanup installed (3.6)
 - [ ] 3.7: broker PR #410 merged, template tested in a throwaway container, nginx recreated in a quiet window, public smoke test passing
 - [ ] Baseline health table filled in and unchanged after each step
 - [ ] 4.1 production origin supplied and added at cutover; 4.2 widget path documented in `chat-widget/README.md`
