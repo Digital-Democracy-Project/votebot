@@ -189,12 +189,30 @@ class RenderEnvTest(unittest.TestCase):
     def test_a_hand_edit_that_broke_the_json_says_where_without_echoing_a_value(self):
         # VOTEBOT-14: "key"="value" instead of "key": "value" made ddp-sync/credentials unreadable on 2026-10-07
         (self.secrets / "votebot_credentials.json").write_text('{\n  "api_key": "a",\n  "votebot_slack_bot_token"="xoxb-SECRETVALUE-13"\n}')
-        r = self.run_script()
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("Expecting ':' delimiter, line 3 column 28", r.stderr)
-        self.assertIn("nothing was written", r.stderr)
-        self.assertNotIn("SECRETVALUE-13", r.stdout + r.stderr)
-        self.assertFalse(self.out.exists())
+        self.out.write_text("SENTINEL=1\n")
+        for args in ((), ("--check",)):  # the normal run, and the runbook's check
+            r = self.run_script(*args)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("Expecting ':' delimiter, line 3 column 28", r.stderr)
+            self.assertIn("nothing was written", r.stderr)
+            self.assertNotIn("SECRETVALUE-13", r.stdout + r.stderr)
+            self.assertEqual(self.out.read_text(), "SENTINEL=1\n")  # an existing .env is left exactly as it was
+
+    def test_no_decoder_message_echoes_a_value(self):
+        # one document per way the decoder can fail; each carries a value that must never come back out
+        broken = [
+            '{"k": "SECRETVALUE-14',                       # unterminated string
+            '{"k": "SECRETVALUE-14\\q"}',                  # invalid escape
+            '{"k": "SECRETVALUE-14"} SECRETVALUE-14',      # trailing data
+            '{"k": "SECRETVALUE-14\n"}',                    # control character inside a string
+            '{"k": SECRETVALUE-14}',                       # a value that is not JSON
+        ]
+        for doc in broken:
+            (self.secrets / "votebot_credentials.json").write_text(doc)
+            r = self.run_script()
+            self.assertNotEqual(r.returncode, 0, doc)
+            self.assertIn("invalid JSON", r.stderr, doc)
+            self.assertNotIn("SECRETVALUE-14", r.stdout + r.stderr, doc)
 
     def test_a_traced_run_does_not_show_any_value(self):
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", FAKE_SECRETS_DIR=str(self.secrets),
