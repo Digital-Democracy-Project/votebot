@@ -28,7 +28,7 @@ from votebot.services.broker_lookup import (
     format_org_details,
 )
 from votebot.services.bill_votes import BillVotesService
-from votebot.services.legislators import UNAVAILABLE, LegislatorLookupService, format_legislators
+from votebot.services.legislators import NO_MATCH, UNAVAILABLE, LegislatorLookupService, format_legislators
 from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
 from votebot.services.openstates_client import openstates_base_url, openstates_headers
 from votebot.services.web_search import WebSearchService, WebSearchResult
@@ -80,6 +80,14 @@ NAME_STOPWORDS = frozenset(
     "explain give list find senator sen rep reps representative representatives congressman congressmen congresswoman "
     "congressperson legislator legislators delegate speaker assemblyman assemblywoman assemblymember lawmaker mr mrs "
     "ms dr hon".split()
+)
+
+# A message that opens by asking who someone is: the words after it are taken as a name even when typed in
+# lower case ("who is nancy pelosi"), and one word is enough ("Who is Pelosi?") when it names exactly one person.
+ASKS_WHO = re.compile(r"\s*(who is|who's|who was|tell me about|what do you know about)\b", re.IGNORECASE)
+# Words that end a name after ASKS_WHO ("who is nancy pelosi and which district...").
+NAME_BREAKERS = frozenset(
+    "and which what where how when why does do is are was were in of from for the a an that who whom with about".split()
 )
 
 # A word that says the message is about a legislator, so a name in it is worth looking up.
@@ -2459,6 +2467,22 @@ class VoteBotAgent:
         name_parts = [w for w in message.split() if len(w) > 1 and w[0].isupper() and w.lower() not in common_words]
         return " ".join(name_parts) or None
 
+    @staticmethod
+    def _name_after_asks_who(message: str) -> list[str]:
+        """The words after "Who is" / "Tell me about", up to a word that ends a name, in title case
+        ("who is nancy pelosi and which district..." -> ["Nancy", "Pelosi"]); at most three."""
+        words: list[str] = []
+        for raw in ASKS_WHO.sub("", message, count=1).split():
+            stripped = raw.strip("?.,!;:()\"'")
+            possessive = stripped.lower().endswith(("'s", "\u2019s"))  # "Pelosi's district": the name ends here
+            bare = re.sub(r"(?i)['\u2019]s$", "", stripped)
+            if not bare or bare.lower() in NAME_BREAKERS:
+                break
+            words.append(bare.title() if bare.islower() else bare)
+            if possessive or len(words) == 3 or raw[-1] in "?.,!;:":
+                break
+        return words
+
     @classmethod
     def _legislator_name_in(cls, message: str, require_cue: bool) -> str | None:
         """A name in the message worth a live `/people` lookup, or None.
@@ -2466,17 +2490,23 @@ class VoteBotAgent:
         The capitalised words of a message are only a guess at a name ("Summarize this bill" gives
         "Summarize"), and each guess costs a live call, so: acronyms (HB, AARP), state names, titles
         and question words are dropped, and unless the message has a legislator cue ("senator",
-        "representative"...) the name must be at least two words ("How did Ashley Moody vote?").
+        "representative"...) or opens by asking who someone is ("Who is ...", also in lower case), the
+        name must be at least two words ("How did Ashley Moody vote?").
         `require_cue` demands the cue.
         """
-        cued = bool(LEGISLATOR_CUES.search(message))
+        asks_who = bool(ASKS_WHO.match(message))
+        cued = bool(LEGISLATOR_CUES.search(message)) or asks_who
         if require_cue and not cued:
             return None
+
+        def keep(words: list[str]) -> list[str]:
+            return [t for t in (w.strip("?.,!;:()\"'") for w in words)
+                    if t and not t.isupper() and t.lower() not in US_STATES | NAME_STOPWORDS]
+
         guess = cls._candidate_person_name(message)
-        if not guess:
-            return None
-        tokens = [t.strip("?.,!;:()\"'") for t in guess.split()]
-        tokens = [t for t in tokens if t and not t.isupper() and t.lower() not in US_STATES | NAME_STOPWORDS]
+        tokens = keep(guess.split()) if guess else []
+        if asks_who and not tokens:
+            tokens = keep(cls._name_after_asks_who(message))  # typed in lower case
         first_word = message.split()[0].strip("?.,!") if message.split() else ""
         if not cued and len(tokens) >= 3 and tokens[0] == first_word:
             tokens = tokens[1:]  # "Tell Ashley Moody ..." -> "Ashley Moody"
@@ -2488,11 +2518,13 @@ class VoteBotAgent:
         """Legislator facts read live from api-v3 (canonical-id index: legislators are not embedded).
 
         A legislator page is answered about its legislator: by OpenStates person id when
-        `page_context.id` is one ("ocd-person/..."), else by the page's title (the name). On other
-        pages a name in the message is looked up on a bill page (as before) or when the message
-        has a legislator cue ("senator", "representative", ...), so an ordinary question that happens
-        to contain a capitalised word is not sent to api-v3. Several matches are listed for the
-        model to ask which one; a failure or a slow api-v3 costs the context, never the answer.
+        `page_context.id` is one ("ocd-person/..."), else by the page's title (the name). On every
+        other page a name in the message is looked up (VOTEBOT-24: a general page used to answer
+        "Who is Nancy Pelosi?" from the model's memory): with a legislator cue ("senator", ...) one
+        word is enough, without one it must be two, so an ordinary question that happens to contain a
+        capitalised word is not sent to api-v3. Several matches are listed for the model to ask which
+        one; nobody matching says so (and not to answer from memory); a failure or a slow api-v3 costs
+        the context, never the answer.
         """
         page_type = page_context.type if page_context else "general"
 
@@ -2504,14 +2536,22 @@ class VoteBotAgent:
                     return format_legislators(match) if match is not None else UNAVAILABLE
                 name, jurisdiction = page_context.title, page_context.jurisdiction
             else:
-                # A bill page may name a legislator without a cue word ("How did Ashley Moody vote?"),
-                # other pages need the cue; see _legislator_name_in
-                name, jurisdiction = self._legislator_name_in(message, require_cue=page_type != "bill"), None
+                # Any page may name a legislator, with or without a cue word ("Who is Nancy Pelosi?", "How did
+                # Ashley Moody vote?"); an uncued name must be two words, see _legislator_name_in
+                name, jurisdiction = self._legislator_name_in(message, require_cue=False), None
             if not name:
                 return ""
             match = await self.legislators.find_by_name(name, jurisdiction)
-            # None is api-v3 failing (the model is told so); no people is a name that is nobody
-            return format_legislators(match, asked=name) if match is not None else UNAVAILABLE
+            if " " not in name and not LEGISLATOR_CUES.search(message):
+                # One bare word after "Who is" ("Tell me about Jordan") may be a country, a company, a surname
+                # shared by many: trusted only when it names exactly one person; otherwise nothing is added
+                one = match is not None and len(match.people) == 1 and match.total == 1
+                return format_legislators(match, asked=name) if one else ""
+            if match is None:  # api-v3 failing: the model is told so
+                return UNAVAILABLE
+            # no people is a name that is nobody (or a typo: api-v3 matches substrings, not misspellings), and the
+            # model is told not to supply that person's role, party or district from memory
+            return format_legislators(match, asked=name) or NO_MATCH.format(asked=name)
 
         try:
             return await asyncio.wait_for(lookup(), _enrichment_budget_left())

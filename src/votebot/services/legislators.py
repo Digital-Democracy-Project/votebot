@@ -124,6 +124,16 @@ UNAVAILABLE = (
 )
 
 
+NO_MATCH = (
+    "## No legislator record matched \"{asked}\"\n"
+    "\"{asked}\" is a name taken from the user's message, and the current legislator records have no one whose "
+    "name contains it (the match is on the letters of the name, so a misspelling finds nobody). Do not state a "
+    "legislator's current role, party or district for \"{asked}\" from memory; if the user seems to mean a "
+    "legislator, say you could not find that name and ask for the exact name. Ignore this if the user is not "
+    "asking about a legislator."
+)
+
+
 def format_legislators(match: PeopleMatch | None, asked: str = "") -> str:
     """Markdown for the LLM context: one profile, or the candidates when several people match
     (so the model asks which one instead of guessing). Current members are preferred over former.
