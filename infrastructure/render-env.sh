@@ -31,6 +31,7 @@
 #                 by ONE running VoteBot, so stop the old copy's Slack connection first; VOTEBOT-14)
 #   --out     write somewhere other than <repo>/.env
 set -euo pipefail
+set +x  # never trace: expanded lines would print values (and this script keeps secrets out of bash anyway)
 
 REGION="${AWS_REGION:-us-east-1}"
 VOTEBOT_SECRET_ID="${VOTEBOT_SECRET_ID:-ddp-sync/credentials}"
@@ -53,27 +54,42 @@ done
 
 [ -r "$DEFAULTS_FILE" ] || { echo "[render-env] missing $DEFAULTS_FILE" >&2; exit 1; }
 
-echo "[render-env] fetching $VOTEBOT_SECRET_ID..."
-VOTEBOT_JSON=$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$VOTEBOT_SECRET_ID" --query 'SecretString' --output text)
-API_JSON='{}'
-USE_API_SOURCE=0
-if [ -n "$API_SOURCE_SECRET_ID" ]; then
-  echo "[render-env] fetching $API_SOURCE_SECRET_ID (the shared api-v3 key)..."
-  API_JSON=$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$API_SOURCE_SECRET_ID" --query 'SecretString' --output text)
-  USE_API_SOURCE=1
-fi
-
-export VOTEBOT_JSON API_JSON USE_API_SOURCE WITH_SLACK
+# The secrets are fetched INSIDE python (subprocess to the aws CLI): they never pass through a bash
+# variable, an `export`, a command line or a here-doc, so tracing or `ps` cannot show them.
+export VOTEBOT_SECRET_ID API_SOURCE_SECRET_ID REGION WITH_SLACK
 python3 - "$OUT_FILE" "$DEFAULTS_FILE" "$CHECK" <<'PYEOF'
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 
 out_file, defaults_file, check = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 
-votebot = json.loads(os.environ["VOTEBOT_JSON"])
-api_source = json.loads(os.environ["API_JSON"])
+
+def fetch(secret_id):
+    print(f"[render-env] fetching {secret_id}...")
+    done = subprocess.run(
+        ["aws", "secretsmanager", "get-secret-value", "--region", os.environ["REGION"], "--secret-id", secret_id,
+         "--query", "SecretString", "--output", "text"],
+        capture_output=True, text=True,
+    )
+    if done.returncode != 0:  # the CLI's own error names the secret and the reason; it never holds the value
+        sys.exit(f"[render-env] could not read {secret_id}: {done.stderr.strip()[:300]}")
+    try:
+        doc = json.loads(done.stdout)
+    except ValueError:
+        sys.exit(f"[render-env] {secret_id} is not a JSON object")  # never echo the content
+    if not isinstance(doc, dict):
+        sys.exit(f"[render-env] {secret_id} is not a JSON object")
+    return doc
+
+
+votebot = fetch(os.environ["VOTEBOT_SECRET_ID"])
+api_source_id = os.environ["API_SOURCE_SECRET_ID"]
+USE_API_SOURCE = bool(api_source_id)
+api_source = votebot if api_source_id == os.environ["VOTEBOT_SECRET_ID"] else (fetch(api_source_id) if USE_API_SOURCE else {})
 
 # (secret, secret key) -> env var name. Only these are ever written.
 REQUIRED = [
@@ -82,7 +98,7 @@ REQUIRED = [
     (votebot, "pinecone_api_key", "PINECONE_API_KEY"),
 ]
 # The setting name is historical: with DDP_OPENSTATES_AUTH_HEADER=x-api-key it is sent as X-API-Key.
-if os.environ["USE_API_SOURCE"] == "1":
+if USE_API_SOURCE:
     REQUIRED.append((api_source, "rds_openstates_api_key", "DDP_OPENSTATES_BEARER_TOKEN"))
 else:
     REQUIRED.append((votebot, "ddp_openstates_api_key", "DDP_OPENSTATES_BEARER_TOKEN"))
@@ -93,6 +109,7 @@ if os.environ["WITH_SLACK"] == "1":
         (votebot, "slack_app_token", "SLACK_APP_TOKEN"),
     ]
 
+SAFE_VALUE = re.compile(r"[A-Za-z0-9._~+/=:@-]+")
 secret_lines, written, missing = [], [], []
 for source, key, env_name in REQUIRED:
     value = source.get(key)
@@ -100,8 +117,11 @@ for source, key, env_name in REQUIRED:
         missing.append(f"{env_name} (secret key {key})")
         continue
     value = str(value)
-    if "\n" in value or "\r" in value:
-        sys.exit(f"[render-env] refusing: the value for {env_name} contains a newline")
+    # An env file has no lossless escaping that every parser agrees on (spaces, quotes, `#`, `$`, backslashes
+    # are all read differently by docker compose), so a value outside the characters real API keys use is
+    # refused by name instead of being written wrong.
+    if not SAFE_VALUE.fullmatch(value):
+        sys.exit(f"[render-env] refusing: the value for {env_name} has a character outside A-Z a-z 0-9 . _ ~ + / = : @ -")
     secret_lines.append(f"{env_name}={value}\n")
     written.append(env_name)
 
@@ -139,4 +159,3 @@ except BaseException:
     raise
 print(f"[render-env] wrote {len(written)} secret names {sorted(written)} + {len(defaults_names)} defaults to {out_file} (mode 600)")
 PYEOF
-unset VOTEBOT_JSON API_JSON USE_API_SOURCE WITH_SLACK

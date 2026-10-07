@@ -157,6 +157,55 @@ class RenderEnvTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("DDP_OPENSTATES_BEARER_TOKEN=own-SECRETVALUE-5\n", self.out.read_text())
 
+    def test_a_value_with_a_character_an_env_file_cannot_carry_losslessly_is_refused_by_name(self):
+        for bad in ["has space", 'has"quote', "has$dollar", "has#hash", "has\\backslash", "has\nnewline", "tab\there", "ünïcode"]:
+            self.out.write_text("SENTINEL=1\n")
+            self.put("votebot/credentials", dict(VOTEBOT_SECRET, openai_api_key=bad))
+            r = self.run_script()
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn("OPENAI_API_KEY", r.stderr)
+            self.assertNotIn(bad, r.stdout + r.stderr)  # the name is reported, never the value
+            self.assertEqual(self.out.read_text(), "SENTINEL=1\n")
+
+    def test_the_characters_real_api_keys_use_are_written_as_they_are(self):
+        keys = {"api_key": "Ab-1_2.3~4", "openai_api_key": "sk-proj-AbC_123-xyz", "pinecone_api_key": "pcsk_AbC+/=:9@z"}
+        self.put("votebot/credentials", dict(VOTEBOT_SECRET, **keys))
+        self.assertEqual(self.run_script().returncode, 0)
+        text = self.out.read_text()
+        self.assertIn("PINECONE_API_KEY=pcsk_AbC+/=:9@z\n", text)
+        self.assertIn("OPENAI_API_KEY=sk-proj-AbC_123-xyz\n", text)
+
+    def test_an_invalid_secret_never_echoes_its_content(self):
+        (self.secrets / "votebot_credentials.json").write_text("not json SECRETVALUE-12")
+        r = self.run_script()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not a JSON object", r.stderr)
+        self.assertNotIn("SECRETVALUE-12", r.stdout + r.stderr)
+        self.assertFalse(self.out.exists())
+
+    def test_a_traced_run_does_not_show_any_value(self):
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", FAKE_SECRETS_DIR=str(self.secrets),
+                   VOTEBOT_SECRET_ID="votebot/credentials", API_SOURCE_SECRET_ID="ddp-sync/credentials")
+        r = subprocess.run(["bash", "-x", str(SCRIPT), "--out", str(self.out)], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for v in ALL_VALUES:
+            self.assertNotIn(v, r.stdout + r.stderr)  # secrets never pass through bash, so a trace cannot print them
+
+    def test_a_failed_replace_leaves_no_temp_file_and_nothing_changed(self):
+        self.out.mkdir()  # os.replace of a file onto a directory fails after the temp file was written
+        r = self.run_script()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual([p.name for p in self.out.parent.iterdir() if p.name.startswith(".env.")], [])
+        self.assertTrue(self.out.is_dir())
+
+    def test_defaults_without_a_trailing_newline_do_not_join_the_first_secret(self):
+        no_newline = Path(self.tmp.name) / "nonl.defaults"
+        no_newline.write_text("ENVIRONMENT=production")
+        self.assertEqual(self.run_script(extra_env={"DEFAULTS_FILE": str(no_newline)}).returncode, 0)
+        lines = self.out.read_text().splitlines()
+        self.assertIn("ENVIRONMENT=production", lines)
+        self.assertIn("API_KEY=vb-api-SECRETVALUE-1", lines)
+
     def test_defaults_file_may_not_define_a_secret_name(self):
         bad = Path(self.tmp.name) / "bad.defaults"
         bad.write_text("OPENAI_API_KEY=oops\n")
