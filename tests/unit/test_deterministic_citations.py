@@ -101,12 +101,15 @@ class TestWhichChunksWereUsed:
         assert chunks_used_by(UNCITED_ANSWER, []) == []
 
 
-def _agent(answer: str, chunks, **settings) -> VoteBotAgent:
+def _agent(answer: str, chunks, scope=None, **settings) -> VoteBotAgent:
     agent = VoteBotAgent.__new__(VoteBotAgent)
     agent.settings = Settings(pinecone_index_name="ddp-knowledge-base", _env_file=None, **settings)
     agent.retrieval = SimpleNamespace(
         retrieve=AsyncMock(
-            return_value=RetrievalResult(chunks=chunks, query_used="q", filters_applied={}, total_retrieved=len(chunks))
+            return_value=RetrievalResult(
+                chunks=chunks, query_used="q", total_retrieved=len(chunks),
+                filters_applied={"ocd_bill_id": BILL} if scope is None else scope,  # what retrieval pinned the page to
+            )
         )
     )
 
@@ -118,20 +121,21 @@ def _agent(answer: str, chunks, **settings) -> VoteBotAgent:
         return LLMResponse(content=answer, tokens_used=1, model="fake", web_citations=[])
 
     agent.llm = SimpleNamespace(stream=stream, complete=complete)
+    agent.legislators = SimpleNamespace(find_by_id=AsyncMock(return_value=None), find_by_name=AsyncMock(return_value=None))
     agent._should_use_bill_votes_tool = lambda *a, **k: False
     agent._perform_web_search = AsyncMock(return_value=[])
     agent._log_query = lambda **kwargs: None
     return agent
 
 
-async def _streamed(agent):
-    chunks = [c async for c in agent.process_message_stream(message="What does it do?", session_id="s", page_context=PAGE)]
+async def _streamed(agent, page=PAGE):
+    chunks = [c async for c in agent.process_message_stream(message="What does it do?", session_id="s", page_context=page)]
     (final,) = [c for c in chunks if c.done]
     return final.citations
 
 
-async def _non_streamed(agent):
-    return (await agent.process_message(message="What does it do?", session_id="s", page_context=PAGE)).citations
+async def _non_streamed(agent, page=PAGE):
+    return (await agent.process_message(message="What does it do?", session_id="s", page_context=page)).citations
 
 
 class TestBothAgentPaths:
@@ -143,6 +147,33 @@ class TestBothAgentPaths:
     async def test_non_streaming_cites_the_chunk_too(self):
         (citation,) = await _non_streamed(_agent(UNCITED_ANSWER, [_chunk()]))
         assert BILL in citation.document_id and citation.url == URL
+
+    async def test_chunks_that_are_not_the_pages_own_are_never_cited_even_when_the_words_match(self):
+        # gate 3 (reply 29): an answer about "no organizations" was cited to three unrelated organization chunks
+        org = _chunk(id="organization:14778-chunk-0", document_type="organization", source="ddp-broker")
+        del org.metadata["ocd_bill_id"]
+        other_bill = _chunk(id="bill-text:other:1-chunk-0", ocd_bill_id="a3f7c0d1-1111-4222-8333-444455556666")
+        agent = _agent(UNCITED_ANSWER, [org, other_bill])
+        assert await _streamed(agent) == [] and await _non_streamed(agent) == []
+
+    async def test_only_the_pages_own_chunk_is_cited_among_others_with_matching_words(self):
+        org = _chunk(id="organization:14778-chunk-0", document_type="organization", source="ddp-broker")
+        del org.metadata["ocd_bill_id"]
+        (citation,) = await _streamed(_agent(UNCITED_ANSWER, [org, _chunk()]))
+        assert citation.document_id.endswith("13717-chunk-4")
+
+    async def test_a_general_page_pins_nothing_so_it_gets_no_fallback_citations(self):
+        # "Who is Nancy Pelosi?" on a general page was cited to other legislators' offices
+        general = PageContext(type="general")
+        agent = _agent(UNCITED_ANSWER, [_chunk()], scope={})
+        assert await _streamed(agent, general) == [] and await _non_streamed(agent, general) == []
+
+    async def test_an_organization_page_cites_that_organizations_chunk_only(self):
+        page = PageContext(type="organization", id="42")
+        mine = _chunk(id="organization:42-chunk-0", broker_org_id="42")
+        theirs = _chunk(id="organization:43-chunk-0", broker_org_id="43", url=URL + "?o=43")
+        (citation,) = await _streamed(_agent(UNCITED_ANSWER, [theirs, mine], scope={"broker_org_id": "42"}), page)
+        assert citation.document_id == "organization:42-chunk-0"
 
     async def test_a_conversational_answer_keeps_no_citations_on_both_paths(self):
         agent = _agent("Thanks, glad to help! Anything else about this bill?", [_chunk()])
@@ -207,3 +238,45 @@ class TestOnTheWebsocketFrame:
         written = UNCITED_ANSWER + f"\n\n[Source: OpenStates archive]({URL})"
         (citation,) = self._stream_end(monkeypatch, written)["citations"]
         assert citation["document_id"].endswith("13717-chunk-4") and citation["url"] == URL
+
+
+class TestAgreesWithTheFiltersRetrievalBuilds:
+    """The scope is `filters_applied`, built by RetrievalService._build_filters. These tests build it the real
+    way for every page type and index, so a change to the filter keys breaks here instead of silently
+    turning the fallback off (or on for the wrong chunks)."""
+
+    # (name, index, page, the identity metadata the vectors really carry for that page). Written out by
+    # hand, NOT derived from the filters, so a renamed filter key fails here.
+    CASES = [
+        ("canonical bill", "ddp-knowledge-base", PageContext(type="bill", id="HB 1", ocd_bill_id=BILL), {"ocd_bill_id": BILL}),
+        ("legacy bill by webflow_id", "votebot-large", PageContext(type="bill", id="HB 1", webflow_id="wf-1"), {"webflow_id": "wf-1"}),
+        ("legacy bill by slug", "votebot-large", PageContext(type="bill", id="HB 1", slug="hb-1"), {"slug": "hb-1"}),
+        ("legislator", "ddp-knowledge-base", PageContext(type="legislator", id="ocd-person/1111"), {"legislator_id": "ocd-person/1111"}),
+        ("canonical organization", "ddp-knowledge-base", PageContext(type="organization", id="42"), {"broker_org_id": 42}),
+        ("legacy organization", "votebot-large", PageContext(type="organization", webflow_id="wf-org"), {"webflow_id": "wf-org"}),
+    ]
+
+    def _filters(self, index, page):
+        from votebot.core.retrieval import RetrievalService
+
+        service = RetrievalService.__new__(RetrievalService)
+        service.settings = Settings(pinecone_index_name=index, _env_file=None)
+        return service._build_filters(page)
+
+    async def test_the_pages_own_chunk_is_cited_and_a_chunk_of_another_page_is_not(self):
+        for name, index, page, identity in self.CASES:
+            scope = self._filters(index, page)
+            base = {"source": "src", "url": URL, "document_id": 13717}
+            mine = SearchResult(id="mine", content=BILL_TEXT, score=0.5, metadata={**base, **identity})
+            theirs = SearchResult(
+                id="theirs", content=BILL_TEXT, score=0.9,
+                metadata={**base, "url": URL + "?other", **{k: f"other-{v}" for k, v in identity.items()}},
+            )
+            cited = await _streamed(_agent(UNCITED_ANSWER, [theirs, mine], scope=scope), page)
+            assert [c.document_id for c in cited] == ["mine"], name  # an int broker id in the vector matches "42"
+
+    async def test_a_null_filter_value_never_matches_a_chunk_that_lacks_the_key(self):
+        # fail closed: str(None) == str(None) would otherwise let any chunk without the key through
+        bare = _chunk(id="bare")
+        for scope in ({"slug": None}, {"ocd_bill_id": None}, {"slug": ""}):
+            assert await _streamed(_agent(UNCITED_ANSWER, [bare], scope=scope)) == [], scope
