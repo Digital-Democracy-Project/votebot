@@ -225,6 +225,12 @@ script runs the same way). To rotate: change the secret, re-run the script, `doc
 open chats). To give VoteBot a secret of its own later: `VOTEBOT_SECRET_ID=votebot/credentials` (same key names) and
 `API_SOURCE_SECRET_ID=ddp-sync/credentials` to keep the shared api-v3 key.
 
+**After any edit to the shared secret in the console, run `infrastructure/render-env.sh --check` before leaving it.** On
+2026-10-07 four entries were added as `"key"="value"` instead of `"key": "value"`, the secret stopped parsing, and every
+`render-env.sh` failed (VoteBot's and ddp-sync's). ddp-sync's unit runs its own render as `ExecStartPre`, so a restart or reboot
+in that window would have left ddp-sync down. The check now says where the JSON is wrong (message, line and column, never a
+value). The previous secret version is the broken one after a fix, so do not roll back to it.
+
 **The file is rewritten in full on every run, so a hand edit of `.env` is lost.** Non-secret settings, including the
 cutover edits (`DDP_SITE_BASE_URL`, `ALLOWED_ORIGINS`), are changed in `prod.env.defaults` by a PR and re-rendered, with
 a `--check` first.

@@ -80,6 +80,10 @@ def fetch(secret_id):
         sys.exit(f"[render-env] could not read {secret_id}: {done.stderr.strip()[:300]}")
     try:
         doc = json.loads(done.stdout)
+    except json.JSONDecodeError as err:
+        # The decoder's message and position never hold the content ("Expecting ':' delimiter", line, column), and
+        # they say where an edit went wrong (a hand edit once wrote "key"="value"; nothing else rejected it).
+        sys.exit(f"[render-env] {secret_id} is not a JSON object: invalid JSON ({err.msg}, line {err.lineno} column {err.colno}); nothing was written")
     except ValueError:
         sys.exit(f"[render-env] {secret_id} is not a JSON object")  # never echo the content
     if not isinstance(doc, dict):
