@@ -286,8 +286,9 @@ in the namespace first, read-only, as in section 1.2's check). Then section 6, r
 
 Query logs are one JSONL file per day in `/opt/votebot-logs/queries` (visitors' messages and addresses). They are personal
 data, so they are aged out by `infrastructure/query-log-cleanup.sh` (VOTEBOT-20; decision 2026-10-07: a year at most): files
-older than 7 days are compressed, files older than 365 days are deleted (`COMPRESS_DAYS`, `DELETE_DAYS`, `LOG_DIR` override
-the defaults). The weekly quality report reads the last 7 days uncompressed. A plain logrotate rule does not fit: the files
+older than 7 whole days are compressed (a file is compressed once it is 8 days old), files older than 365 whole days are
+deleted (at 366 days); `COMPRESS_DAYS`, `DELETE_DAYS`, `LOG_DIR` override the defaults. A failed compress or delete is
+printed and makes the script exit 1, which cron mails to the operator. The weekly quality report reads the last 7 days uncompressed. A plain logrotate rule does not fit: the files
 are already named by day. The operator installs it (needs sudo; a name with a dot is skipped by `run-parts`, so no `.sh`):
 
 ```bash

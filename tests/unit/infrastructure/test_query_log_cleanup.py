@@ -5,6 +5,7 @@ Standard library only, so it also runs on a host without the project's dependenc
 """
 import gzip
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -32,9 +33,9 @@ class QueryLogCleanupTest(unittest.TestCase):
         os.utime(path, (stamp, stamp))
         return path
 
-    def run_script(self, *args, **env):
+    def run_script(self, *args, cwd=None, **env):
         full = dict(os.environ, **{"LOG_DIR": str(self.dir), **env})
-        return subprocess.run(["bash", str(SCRIPT), *args], env=full, capture_output=True, text=True)
+        return subprocess.run(["bash", str(SCRIPT), *args], env=full, capture_output=True, text=True, cwd=cwd)
 
     def test_a_file_older_than_a_week_is_compressed_and_keeps_its_content(self):
         self.make("2026-09-20.jsonl", 17, content="hello\n")
@@ -86,6 +87,56 @@ class QueryLogCleanupTest(unittest.TestCase):
         self.assertIn("already exists", r.stderr)
         self.assertEqual((self.dir / "d.jsonl").read_text(), "new\n")
         self.assertEqual(gzip.decompress((self.dir / "d.jsonl.gz").read_bytes()), b"old\n")
+
+    def test_a_name_with_a_space_or_a_newline_stays_one_path_and_nothing_outside_the_directory_is_touched(self):
+        outside = self.dir.parent / (self.dir.name + "-outside")
+        outside.mkdir()
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        bystander = outside / "b.jsonl"
+        bystander.write_text("keep")
+        stamp = time.time() - 500 * DAY
+        os.utime(bystander, (stamp, stamp))
+        self.make("two words.jsonl", 20)
+        self.make("line\nbreak.jsonl", 20)
+        self.make("-dash.jsonl", 20)
+        r = self.run_script(cwd=outside)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()),
+                         ["-dash.jsonl.gz", "line\nbreak.jsonl.gz", "two words.jsonl.gz"])
+        self.assertTrue(bystander.exists())
+
+    def test_the_age_thresholds_are_whole_days_and_a_dry_run_names_the_same_files_as_a_real_run(self):
+        self.make("day7_5.jsonl", 7.5)   # 7 whole days old: not yet
+        self.make("day8_5.jsonl", 8.5)   # 8: compressed
+        self.make("day364.jsonl.gz", 364.5)  # kept
+        self.make("day366.jsonl.gz", 366.5)  # deleted
+        dry = self.run_script("--dry-run").stdout
+        self.assertIn("would compress", dry)
+        self.assertIn("day8_5.jsonl", dry)
+        self.assertNotIn("day7_5.jsonl", dry)
+        self.assertIn("would delete", dry)
+        self.assertIn("day366.jsonl.gz", dry)
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["day364.jsonl.gz", "day7_5.jsonl", "day8_5.jsonl.gz"])
+
+    @unittest.skipIf(os.geteuid() == 0, "root can write anywhere, so a read-only directory proves nothing")
+    def test_a_failed_operation_is_reported_and_the_exit_status_says_so(self):
+        self.make("old.jsonl", 400)
+        self.dir.chmod(0o500)
+        self.addCleanup(lambda: self.dir.chmod(0o700))
+        r = self.run_script()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("FAILED to delete", r.stderr)
+        self.assertIn("1 operation(s) FAILED", r.stderr)
+
+    def test_the_script_runs_under_bash_as_cron_daily_will_run_it(self):
+        self.assertTrue(os.access(SCRIPT, os.X_OK))
+        self.assertEqual(SCRIPT.read_text().splitlines()[0], "#!/usr/bin/env bash")
+        self.make("old.jsonl", 20)
+        env = dict(os.environ, LOG_DIR=str(self.dir))
+        r = subprocess.run([str(SCRIPT)], env=env, capture_output=True, text=True, cwd="/")  # directly, no "bash" in front
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.dir / "old.jsonl.gz").exists())
 
     def test_bad_settings_stop_before_touching_anything(self):
         self.make("old.jsonl", 400)

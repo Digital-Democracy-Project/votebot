@@ -28,17 +28,24 @@ if [ -z "$LOG_DIR" ] || [ "$LOG_DIR" = "/" ] || [ ! -d "$LOG_DIR" ]; then
   echo "[query-log-cleanup] LOG_DIR is not a usable directory: '$LOG_DIR'" >&2; exit 2
 fi
 
-compressed=0; deleted=0
-# Delete first, so an old file is not compressed just to be removed. -mtime +N is "older than N full days".
-while IFS= read -r f; do
-  if [ "$DRY_RUN" = "1" ]; then echo "would delete   $f"; else rm -f -- "$f" && echo "deleted        $f"; fi
+compressed=0; deleted=0; failed=0
+# Paths are NUL-separated, so a name with a space or a newline is never split into two paths.
+# Delete first, so an old file is not compressed just to be removed. -mtime +N means modified more than N whole
+# days ago (N+1 days or more), so a file is compressed on its 8th day and deleted on its 366th.
+while IFS= read -r -d '' f; do
+  if [ "$DRY_RUN" = "1" ]; then printf 'would delete   %s\n' "$f"
+  elif rm -f -- "$f"; then printf 'deleted        %s\n' "$f"
+  else printf 'FAILED to delete %s\n' "$f" >&2; failed=$((failed + 1)); continue; fi
   deleted=$((deleted + 1))
-done < <(find "$LOG_DIR" -maxdepth 1 -type f \( -name '*.jsonl' -o -name '*.jsonl.gz' \) -mtime +"$DELETE_DAYS" | sort)
+done < <(find "$LOG_DIR" -maxdepth 1 -type f \( -name '*.jsonl' -o -name '*.jsonl.gz' \) -mtime +"$DELETE_DAYS" -print0 | sort -z)
 
-while IFS= read -r f; do
-  if [ -e "$f.gz" ]; then echo "skipped        $f ($f.gz already exists)" >&2; continue; fi
-  if [ "$DRY_RUN" = "1" ]; then echo "would compress $f"; else gzip -n -- "$f" && echo "compressed     $f"; fi
+while IFS= read -r -d '' f; do
+  if [ -e "$f.gz" ]; then printf 'skipped        %s (%s.gz already exists)\n' "$f" "$f" >&2; continue; fi
+  if [ "$DRY_RUN" = "1" ]; then printf 'would compress %s\n' "$f"
+  elif gzip -n -- "$f"; then printf 'compressed     %s\n' "$f"
+  else printf 'FAILED to compress %s\n' "$f" >&2; failed=$((failed + 1)); continue; fi
   compressed=$((compressed + 1))
-done < <(find "$LOG_DIR" -maxdepth 1 -type f -name '*.jsonl' -mtime +"$COMPRESS_DAYS" ! -mtime +"$DELETE_DAYS" | sort)
+done < <(find "$LOG_DIR" -maxdepth 1 -type f -name '*.jsonl' -mtime +"$COMPRESS_DAYS" ! -mtime +"$DELETE_DAYS" -print0 | sort -z)
 
 echo "[query-log-cleanup] $([ "$DRY_RUN" = "1" ] && echo 'dry run: ')$compressed to compress, $deleted to delete in $LOG_DIR"
+if [ "$failed" -gt 0 ]; then echo "[query-log-cleanup] $failed operation(s) FAILED" >&2; exit 1; fi
