@@ -245,13 +245,15 @@ class TestAgreesWithTheFiltersRetrievalBuilds:
     way for every page type and index, so a change to the filter keys breaks here instead of silently
     turning the fallback off (or on for the wrong chunks)."""
 
+    # (name, index, page, the identity metadata the vectors really carry for that page). Written out by
+    # hand, NOT derived from the filters, so a renamed filter key fails here.
     CASES = [
-        ("canonical bill", "ddp-knowledge-base", PageContext(type="bill", id="HB 1", ocd_bill_id=BILL)),
-        ("legacy bill by webflow_id", "votebot-large", PageContext(type="bill", id="HB 1", webflow_id="wf-1")),
-        ("legacy bill by slug", "votebot-large", PageContext(type="bill", id="HB 1", slug="hb-1")),
-        ("legislator", "ddp-knowledge-base", PageContext(type="legislator", id="ocd-person/1111")),
-        ("canonical organization", "ddp-knowledge-base", PageContext(type="organization", id="42")),
-        ("legacy organization", "votebot-large", PageContext(type="organization", webflow_id="wf-org")),
+        ("canonical bill", "ddp-knowledge-base", PageContext(type="bill", id="HB 1", ocd_bill_id=BILL), {"ocd_bill_id": BILL}),
+        ("legacy bill by webflow_id", "votebot-large", PageContext(type="bill", id="HB 1", webflow_id="wf-1"), {"webflow_id": "wf-1"}),
+        ("legacy bill by slug", "votebot-large", PageContext(type="bill", id="HB 1", slug="hb-1"), {"slug": "hb-1"}),
+        ("legislator", "ddp-knowledge-base", PageContext(type="legislator", id="ocd-person/1111"), {"legislator_id": "ocd-person/1111"}),
+        ("canonical organization", "ddp-knowledge-base", PageContext(type="organization", id="42"), {"broker_org_id": 42}),
+        ("legacy organization", "votebot-large", PageContext(type="organization", webflow_id="wf-org"), {"webflow_id": "wf-org"}),
     ]
 
     def _filters(self, index, page):
@@ -262,18 +264,19 @@ class TestAgreesWithTheFiltersRetrievalBuilds:
         return service._build_filters(page)
 
     async def test_the_pages_own_chunk_is_cited_and_a_chunk_of_another_page_is_not(self):
-        for name, index, page in self.CASES:
+        for name, index, page, identity in self.CASES:
             scope = self._filters(index, page)
-            assert scope, name
-            mine = _chunk(id="mine", **{k: v for k, v in scope.items()})
-            theirs = _chunk(id="theirs", url=URL + "?other", **{k: f"other-{v}" for k, v in scope.items()})
-            agent = _agent(UNCITED_ANSWER, [theirs, mine], scope=scope)
-            cited = await _streamed(agent, page)
-            assert [c.document_id for c in cited] == ["mine"], name
+            base = {"source": "src", "url": URL, "document_id": 13717}
+            mine = SearchResult(id="mine", content=BILL_TEXT, score=0.5, metadata={**base, **identity})
+            theirs = SearchResult(
+                id="theirs", content=BILL_TEXT, score=0.9,
+                metadata={**base, "url": URL + "?other", **{k: f"other-{v}" for k, v in identity.items()}},
+            )
+            cited = await _streamed(_agent(UNCITED_ANSWER, [theirs, mine], scope=scope), page)
+            assert [c.document_id for c in cited] == ["mine"], name  # an int broker id in the vector matches "42"
 
-    async def test_a_chunk_without_the_identity_key_is_not_cited_even_for_a_null_value(self):
-        # fail closed: a missing key must not match a filter value of None or ""
+    async def test_a_null_filter_value_never_matches_a_chunk_that_lacks_the_key(self):
+        # fail closed: str(None) == str(None) would otherwise let any chunk without the key through
         bare = _chunk(id="bare")
-        del bare.metadata["ocd_bill_id"]
-        for scope in ({"ocd_bill_id": BILL}, {"ocd_bill_id": BILL, "slug": None}, {"slug": ""}):
-            assert await _streamed(_agent(UNCITED_ANSWER, [bare], scope=scope)) == []
+        for scope in ({"slug": None}, {"ocd_bill_id": None}, {"slug": ""}):
+            assert await _streamed(_agent(UNCITED_ANSWER, [bare], scope=scope)) == [], scope
