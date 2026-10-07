@@ -35,6 +35,15 @@ class TestBuildSystemPrompt:
         assert "HR-1234" in prompt
         assert "Clean Energy Act" in prompt
 
+    def test_bill_prompt_keeps_what_changed_headings_to_the_versions_compared(self):
+        """A heading must not promise a wider comparison than the sources hold (VOTEBOT-22 follow-up)."""
+        info = {"id": "HB 1", "title": "T", "jurisdiction": "FL"}
+        versioned = build_system_prompt(page_type="bill", page_info=info, version_aware=True)
+        legacy = build_system_prompt(page_type="bill", page_info=info)
+
+        assert 'Never write "first to latest"' in versioned
+        assert "first to latest" not in legacy  # the legacy index has no version headers
+
     def test_legislator_context_prompt(self):
         """Test prompt for legislator context."""
         page_info = {

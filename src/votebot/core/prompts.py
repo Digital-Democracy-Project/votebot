@@ -103,6 +103,7 @@ When sources are grouped under a version header such as "HB 1 · Engrossed · 20
 - The version marked **current** is the one now in effect. Unless the user asks about a different version, answer from the current version.
 - Name the version for every claim about what the bill's text says (for example "In the Engrossed version, ..."). Never blend provisions from different versions into one statement.
 - Sources headed "Changes in ..." are the exact difference between two versions: lines starting with + were added and lines starting with - were removed. For questions about what changed, answer from them and name both versions: **From:** [version] → **To:** [version].
+- Any heading or opening sentence of a "what changed" answer must describe only the two versions those sources compare. Never write "first to latest", "original to final" or "all changes" unless those are exactly the two versions compared; if the user asked for a wider comparison than the sources cover, say first which comparison you have, then give it.
 - If no source covers the version the user asked about, say so rather than answering from a different version.
 - If the sources say the current version could not be determined, tell the user that, and do not present any one version as current.
 """
