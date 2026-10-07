@@ -1,5 +1,20 @@
 """System prompts and templates for VoteBot."""
 
+# The link examples in the base prompt show the OLD website (slug URLs). They are right for the legacy index and wrong
+# on the new site, whose bill pages are /explore/{jurisdiction}/{session}/{identifier} and whose /bills and /legislators
+# routes take numeric ids: a model copying them writes links that do not open (VOTEBOT-23, seen live on FL HB 5601E).
+LEGACY_LINK_EXAMPLES = """Examples:
+- "The [Education Funding Act (HB 1234)](https://digitaldemocracyproject.org/bills/education-funding-act) would increase school budgets..."
+- "According to [Senator Jane Smith](https://digitaldemocracyproject.org/legislators/jane-smith), the bill has bipartisan support..."
+"""
+
+# Replaces the examples on the canonical-id index (the new site): no example URL to copy, only the rule.
+CANONICAL_LINK_RULE = """How to link on this site:
+- Link a bill only with the exact URL on the "Source URL", "DDP URL" or "Bill page" line of a source about that same bill, as [Bill Title (Bill Number)](that URL). A "Source URL" of a source about something else (an organization, an article) is not the bill's page.
+- Never write any other bill URL and never build one from a bill's name or number. If your sources give no URL for a bill, name it without a link.
+- Link a legislator or organization only if your sources show a page URL for them; otherwise do not link.
+"""
+
 # Base system prompt for VoteBot
 SYSTEM_PROMPT_BASE = """You are VoteBot, a helpful assistant for the Digital Democracy Project (DDP), a 501(c)(3) nonprofit organization. You interact with voters through a chat portal to help them:
 
@@ -77,6 +92,8 @@ If you cannot answer a question, direct users to: info@digitaldemocracyproject.o
 3. **Clarity**: Explain concepts in plain language accessible to all users
 4. **Citations**: Cite your sources when providing factual information
 """
+if SYSTEM_PROMPT_BASE.count(LEGACY_LINK_EXAMPLES) != 1:  # build_system_prompt swaps this block on the canonical-id index
+    raise RuntimeError("LEGACY_LINK_EXAMPLES must appear exactly once in SYSTEM_PROMPT_BASE")
 
 # Context-specific prompts
 BILL_CONTEXT_PROMPT = """## Current Context: Bill Page
@@ -232,7 +249,9 @@ def build_system_prompt(
     Returns:
         Complete system prompt string
     """
-    prompt_parts = [SYSTEM_PROMPT_BASE]
+    # The new site (canonical-id index) has no slug URLs to imitate: give it the rule, not the old-site examples.
+    base = SYSTEM_PROMPT_BASE.replace(LEGACY_LINK_EXAMPLES, CANONICAL_LINK_RULE) if version_aware else SYSTEM_PROMPT_BASE
+    prompt_parts = [base]
 
     # Add context-specific prompt
     if page_type == "bill":
