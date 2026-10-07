@@ -59,6 +59,13 @@ class TestNonStreamingPath:
         assert "Legislator Profile" in prompts[0] and "Ashley Moody" in prompts[0]
         agent.legislators.find_by_name.assert_awaited_once()
 
+    async def test_a_named_person_on_a_general_page_gets_the_live_profile_too(self):
+        # VOTEBOT-24: the REST path used to skip the lookup on a general page unless the message had a cue word
+        agent, prompts = _agent()
+        await _ask(agent, PageContext(type="general"), "Who is Ashley Moody?")
+        assert "Legislator Profile" in prompts[0] and "Ashley Moody" in prompts[0]
+        agent.legislators.find_by_name.assert_awaited_once()
+
     async def test_the_retrieval_notes_reach_the_prompt(self):
         agent, prompts = _agent(notes=[DIFF_UNAVAILABLE_NOTE])
         await _ask(agent, PageContext(type="bill", id="HR 1", ocd_bill_id=BILL), "What changed in this bill?")

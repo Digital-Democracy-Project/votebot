@@ -20,6 +20,7 @@ from votebot.config import Settings
 from votebot.core.agent import LEGISLATOR_CUES, VoteBotAgent
 from votebot.services import legislators as legislators_module
 from votebot.services.legislators import (
+    NO_MATCH,
     UNAVAILABLE,
     Legislator,
     LegislatorLookupService,
@@ -206,16 +207,42 @@ class TestAgentContext:
         assert await agent._legislator_context_from_api_v3(message, PageContext(type="general")) == ""
         agent.legislators.find_by_name.assert_not_called()
 
-    async def test_nobody_matching_adds_nothing_but_a_failure_tells_the_model_it_could_not_look(self):
+    async def test_nobody_matching_says_so_and_a_failure_tells_the_model_it_could_not_look(self):
         bill = PageContext(type="bill", id="HB 1")
         agent = _agent(found=PeopleMatch())
-        assert await agent._legislator_context_from_api_v3("Senator Nobody", bill) == ""
+        none = await agent._legislator_context_from_api_v3("Senator Nobody", bill)
+        assert none == NO_MATCH.format(asked="Nobody") and "from memory" in none  # told not to supply a role or district
         agent.legislators.find_by_name = AsyncMock(return_value=None)  # api-v3 failed
         text = await agent._legislator_context_from_api_v3("Senator Nobody", bill)
         assert text == UNAVAILABLE and "from memory" in text
         agent.legislators.find_by_id = AsyncMock(return_value=None)
         page = PageContext(type="legislator", id=PERSON_ID)
         assert await agent._legislator_context_from_api_v3("hi", page) == UNAVAILABLE
+
+    @pytest.mark.parametrize("message", [
+        "Who is Nancy Pelosi and which district does she represent?",
+        "tell me about Ashley Moody",
+        "Who is Moody?",  # opens by asking who someone is: one word is enough
+        "How did Ashley Moody vote?",
+    ])
+    async def test_a_named_person_on_a_general_page_is_looked_up_with_or_without_a_cue_word(self, message):
+        # VOTEBOT-24: these were answered from the model's memory ("Who is Nancy Pelosi?" gave the district from training data)
+        agent = _agent()
+        text = await agent._legislator_context_from_api_v3(message, PageContext(type="general"))
+        agent.legislators.find_by_name.assert_awaited_once()
+        assert "Ashley Moody" in text  # the fake returns this person: the live profile reached the context
+
+    async def test_a_misspelled_name_finds_nobody_and_the_model_is_told_not_to_fill_it_in_from_memory(self):
+        # api-v3 matches substrings, not misspellings: "Nancy Pelsoi" matches nobody
+        agent = _agent(found=PeopleMatch())
+        text = await agent._legislator_context_from_api_v3("Who is Nancy Pelsoi?", PageContext(type="general"))
+        assert 'No legislator record matched "Nancy Pelsoi"' in text and "from memory" in text
+
+    @pytest.mark.parametrize("message", ["Who is AARP?", "Tell me about Florida", "Who is the governor?", "What is Medicaid"])
+    async def test_questions_with_no_possible_name_are_not_sent_to_api_v3(self, message):
+        agent = _agent()
+        assert await agent._legislator_context_from_api_v3(message, PageContext(type="general")) == ""
+        agent.legislators.find_by_name.assert_not_called()
 
     async def test_a_slow_api_v3_costs_the_profile_and_the_model_is_told(self, monkeypatch):
         import time
@@ -295,8 +322,22 @@ class TestReachesThePrompt:
             agent.settings = Settings(_env_file=None)  # legacy index
         return agent, prompts
 
-    async def _ask(self, agent, page):
-        return [c async for c in agent.process_message_stream(message="How did Ashley Moody vote?", session_id="s", page_context=page)]
+    async def _ask(self, agent, page, message="How did Ashley Moody vote?"):
+        return [c async for c in agent.process_message_stream(message=message, session_id="s", page_context=page)]
+
+    async def test_a_named_person_on_a_general_page_puts_the_profile_in_the_prompt(self):
+        # VOTEBOT-24: "Who is Nancy Pelosi...?" on a general page used to reach the model with no live record at all
+        agent, prompts = self._stream_agent(canonical=True)
+        agent.legislators = _agent().legislators
+        await self._ask(agent, PageContext(type="general"), "Who is Nancy Pelosi and which district does she represent?")
+        assert "Legislator Profile" in prompts[0] and "Ashley Moody" in prompts[0]
+        agent.legislators.find_by_name.assert_awaited_once()
+
+    async def test_a_misspelled_name_on_a_general_page_tells_the_model_not_to_answer_from_memory(self):
+        agent, prompts = self._stream_agent(canonical=True)
+        agent.legislators = _agent(found=PeopleMatch()).legislators
+        await self._ask(agent, PageContext(type="general"), "Who is Nancy Pelsoi?")
+        assert 'No legislator record matched "Nancy Pelsoi"' in prompts[0]
 
     async def test_canonical_index_puts_the_api_v3_profile_in_the_prompt(self):
         agent, prompts = self._stream_agent(canonical=True)

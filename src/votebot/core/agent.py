@@ -28,7 +28,7 @@ from votebot.services.broker_lookup import (
     format_org_details,
 )
 from votebot.services.bill_votes import BillVotesService
-from votebot.services.legislators import UNAVAILABLE, LegislatorLookupService, format_legislators
+from votebot.services.legislators import NO_MATCH, UNAVAILABLE, LegislatorLookupService, format_legislators
 from votebot.services.llm import BillVotesToolResult, LLMService, WebSearchCitation
 from votebot.services.openstates_client import openstates_base_url, openstates_headers
 from votebot.services.web_search import WebSearchService, WebSearchResult
@@ -80,6 +80,9 @@ NAME_STOPWORDS = frozenset(
     "congressperson legislator legislators delegate speaker assemblyman assemblywoman assemblymember lawmaker mr mrs "
     "ms dr hon".split()
 )
+
+# A message that opens by asking who someone is: one capitalised word is then enough ("Who is Pelosi?").
+ASKS_WHO = re.compile(r"\s*(who is|who's|who was|tell me about|what do you know about)\b", re.IGNORECASE)
 
 # A word that says the message is about a legislator, so a name in it is worth looking up.
 LEGISLATOR_CUES = re.compile(
@@ -2439,10 +2442,11 @@ class VoteBotAgent:
         The capitalised words of a message are only a guess at a name ("Summarize this bill" gives
         "Summarize"), and each guess costs a live call, so: acronyms (HB, AARP), state names, titles
         and question words are dropped, and unless the message has a legislator cue ("senator",
-        "representative"...) the name must be at least two words ("How did Ashley Moody vote?").
+        "representative"...) or opens by asking who someone is ("Who is ..."), the name must be at least
+        two words ("How did Ashley Moody vote?").
         `require_cue` demands the cue.
         """
-        cued = bool(LEGISLATOR_CUES.search(message))
+        cued = bool(LEGISLATOR_CUES.search(message)) or bool(ASKS_WHO.match(message))
         if require_cue and not cued:
             return None
         guess = cls._candidate_person_name(message)
@@ -2461,11 +2465,13 @@ class VoteBotAgent:
         """Legislator facts read live from api-v3 (canonical-id index: legislators are not embedded).
 
         A legislator page is answered about its legislator: by OpenStates person id when
-        `page_context.id` is one ("ocd-person/..."), else by the page's title (the name). On other
-        pages a name in the message is looked up on a bill page (as before) or when the message
-        has a legislator cue ("senator", "representative", ...), so an ordinary question that happens
-        to contain a capitalised word is not sent to api-v3. Several matches are listed for the
-        model to ask which one; a failure or a slow api-v3 costs the context, never the answer.
+        `page_context.id` is one ("ocd-person/..."), else by the page's title (the name). On every
+        other page a name in the message is looked up (VOTEBOT-24: a general page used to answer
+        "Who is Nancy Pelosi?" from the model's memory): with a legislator cue ("senator", ...) one
+        word is enough, without one it must be two, so an ordinary question that happens to contain a
+        capitalised word is not sent to api-v3. Several matches are listed for the model to ask which
+        one; nobody matching says so (and not to answer from memory); a failure or a slow api-v3 costs
+        the context, never the answer.
         """
         page_type = page_context.type if page_context else "general"
 
@@ -2477,14 +2483,17 @@ class VoteBotAgent:
                     return format_legislators(match) if match is not None else UNAVAILABLE
                 name, jurisdiction = page_context.title, page_context.jurisdiction
             else:
-                # A bill page may name a legislator without a cue word ("How did Ashley Moody vote?"),
-                # other pages need the cue; see _legislator_name_in
-                name, jurisdiction = self._legislator_name_in(message, require_cue=page_type != "bill"), None
+                # Any page may name a legislator, with or without a cue word ("Who is Nancy Pelosi?", "How did
+                # Ashley Moody vote?"); an uncued name must be two words, see _legislator_name_in
+                name, jurisdiction = self._legislator_name_in(message, require_cue=False), None
             if not name:
                 return ""
             match = await self.legislators.find_by_name(name, jurisdiction)
-            # None is api-v3 failing (the model is told so); no people is a name that is nobody
-            return format_legislators(match, asked=name) if match is not None else UNAVAILABLE
+            if match is None:  # api-v3 failing: the model is told so
+                return UNAVAILABLE
+            # no people is a name that is nobody (or a typo: api-v3 matches substrings, not misspellings), and the
+            # model is told not to supply that person's role, party or district from memory
+            return format_legislators(match, asked=name) or NO_MATCH.format(asked=name)
 
         try:
             return await asyncio.wait_for(lookup(), _enrichment_budget_left())
