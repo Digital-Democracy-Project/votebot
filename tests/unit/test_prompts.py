@@ -56,6 +56,32 @@ class TestBuildSystemPrompt:
         assert "https://digitaldemocracyproject.org/vote" in prompt  # the sign-up link is still there
         assert prompt.count("## Linking to Bills and Legislators") == 1  # the section was changed, not duplicated
 
+    def test_the_link_examples_appear_once_in_the_base_prompt_and_the_swap_replaces_exactly_them(self):
+        from votebot.core.prompts import CANONICAL_LINK_RULE, LEGACY_LINK_EXAMPLES
+
+        assert SYSTEM_PROMPT_BASE.count(LEGACY_LINK_EXAMPLES) == 1
+        prompt = build_system_prompt(page_type="general", version_aware=True)
+        assert prompt.count(CANONICAL_LINK_RULE) == 1
+        assert SYSTEM_PROMPT_BASE.replace(LEGACY_LINK_EXAMPLES, CANONICAL_LINK_RULE) in prompt
+
+    def test_a_canonical_bill_chunk_shows_our_page_as_its_source_url_and_no_old_style_ddp_url(self):
+        # what "Source URL" means on the new index (the rule allows it only for a source about the same bill):
+        # the chunk's own url, which retrieval has already mapped to our page; no slug, so no old-style "DDP URL"
+        chunk = {
+            "id": "bill-text:a3f7:1-chunk-0",
+            "content": "text",
+            "metadata": {
+                "source": "OpenStates archive", "document_type": "bill-text", "gov_id": "HB 5601E",
+                "url": "https://dev.digitaldemocracyproject.org/explore/FL/2026E/HB%205601E",
+                "source_url": "https://www.flsenate.gov/x.pdf",
+            },
+        }
+        text = format_retrieved_chunks([chunk])
+
+        assert "**Source URL:** https://dev.digitaldemocracyproject.org/explore/FL/2026E/HB%205601E" in text
+        assert "DDP URL" not in text
+        assert "/bills/" not in text
+
     def test_the_legacy_prompt_keeps_its_examples_unchanged(self):
         prompt = build_system_prompt(page_type="bill", page_info={"id": "HB 1", "title": "T"})
 

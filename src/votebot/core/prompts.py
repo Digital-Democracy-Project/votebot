@@ -10,7 +10,7 @@ LEGACY_LINK_EXAMPLES = """Examples:
 
 # Replaces the examples on the canonical-id index (the new site): no example URL to copy, only the rule.
 CANONICAL_LINK_RULE = """How to link on this site:
-- Link a bill only with the exact URL your sources give for that bill (a "Source URL", "DDP URL" or "Bill page" line), as [Bill Title (Bill Number)](that URL).
+- Link a bill only with the exact URL on the "Source URL", "DDP URL" or "Bill page" line of a source about that same bill, as [Bill Title (Bill Number)](that URL). A "Source URL" of a source about something else (an organization, an article) is not the bill's page.
 - Never write any other bill URL and never build one from a bill's name or number. If your sources give no URL for a bill, name it without a link.
 - Link a legislator or organization only if your sources show a page URL for them; otherwise do not link.
 """
@@ -92,7 +92,8 @@ If you cannot answer a question, direct users to: info@digitaldemocracyproject.o
 3. **Clarity**: Explain concepts in plain language accessible to all users
 4. **Citations**: Cite your sources when providing factual information
 """
-assert LEGACY_LINK_EXAMPLES in SYSTEM_PROMPT_BASE  # build_system_prompt swaps this block on the canonical-id index
+if SYSTEM_PROMPT_BASE.count(LEGACY_LINK_EXAMPLES) != 1:  # build_system_prompt swaps this block on the canonical-id index
+    raise RuntimeError("LEGACY_LINK_EXAMPLES must appear exactly once in SYSTEM_PROMPT_BASE")
 
 # Context-specific prompts
 BILL_CONTEXT_PROMPT = """## Current Context: Bill Page
