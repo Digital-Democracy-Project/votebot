@@ -44,6 +44,25 @@ class TestBuildSystemPrompt:
         assert 'Never write "first to latest"' in versioned
         assert "first to latest" not in legacy  # the legacy index has no version headers
 
+    @pytest.mark.parametrize("page_type", ["bill", "legislator", "organization", "general"])
+    def test_the_new_site_prompt_has_no_old_style_example_links_to_copy(self, page_type):
+        # VOTEBOT-23: a model copying "/bills/education-funding-act" wrote /bills/hb-5601e, which the new site cannot open
+        prompt = build_system_prompt(page_type=page_type, page_info={"id": "HB 1", "title": "T"}, version_aware=True)
+
+        assert "digitaldemocracyproject.org/bills/" not in prompt
+        assert "digitaldemocracyproject.org/legislators/" not in prompt
+        assert "Education Funding Act" not in prompt
+        assert "Never write any other bill URL and never build one from a bill's name or number" in prompt
+        assert "https://digitaldemocracyproject.org/vote" in prompt  # the sign-up link is still there
+        assert prompt.count("## Linking to Bills and Legislators") == 1  # the section was changed, not duplicated
+
+    def test_the_legacy_prompt_keeps_its_examples_unchanged(self):
+        prompt = build_system_prompt(page_type="bill", page_info={"id": "HB 1", "title": "T"})
+
+        assert SYSTEM_PROMPT_BASE in prompt
+        assert "digitaldemocracyproject.org/bills/education-funding-act" in prompt
+        assert "Never write any other bill URL" not in prompt
+
     def test_legislator_context_prompt(self):
         """Test prompt for legislator context."""
         page_info = {
