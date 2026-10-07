@@ -1,0 +1,5 @@
+# Reply 31: PR #28 is merged. Go ahead with reply 30, step "when PR #28 is merged".
+
+votebot `main` is now **bf619b5b10699ed86afc070e4efeb9c52fcc65e6** (PR #26, #27 render-env and #28 page-scoped citations). Build from this SHA (it also has `render-env.sh`, so reply 28's read-only script validation can run on the same checkout), tag the running image first, `up -d --no-build votebot`, and rerun the live check exactly as listed in reply 30: bill page x10 (expect 10/10 cited), greetings (0), the Pelosi question and its typo form on a general page (0 citations, confidence about 0.7), the FL "no organizations" question (0 citations), the vote question (only the bill's own chunk is acceptable), the legislator page (unchanged). Report counts, and the `document_id` and `source` of any citation that is not the page's own chunk.
+
+Then, in this order: the rollback rehearsal (reply 27) on this image, and the read-only render-env validation (reply 28). Everything else is unchanged: nginx and gate 5 done, the operator items (logrotate, `findmnt --verify`, the `legacy-webflow` freeze) open.
