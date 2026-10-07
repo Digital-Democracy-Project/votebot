@@ -74,16 +74,29 @@ def diff_scope_note(shown) -> str:
     asked while one comparison was read; without this the answer says it covered the whole history.
     `shown` is a list of (VersionDiff, characters shown or None when the whole diff is in the prompt).
     """
+    def clean(label):
+        """One line, no double quotes: a stored label goes into a quoted instruction and a markdown heading."""
+        return " ".join((label or "").replace('"', "'").split())
+
     parts = []
     for diff, shown_chars in shown:
-        before = diff.from_note or "the version before it (its name is not recorded)"
+        before = clean(diff.from_note) or "the version before it (its name is not recorded)"
         detail = ", ".join(x for x in (diff.stage, diff.date) if x)
-        label = f"{before} -> {diff.note or 'this version'}" + (f" ({detail})" if detail else "")
+        label = f"{before} -> {clean(diff.note) or 'this version'}" + (f" ({detail})" if detail else "")
         if shown_chars is not None:
             label += f" [only the first {shown_chars} of {len(diff.text)} characters of this diff were read]"
         parts.append(label)
+    heading = ""
+    if len(shown) == 1:
+        # The model wrote its own heading ("Earliest to Latest Version") over a body that was accurate, in 2 of 5 live
+        # runs after the wording rule alone, so with one comparison the heading is given to it. Only when BOTH versions
+        # have a recorded name: a made-up name in an "exact" heading would be worse than the model's own.
+        before, after = clean(shown[0][0].from_note), clean(shown[0][0].note)
+        if before and after:
+            heading = f'Start your answer with exactly this heading: "## What changed: {before} -> {after}". '
     return (
         "The live version records give only these comparison(s) for this question: " + "; ".join(parts) + ". "
+        + heading +
         "Name exactly these versions when you describe what changed from them, and do not present a comparison "
         "of any other pair of versions as if you had read it. If the user asked about a longer span (for example "
         "from the first version to the latest), say that only these comparison(s) were read and that earlier steps "
