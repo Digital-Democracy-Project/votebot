@@ -18,7 +18,7 @@ from votebot.api.schemas.chat import (
 from votebot.config import Settings, get_settings
 from votebot.core.citations import chunks_used_by
 from votebot.core.prompts import build_system_prompt, format_retrieved_chunks
-from votebot.core.retrieval import RetrievalService
+from votebot.core.retrieval import RetrievalResult, RetrievalService
 from votebot.services.bill_versions import current_version
 from votebot.services.broker_lookup import (
     BUDGET_SECONDS,
@@ -762,7 +762,7 @@ class VoteBotAgent:
             response=llm_response.content,
             retrieved_chunks=retrieval_result.chunks,
         )
-        citations = self._cite_chunks_used(llm_response.content, citations, retrieval_result.chunks, page_context)
+        citations = self._cite_chunks_used(llm_response.content, citations, retrieval_result, page_context)
 
         # Step 12: Calculate final confidence
         confidence = self._calculate_confidence(
@@ -1115,7 +1115,7 @@ class VoteBotAgent:
                     response=full_response,
                     retrieved_chunks=retrieval_result.chunks,
                 )
-                citations = self._cite_chunks_used(full_response, citations, retrieval_result.chunks, page_context)
+                citations = self._cite_chunks_used(full_response, citations, retrieval_result, page_context)
 
                 confidence = self._calculate_confidence(
                     response=full_response,
@@ -1238,20 +1238,31 @@ class VoteBotAgent:
         self,
         response: str,
         citations: list[Citation],
-        retrieved_chunks: list,
+        retrieval_result: RetrievalResult,
         page_context: PageContext,
     ) -> list[Citation]:
-        """Citations the model wrote, else the retrieved chunks the answer was built from.
+        """Citations the model wrote, else the page's own retrieved chunks the answer was built from.
 
         The model writes an explicit [Source: ...] only some of the time (VOTEBOT-21), so an answer
         built from retrieved text could reach the user with no sources. When it wrote none, cite the
-        chunks the answer shares distinctive words with (`core/citations.py`); an answer that shares
-        none (a greeting, a refusal, a live-data answer) still gets no citations.
+        chunks the answer shares distinctive words with (`core/citations.py`), but ONLY chunks that
+        carry the identity the retrieval was pinned to (`filters_applied`: the bill's ocd_bill_id, the
+        organization's id, ...). Retrieval also returns organization and legislator chunks found by
+        similarity for other questions; word overlap with those is coincidence, and a source link under
+        a statement it does not support is worse than none. A general page pins nothing, so it gets no
+        fallback citations. An answer that says it does not know gets none either.
         """
         if citations or not self.settings.deterministic_citations:
             return citations
         if any(phrase in response.lower() for phrase in UNCERTAINTY_PHRASES):
             return citations
+        scope = retrieval_result.filters_applied
+        if not scope:
+            return citations
+        page_chunks = [
+            chunk for chunk in retrieval_result.chunks
+            if all(str(chunk.metadata.get(key)) == str(value) for key, value in scope.items())
+        ]
         page_text = " ".join(filter(None, [page_context.id, page_context.title, page_context.jurisdiction]))
         cited = [
             Citation(
@@ -1261,10 +1272,10 @@ class VoteBotAgent:
                 url=chunk.metadata.get("url"),
                 relevance_score=chunk.score,
             )
-            for chunk in chunks_used_by(response, retrieved_chunks, page_text)
+            for chunk in chunks_used_by(response, page_chunks, page_text)
         ]
         if cited:
-            logger.info("Cited retrieved chunks the model did not cite", citations=len(cited), chunks=len(retrieved_chunks))
+            logger.info("Cited retrieved chunks the model did not cite", citations=len(cited), chunks=len(page_chunks))
         return cited
 
     def _extract_citations(
