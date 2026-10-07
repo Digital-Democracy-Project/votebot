@@ -16,6 +16,7 @@ from votebot.api.schemas.chat import (
     ResponseMetadata,
 )
 from votebot.config import Settings, get_settings
+from votebot.core.citations import chunks_used_by
 from votebot.core.prompts import build_system_prompt, format_retrieved_chunks
 from votebot.core.retrieval import RetrievalService
 from votebot.services.bill_versions import current_version
@@ -757,6 +758,7 @@ class VoteBotAgent:
             response=llm_response.content,
             retrieved_chunks=retrieval_result.chunks,
         )
+        citations = self._cite_chunks_used(llm_response.content, citations, retrieval_result.chunks, page_context)
 
         # Step 12: Calculate final confidence
         confidence = self._calculate_confidence(
@@ -1109,6 +1111,7 @@ class VoteBotAgent:
                     response=full_response,
                     retrieved_chunks=retrieval_result.chunks,
                 )
+                citations = self._cite_chunks_used(full_response, citations, retrieval_result.chunks, page_context)
 
                 confidence = self._calculate_confidence(
                     response=full_response,
@@ -1226,6 +1229,34 @@ class VoteBotAgent:
             "session": getattr(page_context, "session", None),
             "url": page_context.url,
         }
+
+    def _cite_chunks_used(
+        self,
+        response: str,
+        citations: list[Citation],
+        retrieved_chunks: list,
+        page_context: PageContext,
+    ) -> list[Citation]:
+        """Citations the model wrote, else the retrieved chunks the answer was built from.
+
+        The model writes an explicit [Source: ...] only some of the time (VOTEBOT-21), so an answer
+        built from retrieved text could reach the user with no sources. When it wrote none, cite the
+        chunks the answer shares distinctive words with (`core/citations.py`); an answer that shares
+        none (a greeting, a refusal, a live-data answer) still gets no citations.
+        """
+        if citations or not self.settings.deterministic_citations:
+            return citations
+        page_text = " ".join(filter(None, [page_context.id, page_context.title, page_context.jurisdiction]))
+        return [
+            Citation(
+                source=chunk.metadata.get("source", "Unknown"),
+                document_id=chunk.id,
+                excerpt=chunk.content[:200],
+                url=chunk.metadata.get("url"),
+                relevance_score=chunk.score,
+            )
+            for chunk in chunks_used_by(response, retrieved_chunks, page_text)
+        ]
 
     def _extract_citations(
         self,
