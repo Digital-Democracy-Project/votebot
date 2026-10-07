@@ -178,6 +178,8 @@ class TestStreaming:
             conn.receive_json()
             conn.send_json(_user_message("What does this bill do?"))
             end = _read_until(conn, "stream_end")[-1]["payload"]
+        # the computed value, exactly as before: 0.5 base + 0.2 retrieved + citation boosts, nothing from the cached branch
+        assert end["confidence"] == ws.calculate_confidence("The bill does X.", 3, end["citations"])
         assert end["confidence"] != 0.9
 
     def test_an_agent_failure_is_reported_as_a_processing_error(self, client):

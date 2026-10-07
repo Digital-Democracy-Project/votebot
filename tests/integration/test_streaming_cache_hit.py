@@ -161,6 +161,9 @@ async def test_streaming_cache_hit_preserves_grounding_metadata(
     assert chunks[0].done is False
     assert chunks[0].text == cached_v2_payload["response"]
     assert chunks[-1].done is True
+    # The websocket scores a saved answer from this flag (VOTEBOT-15): it must be on the final chunk, with no retrieval.
+    assert chunks[-1].metadata.cached is True
+    assert chunks[-1].metadata.retrieval_count == 0
 
     # _log_query is fire-and-forget via asyncio.create_task; give it a tick.
     import asyncio
