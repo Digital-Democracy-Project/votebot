@@ -16,6 +16,7 @@ from votebot.api.schemas.chat import (
     ResponseMetadata,
 )
 from votebot.config import Settings, get_settings
+from votebot.core.citations import chunks_used_by
 from votebot.core.prompts import build_system_prompt, format_retrieved_chunks
 from votebot.core.retrieval import RetrievalService
 from votebot.services.bill_versions import current_version
@@ -69,6 +70,10 @@ US_STATES = frozenset(
 )
 
 # Capitalised words that are titles or question words, never part of a name ("Rep. Smith", "Who Moody")
+# An answer that says it does not know (confidence penalty, and no fallback citations: such an answer
+# can still repeat words from the chunks it failed to use).
+UNCERTAINTY_PHRASES = ("i'm not sure", "i don't know", "i cannot find", "no information", "unclear")
+
 NAME_STOPWORDS = frozenset(
     "who whom whose what which when where why how is are was were did does do can could would should will tell show "
     "explain give list find senator sen rep reps representative representatives congressman congressmen congresswoman "
@@ -757,6 +762,7 @@ class VoteBotAgent:
             response=llm_response.content,
             retrieved_chunks=retrieval_result.chunks,
         )
+        citations = self._cite_chunks_used(llm_response.content, citations, retrieval_result.chunks, page_context)
 
         # Step 12: Calculate final confidence
         confidence = self._calculate_confidence(
@@ -1109,6 +1115,7 @@ class VoteBotAgent:
                     response=full_response,
                     retrieved_chunks=retrieval_result.chunks,
                 )
+                citations = self._cite_chunks_used(full_response, citations, retrieval_result.chunks, page_context)
 
                 confidence = self._calculate_confidence(
                     response=full_response,
@@ -1226,6 +1233,39 @@ class VoteBotAgent:
             "session": getattr(page_context, "session", None),
             "url": page_context.url,
         }
+
+    def _cite_chunks_used(
+        self,
+        response: str,
+        citations: list[Citation],
+        retrieved_chunks: list,
+        page_context: PageContext,
+    ) -> list[Citation]:
+        """Citations the model wrote, else the retrieved chunks the answer was built from.
+
+        The model writes an explicit [Source: ...] only some of the time (VOTEBOT-21), so an answer
+        built from retrieved text could reach the user with no sources. When it wrote none, cite the
+        chunks the answer shares distinctive words with (`core/citations.py`); an answer that shares
+        none (a greeting, a refusal, a live-data answer) still gets no citations.
+        """
+        if citations or not self.settings.deterministic_citations:
+            return citations
+        if any(phrase in response.lower() for phrase in UNCERTAINTY_PHRASES):
+            return citations
+        page_text = " ".join(filter(None, [page_context.id, page_context.title, page_context.jurisdiction]))
+        cited = [
+            Citation(
+                source=chunk.metadata.get("source", "Unknown"),
+                document_id=chunk.id,
+                excerpt=chunk.content[:200],
+                url=chunk.metadata.get("url"),
+                relevance_score=chunk.score,
+            )
+            for chunk in chunks_used_by(response, retrieved_chunks, page_text)
+        ]
+        if cited:
+            logger.info("Cited retrieved chunks the model did not cite", citations=len(cited), chunks=len(retrieved_chunks))
+        return cited
 
     def _extract_citations(
         self,
@@ -1436,15 +1476,8 @@ class VoteBotAgent:
             confidence += 0.1
 
         # Penalty for uncertainty phrases
-        uncertainty_phrases = [
-            "i'm not sure",
-            "i don't know",
-            "i cannot find",
-            "no information",
-            "unclear",
-        ]
         response_lower = response.lower()
-        for phrase in uncertainty_phrases:
+        for phrase in UNCERTAINTY_PHRASES:
             if phrase in response_lower:
                 confidence -= 0.15
                 break

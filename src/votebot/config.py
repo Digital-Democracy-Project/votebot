@@ -154,6 +154,9 @@ class Settings(BaseSettings):
 
     # Prompt tuning toggles
     enhanced_citation_prompt: bool = False  # env: VOTEBOT_ENHANCED_CITATION_PROMPT
+    # Cite the retrieved chunks an answer was built from when the model wrote no [Source: ...]
+    # (VOTEBOT-21). Off = only citations the model wrote. env: VOTEBOT_DETERMINISTIC_CITATIONS
+    deterministic_citations: bool = True
 
     # Slack Integration (for human handoff)
     slack_bot_token: SecretStr = Field(default=SecretStr(""))
