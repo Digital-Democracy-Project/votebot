@@ -126,9 +126,11 @@ UNAVAILABLE = (
 
 NO_MATCH = (
     "## No legislator record matched \"{asked}\"\n"
-    "Current legislator records have nobody by that name. Do not state a legislator's current role, party or "
-    "district for \"{asked}\" from memory; if the user seems to mean a legislator, say you could not find that "
-    "name and ask for the exact name. Ignore this if the user is not asking about a legislator."
+    "\"{asked}\" is a name taken from the user's message, and the current legislator records have no one whose "
+    "name contains it (the match is on the letters of the name, so a misspelling finds nobody). Do not state a "
+    "legislator's current role, party or district for \"{asked}\" from memory; if the user seems to mean a "
+    "legislator, say you could not find that name and ask for the exact name. Ignore this if the user is not "
+    "asking about a legislator."
 )
 
 

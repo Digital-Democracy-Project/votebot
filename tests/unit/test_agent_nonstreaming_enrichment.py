@@ -66,6 +66,18 @@ class TestNonStreamingPath:
         assert "Legislator Profile" in prompts[0] and "Ashley Moody" in prompts[0]
         agent.legislators.find_by_name.assert_awaited_once()
 
+    async def test_nobody_matching_and_an_outage_are_told_to_the_model_on_this_path_too(self):
+        from votebot.services.legislators import NO_MATCH, UNAVAILABLE, PeopleMatch
+
+        agent, prompts = _agent()
+        agent.legislators.find_by_name = AsyncMock(return_value=PeopleMatch())
+        await _ask(agent, PageContext(type="general"), "Who is Nancy Pelsoi?")
+        assert NO_MATCH.format(asked="Nancy Pelsoi") in prompts[0]
+        agent, prompts = _agent()
+        agent.legislators.find_by_name = AsyncMock(return_value=None)
+        await _ask(agent, PageContext(type="general"), "Who is Nancy Pelosi?")
+        assert UNAVAILABLE in prompts[0]
+
     async def test_the_retrieval_notes_reach_the_prompt(self):
         agent, prompts = _agent(notes=[DIFF_UNAVAILABLE_NOTE])
         await _ask(agent, PageContext(type="bill", id="HR 1", ocd_bill_id=BILL), "What changed in this bill?")

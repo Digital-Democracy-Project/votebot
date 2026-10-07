@@ -81,8 +81,13 @@ NAME_STOPWORDS = frozenset(
     "ms dr hon".split()
 )
 
-# A message that opens by asking who someone is: one capitalised word is then enough ("Who is Pelosi?").
+# A message that opens by asking who someone is: the words after it are taken as a name even when typed in
+# lower case ("who is nancy pelosi"), and one word is enough ("Who is Pelosi?") when it names exactly one person.
 ASKS_WHO = re.compile(r"\s*(who is|who's|who was|tell me about|what do you know about)\b", re.IGNORECASE)
+# Words that end a name after ASKS_WHO ("who is nancy pelosi and which district...").
+NAME_BREAKERS = frozenset(
+    "and which what where how when why does do is are was were in of from for the a an that who whom with about".split()
+)
 
 # A word that says the message is about a legislator, so a name in it is worth looking up.
 LEGISLATOR_CUES = re.compile(
@@ -2435,6 +2440,22 @@ class VoteBotAgent:
         name_parts = [w for w in message.split() if len(w) > 1 and w[0].isupper() and w.lower() not in common_words]
         return " ".join(name_parts) or None
 
+    @staticmethod
+    def _name_after_asks_who(message: str) -> list[str]:
+        """The words after "Who is" / "Tell me about", up to a word that ends a name, in title case
+        ("who is nancy pelosi and which district..." -> ["Nancy", "Pelosi"]); at most three."""
+        words: list[str] = []
+        for raw in ASKS_WHO.sub("", message, count=1).split():
+            stripped = raw.strip("?.,!;:()\"'")
+            possessive = stripped.lower().endswith(("'s", "\u2019s"))  # "Pelosi's district": the name ends here
+            bare = re.sub(r"(?i)['\u2019]s$", "", stripped)
+            if not bare or bare.lower() in NAME_BREAKERS:
+                break
+            words.append(bare.title() if bare.islower() else bare)
+            if possessive or len(words) == 3 or raw[-1] in "?.,!;:":
+                break
+        return words
+
     @classmethod
     def _legislator_name_in(cls, message: str, require_cue: bool) -> str | None:
         """A name in the message worth a live `/people` lookup, or None.
@@ -2442,18 +2463,23 @@ class VoteBotAgent:
         The capitalised words of a message are only a guess at a name ("Summarize this bill" gives
         "Summarize"), and each guess costs a live call, so: acronyms (HB, AARP), state names, titles
         and question words are dropped, and unless the message has a legislator cue ("senator",
-        "representative"...) or opens by asking who someone is ("Who is ..."), the name must be at least
-        two words ("How did Ashley Moody vote?").
+        "representative"...) or opens by asking who someone is ("Who is ...", also in lower case), the
+        name must be at least two words ("How did Ashley Moody vote?").
         `require_cue` demands the cue.
         """
-        cued = bool(LEGISLATOR_CUES.search(message)) or bool(ASKS_WHO.match(message))
+        asks_who = bool(ASKS_WHO.match(message))
+        cued = bool(LEGISLATOR_CUES.search(message)) or asks_who
         if require_cue and not cued:
             return None
+
+        def keep(words: list[str]) -> list[str]:
+            return [t for t in (w.strip("?.,!;:()\"'") for w in words)
+                    if t and not t.isupper() and t.lower() not in US_STATES | NAME_STOPWORDS]
+
         guess = cls._candidate_person_name(message)
-        if not guess:
-            return None
-        tokens = [t.strip("?.,!;:()\"'") for t in guess.split()]
-        tokens = [t for t in tokens if t and not t.isupper() and t.lower() not in US_STATES | NAME_STOPWORDS]
+        tokens = keep(guess.split()) if guess else []
+        if asks_who and not tokens:
+            tokens = keep(cls._name_after_asks_who(message))  # typed in lower case
         first_word = message.split()[0].strip("?.,!") if message.split() else ""
         if not cued and len(tokens) >= 3 and tokens[0] == first_word:
             tokens = tokens[1:]  # "Tell Ashley Moody ..." -> "Ashley Moody"
@@ -2489,6 +2515,11 @@ class VoteBotAgent:
             if not name:
                 return ""
             match = await self.legislators.find_by_name(name, jurisdiction)
+            if " " not in name and not LEGISLATOR_CUES.search(message):
+                # One bare word after "Who is" ("Tell me about Jordan") may be a country, a company, a surname
+                # shared by many: trusted only when it names exactly one person; otherwise nothing is added
+                one = match is not None and len(match.people) == 1 and match.total == 1
+                return format_legislators(match, asked=name) if one else ""
             if match is None:  # api-v3 failing: the model is told so
                 return UNAVAILABLE
             # no people is a name that is nobody (or a typo: api-v3 matches substrings, not misspellings), and the

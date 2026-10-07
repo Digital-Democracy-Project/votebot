@@ -238,6 +238,43 @@ class TestAgentContext:
         text = await agent._legislator_context_from_api_v3("Who is Nancy Pelsoi?", PageContext(type="general"))
         assert 'No legislator record matched "Nancy Pelsoi"' in text and "from memory" in text
 
+    async def test_a_name_typed_in_lower_case_after_who_is_is_still_looked_up(self):
+        agent = _agent()
+        await agent._legislator_context_from_api_v3(
+            "who is nancy pelosi and which district does she represent", PageContext(type="general"))
+        agent.legislators.find_by_name.assert_awaited_once_with("Nancy Pelosi", None)
+        agent2 = _agent()
+        await agent2._legislator_context_from_api_v3("who's pelosi's district?", PageContext(type="general"))
+        agent2.legislators.find_by_name.assert_awaited_once_with("Pelosi", None)
+
+    async def test_lower_case_without_who_is_is_not_taken_for_a_name(self):
+        agent = _agent()
+        assert await agent._legislator_context_from_api_v3("how did ashley moody vote?", PageContext(type="general")) == ""
+        agent.legislators.find_by_name.assert_not_called()
+
+    async def test_one_bare_word_names_a_person_only_when_exactly_one_person_matches(self):
+        # "Tell me about Jordan" may be a country, a company or a surname shared by many: never guess among them
+        general = PageContext(type="general")
+        many = PeopleMatch([Legislator(f"ocd-person/{n}", f"Jordan {n}", "Republican", "Representative", "House", "OH", "US", True)
+                            for n in range(3)], 3)
+        assert await _agent(found=many)._legislator_context_from_api_v3("Tell me about Jordan", general) == ""
+        assert await _agent(found=PeopleMatch())._legislator_context_from_api_v3("Tell me about Jordan", general) == ""
+        failing = _agent()
+        failing.legislators.find_by_name = AsyncMock(return_value=None)
+        assert await failing._legislator_context_from_api_v3("Tell me about Jordan", general) == ""  # no claim either way
+        assert "Ashley Moody" in await _agent()._legislator_context_from_api_v3("Tell me about Moody", general)
+
+    async def test_a_cue_word_makes_one_word_enough_as_before(self):
+        agent = _agent(found=PeopleMatch())
+        assert "No legislator record matched" in await agent._legislator_context_from_api_v3(
+            "Who is Senator Nobody?", PageContext(type="general"))
+
+    async def test_a_two_word_name_that_is_not_a_person_gets_only_a_hedged_note(self):
+        agent = _agent(found=PeopleMatch())
+        text = await agent._legislator_context_from_api_v3("Tell me about Planned Parenthood", PageContext(type="general"))
+        assert 'matched "Planned Parenthood"' in text and "Ignore this if the user is not asking about a legislator" in text
+        assert "nobody by that name" not in text  # it must not claim more than the substring match established
+
     @pytest.mark.parametrize("message", ["Who is AARP?", "Tell me about Florida", "Who is the governor?", "What is Medicaid"])
     async def test_questions_with_no_possible_name_are_not_sent_to_api_v3(self, message):
         agent = _agent()
@@ -332,6 +369,13 @@ class TestReachesThePrompt:
         await self._ask(agent, PageContext(type="general"), "Who is Nancy Pelosi and which district does she represent?")
         assert "Legislator Profile" in prompts[0] and "Ashley Moody" in prompts[0]
         agent.legislators.find_by_name.assert_awaited_once()
+
+    async def test_an_unavailable_api_v3_on_a_general_page_tells_the_model_it_could_not_look(self):
+        agent, prompts = self._stream_agent(canonical=True)
+        agent.legislators = _agent().legislators
+        agent.legislators.find_by_name = AsyncMock(return_value=None)
+        await self._ask(agent, PageContext(type="general"), "Who is Nancy Pelosi?")
+        assert UNAVAILABLE in prompts[0]
 
     async def test_a_misspelled_name_on_a_general_page_tells_the_model_not_to_answer_from_memory(self):
         agent, prompts = self._stream_agent(canonical=True)
