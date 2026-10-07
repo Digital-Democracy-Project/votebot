@@ -67,6 +67,23 @@ DIFF_NONE_NOTE = (
 )
 
 
+def diff_scope_note(shown) -> str:
+    """Names the exact version pairs the diffs below compare, so the answer cannot claim a wider span.
+
+    api-v3 may hold a diff only for the latest steps of a bill, so "first version to latest" can be
+    asked while one comparison was read; without this the answer says it covered the whole history.
+    """
+    pairs = "; ".join(
+        f"{d.from_note or 'the version before it'} -> {d.note} ({d.stage}, {d.date})" for d in shown
+    )
+    return (
+        f"The only version comparison(s) read: {pairs}. When you describe what changed, name exactly these "
+        "versions. Do not describe changes between any other pair of versions; if the user asked about a longer "
+        "span (for example from the first version to the latest), say that only these comparison(s) were read "
+        "and that earlier steps were not compared."
+    )
+
+
 @dataclass
 class ExtractedBillInfo:
     """Bill information extracted from query text."""
@@ -1229,11 +1246,13 @@ class RetrievalService:
                 notes.append(DIFF_NONE_NOTE)
             return []
         chunks: list[SearchResult] = []
+        shown: list = []
         remaining, omitted, truncated = DIFF_MAX_CHARS, 0, 0
         for diff in diffs:
             if remaining <= 0:
                 omitted += 1
                 continue
+            shown.append(diff)
             text = diff.text[:remaining]
             if len(diff.text) > remaining:
                 truncated += 1
@@ -1258,6 +1277,8 @@ class RetrievalService:
                         },
                     )
                 )
+        if notes is not None:
+            notes.append(diff_scope_note(shown))
         if omitted and notes is not None:
             notes.append(f"The changes of {omitted} further matching version(s) are omitted for length; say so if asked.")
         logger.info(

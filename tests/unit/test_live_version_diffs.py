@@ -173,6 +173,34 @@ class TestRetrievalPhaseFive:
         result = await _retrieval().retrieve("what changed in the introduced version?", _bill())
         assert result.notes == [DIFF_NONE_NOTE] and "first version" in DIFF_NONE_NOTE
 
+    async def test_the_answer_is_told_exactly_which_versions_were_compared(self):
+        # "first and latest" was answered as if the whole history had been compared; only the last pair was read
+        result = await _retrieval().retrieve("What changed between the first and the latest version?", _bill())
+        (note,) = [n for n in result.notes if "version comparison(s) read" in n]
+        assert "Engrossed -> Enrolled (final_passage, 2026-04-01)" in note
+        assert "only these comparison(s) were read" in note and "earlier steps were not compared" in note
+        assert "Introduced" not in note  # not a pair that was compared
+
+    async def test_each_comparison_read_is_named_and_an_omitted_one_is_not(self):
+        big = "+" + "y" * 9000
+        api = {"versions": [
+            _version("Amendment A", "2026-02-01", "amendment", 0, 201, None),
+            _version("Amendment B", "2026-02-02", "amendment", 1, 202, big),
+            _version("Amendment C", "2026-02-03", "amendment", 2, 203, big),
+            _version("Amendment D", "2026-02-04", "amendment", 3, 204, big),
+        ]}
+        result = await _retrieval(api).retrieve("what changed in the amended version?", _bill())
+        (note,) = [n for n in result.notes if "version comparison(s) read" in n]
+        assert "Amendment A -> Amendment B" in note and "Amendment B -> Amendment C" in note
+        assert "Amendment D" not in note  # it had no budget left, and has its own "omitted" note
+
+    async def test_a_version_with_no_recorded_predecessor_is_still_named_without_inventing_one(self):
+        from votebot.core.retrieval import diff_scope_note
+        from votebot.services.bill_versions import VersionDiff
+
+        shown = [VersionDiff("9", "Enrolled", "2026-04-01", "final_passage", None, None, "+ x")]
+        assert "the version before it -> Enrolled (final_passage, 2026-04-01)" in diff_scope_note(shown)
+
     async def test_an_ordinary_question_adds_no_notes(self):
         assert (await _retrieval().retrieve("what does this bill do?", _bill())).notes == []
 
