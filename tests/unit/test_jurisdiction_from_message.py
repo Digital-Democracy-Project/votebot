@@ -19,6 +19,8 @@ guess = VoteBotAgent._extract_jurisdiction_from_message
     "Which campus is mentioned?",
     "Tell us about this bill",
     "How did the vote on this bill go?",
+    "Is this a USA bill?",  # an acronym that merely contains US
+    "Does the USDA fund this?",
 ])
 def test_no_jurisdiction_is_guessed_from_letters_inside_words_or_the_pronoun(message):
     assert guess(None, message) is None
@@ -31,6 +33,12 @@ def test_no_jurisdiction_is_guessed_from_letters_inside_words_or_the_pronoun(mes
     "Tell me about the United States bill",
     "US HR 1 vote",
     "What does the US bill do?",
+    "Is this a U.S., not state, bill?",   # punctuation after the abbreviation
+    "Is it a U.S.? I mean federal",
+    "Was a congressional bill filed?",
+    "Is this federally funded legislation?",
+    "what does the us bill do?",          # lower-case country abbreviation before 'bill'
+    "us hr 1 vote",
 ])
 def test_a_federal_bill_is_still_recognised(message):
     assert guess(None, message) == "US"
@@ -39,3 +47,4 @@ def test_a_federal_bill_is_still_recognised(message):
 def test_a_named_state_still_wins():
     assert guess(None, "What is the status of Texas HB 5?") == "TX"
     assert guess(None, "status of VA HB 2724") == "VA"
+    assert guess(None, "Was Texas HB 5 discussed in Congress?") == "TX"  # a state beats a federal word
