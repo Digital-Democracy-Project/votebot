@@ -217,6 +217,23 @@ class TestRetrievalPhaseFive:
         note = diff_scope_note([(VersionDiff("9", "H 7089 er", "d", "final_passage", "H 7089 e2", "8", "+ x"), None)])
         assert 'Start your answer with exactly this heading: "## What changed: H 7089 e2 -> H 7089 er"' in note
 
+    async def test_no_heading_is_forced_when_a_version_has_no_usable_name(self):
+        from votebot.core.retrieval import diff_scope_note
+        from votebot.services.bill_versions import VersionDiff
+
+        for from_note, note in ((None, "B"), ("", "B"), ("   ", "B"), ("A", None), ("A", " \n "), (None, None)):
+            note_text = diff_scope_note([(VersionDiff("9", note, "", "", from_note, "8", "+ x"), None)])
+            assert "exactly this heading" not in note_text, (from_note, note)
+            assert "->" in note_text  # the comparison is still named, with the existing fallback wording
+
+    async def test_a_label_is_one_line_without_double_quotes_and_is_the_same_in_heading_and_comparison(self):
+        from votebot.core.retrieval import diff_scope_note
+        from votebot.services.bill_versions import VersionDiff
+
+        note = diff_scope_note([(VersionDiff("9", 'B "final"\n## x', "", "", "  A\tone ", "8", "+ x"), None)])
+        assert 'exactly this heading: "## What changed: A one -> B \'final\' ## x"' in note
+        assert "A one -> B 'final' ## x." in note  # the comparison line uses the same cleaned labels
+
     async def test_several_comparisons_get_no_single_heading(self):
         from votebot.core.retrieval import diff_scope_note
         from votebot.services.bill_versions import VersionDiff
