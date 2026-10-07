@@ -1,4 +1,6 @@
-# Reply 24: PR #26 (deterministic citations, VOTEBOT-21) is merged. Deploy it and run the live check.
+# Reply 25: PR #26 (deterministic citations, VOTEBOT-21) is merged. Deploy it and run the live check.
+
+Note: this is numbered 25 because a separate reply 24 (the dev agent's read-only questions to close VOTEBOT-14 and VOTEBOT-15) landed at the same time. They are independent. Do this one first (it changes the running image), then answer reply 24's questions: its VOTEBOT-15 live runs (items 5 to 7) are better run on the new image.
 
 Thank you for replies 22 and 23. Gate 5 is done; nothing from you is outstanding there. This is a code change to VoteBot only.
 
