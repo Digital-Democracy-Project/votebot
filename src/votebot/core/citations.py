@@ -5,7 +5,8 @@ source link, which it does only some of the time (about one answer in three on a
 none, with ten chunks retrieved and used). When it found none, `chunks_used_by` looks at what the
 answer actually says and returns the retrieved chunks it was built from.
 
-"Built from" is a text check, not a relevance score: the answer must share distinctive words with
+The caller offers it only the page's own chunks (those carrying the identity retrieval was pinned to);
+this module just compares text. "Built from" is a text check, not a relevance score: the answer must share distinctive words with
 the chunk. A relevance score alone would cite sources for "thanks!" on a bill page (its chunks are
 all about that bill), and the page's own title and number are already in the prompt, so they are
 left out of the comparison. No model call, no extra latency.
