@@ -40,6 +40,7 @@ from votebot.services.webflow_lookup import (
     format_legislator_verification_context,
     format_org_verification_context,
 )
+from votebot.utils.ddp_urls import ddp_bill_url
 from votebot.utils.intent import (
     classify_primary_intent,
     classify_sub_intent,
@@ -725,6 +726,7 @@ class VoteBotAgent:
             enable_web_search=enable_web_search,
             enable_bill_votes=enable_bill_votes,
             bill_votes_service=self.bill_votes if enable_bill_votes else None,
+            page_url_for=lambda result: self._own_page_url(page_context, result),
         )
 
         # Step 10b: If OpenAI web search was enabled but didn't return citations,
@@ -1233,6 +1235,29 @@ class VoteBotAgent:
             "session": getattr(page_context, "session", None),
             "url": page_context.url,
         }
+
+    def _own_page_url(self, page_context: PageContext, result) -> str | None:
+        """Our page for the bill a live lookup returned, when it is the bill the visitor is on.
+
+        Another bill's session code in OUR url scheme is not known from the live data, so a bill other
+        than the page's gets no link rather than a guessed one.
+        """
+        base = self.settings.ddp_site_base_url
+        if not base or page_context.type != "bill" or not page_context.id:
+            return None
+
+        def squash(text: str | None) -> str:
+            return re.sub(r"\s+", "", text or "").upper()
+
+        if squash(result.bill_identifier) != squash(page_context.id):
+            return None
+        if (result.jurisdiction or "").lower() != (page_context.jurisdiction or "").lower():
+            return None
+        # "HB 1" is reused every session: our URL carries the page's session, so only the SAME session's bill
+        # gets it (a differently written session code gets no link, never a wrong one)
+        if squash(result.session) != squash(page_context.session):
+            return None
+        return ddp_bill_url(base, page_context.jurisdiction, page_context.session, page_context.id)
 
     def _cite_chunks_used(
         self,
@@ -1886,7 +1911,9 @@ class VoteBotAgent:
                 )
 
             if result and result.found:
-                formatted = self.bill_votes.format_bill_info_document(result)
+                formatted = self.bill_votes.format_bill_info_document(
+                    result, page_url=self._own_page_url(page_context, result)
+                )
 
                 # Look up specific legislator's vote to prevent LLM from drowning
                 # in hundreds of voter names and guessing incorrectly.
