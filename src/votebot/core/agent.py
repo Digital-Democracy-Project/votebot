@@ -70,6 +70,10 @@ US_STATES = frozenset(
 )
 
 # Capitalised words that are titles or question words, never part of a name ("Rep. Smith", "Who Moody")
+# An answer that says it does not know (confidence penalty, and no fallback citations: such an answer
+# can still repeat words from the chunks it failed to use).
+UNCERTAINTY_PHRASES = ("i'm not sure", "i don't know", "i cannot find", "no information", "unclear")
+
 NAME_STOPWORDS = frozenset(
     "who whom whose what which when where why how is are was were did does do can could would should will tell show "
     "explain give list find senator sen rep reps representative representatives congressman congressmen congresswoman "
@@ -1246,8 +1250,10 @@ class VoteBotAgent:
         """
         if citations or not self.settings.deterministic_citations:
             return citations
+        if any(phrase in response.lower() for phrase in UNCERTAINTY_PHRASES):
+            return citations
         page_text = " ".join(filter(None, [page_context.id, page_context.title, page_context.jurisdiction]))
-        return [
+        cited = [
             Citation(
                 source=chunk.metadata.get("source", "Unknown"),
                 document_id=chunk.id,
@@ -1257,6 +1263,9 @@ class VoteBotAgent:
             )
             for chunk in chunks_used_by(response, retrieved_chunks, page_text)
         ]
+        if cited:
+            logger.info("Cited retrieved chunks the model did not cite", citations=len(cited), chunks=len(retrieved_chunks))
+        return cited
 
     def _extract_citations(
         self,
@@ -1467,15 +1476,8 @@ class VoteBotAgent:
             confidence += 0.1
 
         # Penalty for uncertainty phrases
-        uncertainty_phrases = [
-            "i'm not sure",
-            "i don't know",
-            "i cannot find",
-            "no information",
-            "unclear",
-        ]
         response_lower = response.lower()
-        for phrase in uncertainty_phrases:
+        for phrase in UNCERTAINTY_PHRASES:
             if phrase in response_lower:
                 confidence -= 0.15
                 break

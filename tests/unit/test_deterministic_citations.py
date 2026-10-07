@@ -93,6 +93,10 @@ class TestWhichChunksWereUsed:
         chunks = [_chunk(id=f"v{n}", document_id=n, url=f"{URL}?v={n}") for n in range(6)]
         assert len(chunks_used_by(UNCITED_ANSWER, chunks)) == MAX_CITATIONS
 
+    def test_a_chunk_without_a_score_does_not_break_the_ordering(self):
+        chunks = [_chunk(score=None, id="a", document_id=1, url=URL + "?a"), _chunk(id="b", document_id=2, url=URL + "?b")]
+        assert {c.id for c in chunks_used_by(UNCITED_ANSWER, chunks)} == {"a", "b"}
+
     def test_no_chunks_no_citations(self):
         assert chunks_used_by(UNCITED_ANSWER, []) == []
 
@@ -144,6 +148,11 @@ class TestBothAgentPaths:
         agent = _agent("Thanks, glad to help! Anything else about this bill?", [_chunk()])
         assert await _streamed(agent) == [] and await _non_streamed(agent) == []
 
+    async def test_an_answer_that_says_it_does_not_know_is_not_cited_even_if_it_repeats_the_text(self):
+        # a refusal can echo words from the chunks it failed to use (the guard is the model's own admission)
+        agent = _agent("I cannot find that. " + UNCITED_ANSWER, [_chunk()])
+        assert await _streamed(agent) == [] and await _non_streamed(agent) == []
+
     async def test_citations_the_model_wrote_are_left_alone(self):
         written = UNCITED_ANSWER + f"\n\n[Source: OpenStates archive]({URL})"
         (citation,) = await _streamed(_agent(written, [_chunk(), _chunk(id="other", document_id=2, url=URL + "?v=2")]))
@@ -160,3 +169,41 @@ class TestBothAgentPaths:
         )
         without = agent._calculate_confidence(UNCITED_ANSWER, 1, [], retrieval_result=None)
         assert with_citation > without
+
+
+class TestOnTheWebsocketFrame:
+    """The same real agent behind /ws/chat: `stream_end` carries the citations, and confidence follows them."""
+
+    def _stream_end(self, monkeypatch, answer: str) -> dict:
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+
+        from votebot.api.routes import websocket as ws
+
+        ws.sessions.clear()
+        monkeypatch.setattr(ws, "VoteBotAgent", lambda: _agent(answer, [_chunk()]))
+        monkeypatch.setattr(ws, "get_slack_service", lambda: SimpleNamespace(is_configured=False))
+        monkeypatch.setattr(ws, "get_redis_store", lambda: SimpleNamespace(is_available=False))
+        monkeypatch.setattr(ws, "manager", ws.ConnectionManager())
+        app = FastAPI()
+        app.include_router(ws.router)
+        with TestClient(app).websocket_connect("/ws/chat?session_id=s1") as conn:
+            conn.receive_json()
+            conn.send_json({"type": "user_message", "payload": {"message": "What does it do?", "page_context": {
+                "type": "bill", "id": "HB 7089", "jurisdiction": "FL", "session": "2024", "ocd_bill_id": BILL}}})
+            while True:
+                frame = conn.receive_json()
+                if frame["type"] == "stream_end":
+                    return frame["payload"]
+
+    def test_an_uncited_answer_arrives_with_the_citation_and_its_confidence_boost(self, monkeypatch):
+        cited = self._stream_end(monkeypatch, UNCITED_ANSWER)
+        (citation,) = cited["citations"]
+        assert BILL in citation["document_id"] and citation["url"] == URL
+        uncited = self._stream_end(monkeypatch, "Thanks, glad to help! Anything else about this bill?")
+        assert uncited["citations"] == [] and cited["confidence"] > uncited["confidence"]
+
+    def test_a_citation_the_model_wrote_arrives_unchanged(self, monkeypatch):
+        written = UNCITED_ANSWER + f"\n\n[Source: OpenStates archive]({URL})"
+        (citation,) = self._stream_end(monkeypatch, written)["citations"]
+        assert citation["document_id"].endswith("13717-chunk-4") and citation["url"] == URL
