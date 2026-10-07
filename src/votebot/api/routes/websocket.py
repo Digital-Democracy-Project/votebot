@@ -12,7 +12,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 from votebot.api.schemas.chat import PageContext
 from votebot.config import get_settings
-from votebot.core.agent import VoteBotAgent
+from votebot.core.agent import CACHED_ANSWER_CONFIDENCE, VoteBotAgent
 from votebot.services.redis_store import get_redis_store
 from votebot.services.slack import get_slack_service, SlackService
 
@@ -855,12 +855,14 @@ async def handle_user_message(
                 ]
 
                 # Get retrieval count from metadata
+                cached = False
                 if chunk.metadata:
                     retrieval_count = getattr(chunk.metadata, "retrieval_count", 0)
                     bill_votes_tool_used = bool(getattr(chunk.metadata, "bill_votes_tool_used", False))
+                    cached = bool(getattr(chunk.metadata, "cached", False))
 
-                # Calculate confidence
-                confidence = calculate_confidence(
+                # Calculate confidence (a saved button answer ran no retrieval, so it is scored as the agent logs it)
+                confidence = CACHED_ANSWER_CONFIDENCE if cached else calculate_confidence(
                     response=full_response,
                     retrieval_count=retrieval_count,
                     citations=citations,
