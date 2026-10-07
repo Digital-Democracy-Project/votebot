@@ -168,7 +168,7 @@ Format: [Source: source_name](source_url)
 
 For example:
 - "According to the bill text [Source: Congress.gov](https://www.congress.gov/bill/...), this provision would..."
-- "The vote passed 215-214 [Source: US Congress](https://v3.openstates.org/bills/...)."
+- "The vote passed 215-214 [Source: source_name](source_url)."
 
 If no Source URL is provided for a source, fall back to: [Source: source_name]
 """
@@ -180,7 +180,7 @@ Format: [Source: source_name](source_url)
 
 For example:
 - "According to the bill text [Source: Congress.gov](https://www.congress.gov/bill/...), this provision would..."
-- "The vote passed 215-214 [Source: US Congress](https://v3.openstates.org/bills/...)."
+- "The vote passed 215-214 [Source: source_name](source_url)."
 
 If no Source URL is provided for a source, fall back to: [Source: source_name]
 

@@ -367,8 +367,13 @@ class BillVotesService:
 
         return name_to_party
 
-    def format_bill_info_document(self, result: BillInfoResult) -> str:
-        """Format full bill info into a readable document."""
+    def format_bill_info_document(self, result: BillInfoResult, page_url: str | None = None) -> str:
+        """Format full bill info into a readable document.
+
+        With `DDP_SITE_BASE_URL` set the model is never handed OpenStates' own web address (it would cite
+        it, and answers link to our pages): it gets `page_url`, our page for this bill, when the caller has
+        one, and no link otherwise.
+        """
         if not result.found:
             return f"Bill {result.bill_identifier} was not found in OpenStates for {result.jurisdiction} session {result.session}."
 
@@ -445,7 +450,10 @@ class BillVotesService:
                                     names += f" (+{len(votes_by_party['no']) - 20} more)"
                                 parts.append(f"  Voted No: {names}")
 
-        if result.openstates_url:
+        if self.settings.ddp_site_base_url:
+            if page_url:
+                parts.append(f"\n**Bill page:** {page_url}")
+        elif result.openstates_url:
             parts.append(f"\n**More info:** {result.openstates_url}")
 
         return "\n".join(parts)
