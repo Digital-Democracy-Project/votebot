@@ -726,6 +726,7 @@ class VoteBotAgent:
             enable_web_search=enable_web_search,
             enable_bill_votes=enable_bill_votes,
             bill_votes_service=self.bill_votes if enable_bill_votes else None,
+            page_url_for=lambda result: self._own_page_url(page_context, result),
         )
 
         # Step 10b: If OpenAI web search was enabled but didn't return citations,
@@ -1251,6 +1252,10 @@ class VoteBotAgent:
         if squash(result.bill_identifier) != squash(page_context.id):
             return None
         if (result.jurisdiction or "").lower() != (page_context.jurisdiction or "").lower():
+            return None
+        # "HB 1" is reused every session: our URL carries the page's session, so only the SAME session's bill
+        # gets it (a differently written session code gets no link, never a wrong one)
+        if squash(result.session) != squash(page_context.session):
             return None
         return ddp_bill_url(base, page_context.jurisdiction, page_context.session, page_context.id)
 

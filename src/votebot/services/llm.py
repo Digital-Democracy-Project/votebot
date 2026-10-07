@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
@@ -234,8 +235,13 @@ class LLMService:
         self,
         arguments: dict,
         bill_votes_service: BillVotesService,
+        page_url_for: Callable[[Any], str | None] | None = None,
     ) -> tuple[str, BillVotesToolResult]:
-        """Execute the bill info tool and return the result."""
+        """Execute the bill info tool and return the result.
+
+        `page_url_for(result)` gives our own page for the bill the lookup returned (None when it is not
+        the bill the visitor is on), so the context links to our site, not to OpenStates.
+        """
         jurisdiction = arguments.get("jurisdiction", "").lower()
         session = arguments.get("session", "")
         bill_identifier = arguments.get("bill_identifier", "")
@@ -257,7 +263,9 @@ class LLMService:
 
             if result and result.found:
                 # Format the full bill info for the LLM
-                info_text = bill_votes_service.format_bill_info_document(result)
+                info_text = bill_votes_service.format_bill_info_document(
+                    result, page_url=page_url_for(result) if page_url_for else None
+                )
                 tool_result = BillVotesToolResult(
                     jurisdiction=jurisdiction,
                     session=session,
@@ -306,6 +314,7 @@ class LLMService:
         enable_bill_votes: bool = False,
         bill_votes_service: BillVotesService | None = None,
         previous_response_id: str | None = None,
+        page_url_for: Callable[[Any], str | None] | None = None,
     ) -> LLMResponse:
         """
         Generate a completion using the Responses API.
@@ -318,6 +327,7 @@ class LLMService:
             enable_web_search: Whether to enable web search tool
             enable_bill_votes: Whether to enable bill votes lookup tool
             bill_votes_service: Service instance for bill votes lookup
+            page_url_for: Maps a live bill result to our own page for it (see _execute_bill_info_tool)
             previous_response_id: ID of previous response for stateful conversation
 
         Returns:
@@ -417,7 +427,7 @@ class LLMService:
                         args = {}
 
                     result_text, tool_result = await self._execute_bill_info_tool(
-                        args, bill_votes_service
+                        args, bill_votes_service, page_url_for
                     )
                     bill_votes_tool_used = True
                     bill_votes_result = tool_result
