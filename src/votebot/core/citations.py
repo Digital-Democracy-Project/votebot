@@ -25,17 +25,18 @@ MIN_SHARED_WORDS = 4
 # Citations returned at most, strongest first.
 MAX_CITATIONS = 3
 
-_WORD = re.compile(r"[a-z]{%d,}" % MIN_WORD_LENGTH)
+_WORD = re.compile(rf"[a-z]{{{MIN_WORD_LENGTH},}}")
 
 # Long words that say nothing about which text an answer came from.
 _GENERIC = frozenset(
-    """
-    about above according across additional against already always another because before being between
-    bill bills could current different during either further general however include included includes
-    including information legislation legislative provide provided provides provision provisions
-    question section sections should specific support through under version versions which within
-    without would
-    """.split()
+    {
+        "about", "above", "according", "across", "additional", "against", "already", "always", "another",
+        "because", "before", "being", "between", "could", "current", "different", "during", "either",
+        "further", "general", "however", "include", "included", "includes", "including", "information",
+        "legislation", "legislative", "provide", "provided", "provides", "provision", "provisions",
+        "question", "section", "sections", "should", "specific", "support", "through", "version",
+        "versions", "within", "without", "would",
+    }
 )
 
 

@@ -57,6 +57,11 @@ The single retrieval orchestrator. **Do not add raw Pinecone calls outside this 
 
 **Retrieval isolation rule**: `bill-text-history` and `bill-changelog` are invisible to all existing phases by design (explicit `document_type` filters). Only Phase 5 queries `bill-changelog` (legacy index), and only on changelog intent; on the canonical-id index `bill-version-diff` is not in the index at all and Phase 5 reads it live from api-v3. Never add unfiltered fallback queries that could surface these types in normal responses.
 
+## Citations the model did not write (`core/citations.py`, VOTEBOT-21)
+
+- **`chunks_used_by(answer, chunks, page_text) -> list[SearchResult]`** — the retrieved chunks an answer was built from: chunks sharing at least `MIN_SHARED_WORDS` (4) distinctive words (6+ letters, minus a small generic list and the page's own title/number) with the answer, best first, one per source+version, at most `MAX_CITATIONS` (3). Pure text, no model call.
+- **`VoteBotAgent._cite_chunks_used(response, citations, chunks, page_context)`** — called right after `_extract_citations` in BOTH `process_message` and `process_message_stream`: returns the model's own citations untouched when there are any, else builds `Citation`s from `chunks_used_by`. Off with `VOTEBOT_DETERMINISTIC_CITATIONS=false` (`settings.deterministic_citations`). A greeting, a refusal or a live-data answer shares nothing with the chunks and still gets none. Do not add a second citation fallback elsewhere (the websocket recomputes confidence from the citations the stream returns, so it picks these up).
+
 ## Intent classification (`utils/intent.py`)
 
 Single source of truth for intent taxonomy and retrieval vocabulary.

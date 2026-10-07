@@ -62,9 +62,14 @@ class TestWhichChunksWereUsed:
 
     def test_an_answer_that_only_repeats_the_page_title_cites_nothing(self):
         # the page's own title and number are in the prompt, so repeating them says nothing about the chunks
-        title_chunk = _chunk("Transparency in Health and Human Services, an act relating to transparency")
+        title_chunk = _chunk("Transparency in Health and Human Services: an act that concerns transparency")
         echoed = "This is Transparency in Health and Human Services, which concerns transparency in health care."
         assert chunks_used_by(echoed, [title_chunk], "Transparency in Health and Human Services") == []
+
+    def test_a_few_shared_words_are_not_enough(self):
+        # one word in common ("garnishment") with the bill text is a coincidence, not a source
+        answer = "Garnishment rules differ; consult an attorney about bankruptcy proceedings, which govern creditors."
+        assert chunks_used_by(answer, [_chunk()]) == []
 
     def test_a_live_data_answer_that_shares_nothing_with_the_chunks_cites_nothing(self):
         vote = "The House passed it 80 to 30 on March 4, with 12 Republicans and 18 Democrats absent."
