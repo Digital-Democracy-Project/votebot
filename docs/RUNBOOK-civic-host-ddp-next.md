@@ -230,8 +230,8 @@ cutover edits (`DDP_SITE_BASE_URL`, `ALLOWED_ORIGINS`), are changed in `prod.env
 a `--check` first.
 
 **Slack, cutover day only.** The defaults leave Slack off. `infrastructure/render-env.sh --with-slack` also writes
-`SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` from the secret keys `slack_bot_token` and `slack_app_token` (confirm those two
-names exist in the secret with `--check --with-slack`, which prints names only; if the secret names them differently, change the
+`SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` from the secret keys `votebot_slack_bot_token` and `votebot_slack_app_token` (the bare `slack_bot_token` in the
+same secret belongs to something else and is never read; confirm those two names exist in the secret with `--check --with-slack`, which prints names only; if the secret names them differently, change the
 two names in the `--with-slack` lines of the script by a PR). One Slack app token may be held by ONE running VoteBot, so:
 stop the old copy's Slack connection first and **confirm it is stopped before going on** (its service or process is
 down, or its Slack app shows no connection; record the time), then render with `--with-slack`, `up -d --force-recreate votebot`, and run a real

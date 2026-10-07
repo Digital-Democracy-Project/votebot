@@ -78,14 +78,16 @@ class RenderEnvTest(unittest.TestCase):
 
     def test_with_slack_writes_the_two_tokens_and_without_it_they_are_never_written(self):
         shared_doc = {"api_key": "a-SECRETVALUE-6", "openai_api_key": "o-SECRETVALUE-7", "pinecone_api_key": "p-SECRETVALUE-8",
-                      "rds_openstates_api_key": "v-SECRETVALUE-4", "slack_bot_token": "xoxb-SECRETVALUE-10",
-                      "slack_app_token": "xapp-SECRETVALUE-11"}
+                      "rds_openstates_api_key": "v-SECRETVALUE-4", "votebot_slack_bot_token": "xoxb-SECRETVALUE-10",
+                      "votebot_slack_app_token": "xapp-SECRETVALUE-11",
+                      "slack_bot_token": "xoxb-OTHERSERVICE-12"}  # belongs to something else: must never be used
         self.put("ddp-sync/credentials", shared_doc)
         r = self.run_script("--with-slack", shared=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         text = self.out.read_text()
         self.assertIn("SLACK_BOT_TOKEN=xoxb-SECRETVALUE-10\n", text)
         self.assertIn("SLACK_APP_TOKEN=xapp-SECRETVALUE-11\n", text)
+        self.assertNotIn("OTHERSERVICE", text)
         self.assertNotIn("SECRETVALUE-1", r.stdout + r.stderr)
         self.out.unlink()
         self.assertEqual(self.run_script(shared=True).returncode, 0)
@@ -93,7 +95,8 @@ class RenderEnvTest(unittest.TestCase):
 
     def test_with_slack_fails_before_touching_the_file_when_a_token_is_missing(self):
         self.put("ddp-sync/credentials", {"api_key": "a", "openai_api_key": "o", "pinecone_api_key": "p",
-                                          "rds_openstates_api_key": "v", "slack_bot_token": "xoxb-SECRETVALUE-10"})
+                                          "rds_openstates_api_key": "v", "votebot_slack_bot_token": "xoxb-SECRETVALUE-10",
+                                          "slack_app_token": "xapp-OTHERSERVICE-12"})  # the bare name is not ours
         self.out.write_text("SENTINEL=1\n")
         r = self.run_script("--with-slack", shared=True)
         self.assertNotEqual(r.returncode, 0)
