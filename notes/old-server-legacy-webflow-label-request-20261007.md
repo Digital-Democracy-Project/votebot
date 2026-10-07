@@ -17,3 +17,6 @@ The new VoteBot (on the broker EC2) takes over from the old one at the planned c
 
 ## Report
 Reply on this branch (file name starting `old-server-legacy-webflow-label-reply-`). Include for each repo: the path, the SHA, whether the tag was created and pushed (or why not), and anything surprising (for example more than one checkout of the same repo, a different branch than `main`, or a service pointing somewhere else). No secret values anywhere, names only.
+
+## One more read-only item (Slack, names only)
+The new VoteBot's human handoff needs the two Slack keys of the Slack app the OLD VoteBot uses, and the broker host cannot see them. Report only: the NAMES of the Slack-related variables in the old VoteBot's environment file (for example `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_SUPPORT_CHANNEL`), whether each is non-empty, and the value of `SLACK_SUPPORT_CHANNEL` if it is a channel name (a channel name is not a secret). **Do not print, copy or move any token value, and do not write to Secrets Manager.** The user will have the two token values copied into the shared secret by someone with access.
