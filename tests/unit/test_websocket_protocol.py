@@ -40,6 +40,7 @@ class FakeAgent:
     citations = DEFAULT_CITATIONS
     fail = False
     votes_tool_used = False
+    cached = False  # a saved quick-action answer: no retrieval ran
     responder = None  # message -> (answer chunks, bill_votes_tool_used), to answer per question
 
     async def process_message_stream(self, **kwargs):
@@ -56,7 +57,8 @@ class FakeAgent:
             done=True,
             citations=FakeAgent.citations,
             metadata=ResponseMetadata(
-                model="fake", tokens_used=1, retrieval_count=3, latency_ms=1, bill_votes_tool_used=tool_used
+                model="fake", tokens_used=1, retrieval_count=0 if FakeAgent.cached else 3, latency_ms=1,
+                bill_votes_tool_used=tool_used, cached=FakeAgent.cached,
             ),
         )
 
@@ -66,7 +68,7 @@ def client(monkeypatch):
     FakeAgent.calls = []
     FakeAgent.fail = False
     FakeAgent.citations = DEFAULT_CITATIONS
-    FakeAgent.votes_tool_used, FakeAgent.responder = False, None
+    FakeAgent.votes_tool_used, FakeAgent.responder, FakeAgent.cached = False, None, False
     ws.sessions.clear()
     monkeypatch.setattr(ws, "VoteBotAgent", FakeAgent)
     monkeypatch.setattr(ws, "get_slack_service", lambda: SimpleNamespace(is_configured=False))
@@ -159,6 +161,26 @@ class TestStreaming:
             conn.send_json(_user_message("How did the vote go?"))
             end = _read_until(conn, "stream_end")[-1]["payload"]
         assert end["bill_votes_tool_used"] is True
+
+    def test_a_saved_button_answer_is_scored_as_the_agent_logs_it_not_as_a_fresh_one_with_no_retrieval(self, client):
+        # VOTEBOT-15: the second Summary click came back at 0.595 on the wire (0.795 fresh) though the agent logged 0.9
+        from votebot.core.agent import CACHED_ANSWER_CONFIDENCE
+
+        FakeAgent.cached = True
+        with client.websocket_connect("/ws/chat?session_id=s1") as conn:
+            conn.receive_json()
+            conn.send_json(_user_message("Summarize this bill"))
+            end = _read_until(conn, "stream_end")[-1]["payload"]
+        assert end["confidence"] == CACHED_ANSWER_CONFIDENCE
+
+    def test_a_fresh_answer_keeps_the_computed_confidence(self, client):
+        with client.websocket_connect("/ws/chat?session_id=s1") as conn:
+            conn.receive_json()
+            conn.send_json(_user_message("What does this bill do?"))
+            end = _read_until(conn, "stream_end")[-1]["payload"]
+        # the computed value, exactly as before: 0.5 base + 0.2 retrieved + citation boosts, nothing from the cached branch
+        assert end["confidence"] == ws.calculate_confidence("The bill does X.", 3, end["citations"])
+        assert end["confidence"] != 0.9
 
     def test_an_agent_failure_is_reported_as_a_processing_error(self, client):
         FakeAgent.fail = True

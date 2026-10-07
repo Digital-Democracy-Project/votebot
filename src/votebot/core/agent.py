@@ -49,6 +49,10 @@ from votebot.utils.intent import (
 
 logger = structlog.get_logger()
 
+# A saved quick-action answer was good when it was saved; it ran no retrieval now, so the heuristics that score a fresh
+# answer (documents retrieved this turn) would call it weak. Used by the agent's log and by the websocket's stream_end.
+CACHED_ANSWER_CONFIDENCE = 0.9
+
 
 # When the enrichment lookups of the message being processed (broker, legislators) must be done by
 # (a `time.monotonic()` value): ONE budget per message, not one per lookup.
@@ -576,7 +580,7 @@ class VoteBotAgent:
             cached_result = AgentResult(
                 response=cached_response,
                 citations=cached_citations,
-                confidence=0.9,  # cached responses are by definition high-confidence
+                confidence=CACHED_ANSWER_CONFIDENCE,
                 requires_human=False,
                 tokens_used=0,
                 retrieval_count=0,
@@ -939,7 +943,7 @@ class VoteBotAgent:
             stream_result = AgentResult(
                 response=cached_response,
                 citations=cached_citations,
-                confidence=0.9,  # cached responses are by definition high-confidence
+                confidence=CACHED_ANSWER_CONFIDENCE,
                 requires_human=False,
                 tokens_used=0,
                 retrieval_count=0,
