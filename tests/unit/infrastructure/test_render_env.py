@@ -53,11 +53,58 @@ class RenderEnvTest(unittest.TestCase):
     def put(self, secret_id, doc):
         (self.secrets / (secret_id.replace("/", "_") + ".json")).write_text(json.dumps(doc))
 
-    def run_script(self, *args, extra_env=None):
+    def run_script(self, *args, extra_env=None, shared=False):
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", FAKE_SECRETS_DIR=str(self.secrets))
         env.pop("API_SOURCE_SECRET_ID", None)
+        env.pop("VOTEBOT_SECRET_ID", None)
+        if not shared:  # the layout with a secret of VoteBot's own (the default is the shared one)
+            env.update(VOTEBOT_SECRET_ID="votebot/credentials", API_SOURCE_SECRET_ID="ddp-sync/credentials")
         env.update(extra_env or {})
         return subprocess.run(["bash", str(SCRIPT), "--out", str(self.out), *args], env=env, capture_output=True, text=True)
+
+    def test_the_default_is_the_one_shared_secret(self):
+        # decided 2026-10-07: VoteBot reads ddp-sync/credentials, and the single secret serves all four names
+        shared_doc = {"api_key": "shared-api-SECRETVALUE-6", "openai_api_key": "shared-oa-SECRETVALUE-7",
+                      "pinecone_api_key": "shared-pc-SECRETVALUE-8", "rds_openstates_api_key": "shared-v3-SECRETVALUE-4"}
+        self.put("ddp-sync/credentials", shared_doc)
+        r = self.run_script(shared=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = self.out.read_text()
+        self.assertIn("API_KEY=shared-api-SECRETVALUE-6\n", text)
+        self.assertIn("OPENAI_API_KEY=shared-oa-SECRETVALUE-7\n", text)
+        self.assertIn("PINECONE_API_KEY=shared-pc-SECRETVALUE-8\n", text)
+        self.assertIn("DDP_OPENSTATES_BEARER_TOKEN=shared-v3-SECRETVALUE-4\n", text)
+        self.assertNotIn("SLACK_", text)  # Slack is off unless asked for
+
+    def test_with_slack_writes_the_two_tokens_and_without_it_they_are_never_written(self):
+        shared_doc = {"api_key": "a-SECRETVALUE-6", "openai_api_key": "o-SECRETVALUE-7", "pinecone_api_key": "p-SECRETVALUE-8",
+                      "rds_openstates_api_key": "v-SECRETVALUE-4", "slack_bot_token": "xoxb-SECRETVALUE-10",
+                      "slack_app_token": "xapp-SECRETVALUE-11"}
+        self.put("ddp-sync/credentials", shared_doc)
+        r = self.run_script("--with-slack", shared=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = self.out.read_text()
+        self.assertIn("SLACK_BOT_TOKEN=xoxb-SECRETVALUE-10\n", text)
+        self.assertIn("SLACK_APP_TOKEN=xapp-SECRETVALUE-11\n", text)
+        self.assertNotIn("SECRETVALUE-1", r.stdout + r.stderr)
+        self.out.unlink()
+        self.assertEqual(self.run_script(shared=True).returncode, 0)
+        self.assertNotIn("xoxb", self.out.read_text())  # tokens in the secret are not copied unless asked
+
+    def test_with_slack_fails_before_touching_the_file_when_a_token_is_missing(self):
+        self.put("ddp-sync/credentials", {"api_key": "a", "openai_api_key": "o", "pinecone_api_key": "p",
+                                          "rds_openstates_api_key": "v", "slack_bot_token": "xoxb-SECRETVALUE-10"})
+        self.out.write_text("SENTINEL=1\n")
+        r = self.run_script("--with-slack", shared=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("SLACK_APP_TOKEN", r.stderr)
+        self.assertEqual(self.out.read_text(), "SENTINEL=1\n")
+
+    def test_the_shipped_defaults_hold_no_secret_names_and_no_slack(self):
+        names = [line.split("=", 1)[0] for line in (REPO / "infrastructure/docker/prod.env.defaults").read_text().splitlines()
+                 if "=" in line and not line.lstrip().startswith("#")]
+        for secret in ["API_KEY", "OPENAI_API_KEY", "PINECONE_API_KEY", "DDP_OPENSTATES_BEARER_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]:
+            self.assertNotIn(secret, names)
 
     def test_writes_secrets_and_defaults_with_mode_600_and_prints_no_value(self):
         r = self.run_script()

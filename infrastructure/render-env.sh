@@ -7,33 +7,44 @@
 # role already has secretsmanager:GetSecretValue, so the host resolves the secrets once and the container
 # only sees a plain env file. VoteBot's own code is unchanged and has no boto3 dependency.
 #
-# Secrets (JSON object, snake_case keys; a missing or empty one makes the script fail BEFORE touching .env):
-#   votebot/credentials  (VOTEBOT_SECRET_ID):  api_key, openai_api_key, pinecone_api_key
-#   ddp-sync/credentials (API_SOURCE_SECRET_ID): rds_openstates_api_key  -> DDP_OPENSTATES_BEARER_TOKEN
-#       (the shared api-v3 key, decided 2026-10-06; set API_SOURCE_SECRET_ID= empty to skip, then the
-#        votebot secret must hold ddp_openstates_api_key instead)
+# Secrets (JSON object, snake_case keys; a missing or empty one makes the script fail BEFORE touching .env).
+# By decision (2026-10-07) VoteBot reads the SAME shared secret as ddp-sync, `ddp-sync/credentials`
+# (VOTEBOT_SECRET_ID), which holds: api_key, openai_api_key, pinecone_api_key, rds_openstates_api_key
+# (-> DDP_OPENSTATES_BEARER_TOKEN: the setting name is historical, it is sent as X-API-Key) and, for
+# --with-slack, slack_bot_token and slack_app_token. To give VoteBot a secret of its own later, set
+# VOTEBOT_SECRET_ID=votebot/credentials (same key names), and API_SOURCE_SECRET_ID=ddp-sync/credentials
+# to keep reading the api-v3 key from the shared one (API_SOURCE_SECRET_ID= empty reads
+# ddp_openstates_api_key from VoteBot's secret instead).
 # Other keys in a secret are ignored: only the names mapped below are ever written.
+#
+# THE FILE IS REWRITTEN IN FULL on every run: a hand edit of .env is lost. Anything that is not a secret
+# (DDP_SITE_BASE_URL, ALLOWED_ORIGINS, ...) is changed in infrastructure/docker/prod.env.defaults, by a PR,
+# and re-rendered; the cutover edits are made that way.
 #
 # Idempotent: re-run any time to pick up a rotated secret, then `docker compose ... up -d` (a restart ends
 # open chats). The file is written atomically (temp file, then rename) with mode 600 and the invoking user as
 # owner, because `docker compose` reads `env_file` as that user. Never prints a value: only key NAMES.
 #
-# Usage:  infrastructure/render-env.sh [--check] [--out FILE]
-#   --check   fetch and validate, print which names would be written, write nothing
+# Usage:  infrastructure/render-env.sh [--check] [--with-slack] [--out FILE]
+#   --check       fetch and validate, print which names would be written, write nothing
+#   --with-slack  also write SLACK_BOT_TOKEN and SLACK_APP_TOKEN (cutover day only: one app token may be held
+#                 by ONE running VoteBot, so stop the old copy's Slack connection first; VOTEBOT-14)
 #   --out     write somewhere other than <repo>/.env
 set -euo pipefail
 
 REGION="${AWS_REGION:-us-east-1}"
-VOTEBOT_SECRET_ID="${VOTEBOT_SECRET_ID:-votebot/credentials}"
-API_SOURCE_SECRET_ID="${API_SOURCE_SECRET_ID-ddp-sync/credentials}"
+VOTEBOT_SECRET_ID="${VOTEBOT_SECRET_ID:-ddp-sync/credentials}"
+API_SOURCE_SECRET_ID="${API_SOURCE_SECRET_ID-$VOTEBOT_SECRET_ID}"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULTS_FILE="${DEFAULTS_FILE:-$REPO_DIR/infrastructure/docker/prod.env.defaults}"
 OUT_FILE="$REPO_DIR/.env"
 CHECK=0
+WITH_SLACK=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK=1 ;;
+    --with-slack) WITH_SLACK=1 ;;
     --out) shift; OUT_FILE="${1:?--out needs a file}" ;;
     *) echo "[render-env] unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -52,7 +63,7 @@ if [ -n "$API_SOURCE_SECRET_ID" ]; then
   USE_API_SOURCE=1
 fi
 
-export VOTEBOT_JSON API_JSON USE_API_SOURCE
+export VOTEBOT_JSON API_JSON USE_API_SOURCE WITH_SLACK
 python3 - "$OUT_FILE" "$DEFAULTS_FILE" "$CHECK" <<'PYEOF'
 import json
 import os
@@ -75,6 +86,12 @@ if os.environ["USE_API_SOURCE"] == "1":
     REQUIRED.append((api_source, "rds_openstates_api_key", "DDP_OPENSTATES_BEARER_TOKEN"))
 else:
     REQUIRED.append((votebot, "ddp_openstates_api_key", "DDP_OPENSTATES_BEARER_TOKEN"))
+
+if os.environ["WITH_SLACK"] == "1":
+    REQUIRED += [
+        (votebot, "slack_bot_token", "SLACK_BOT_TOKEN"),
+        (votebot, "slack_app_token", "SLACK_APP_TOKEN"),
+    ]
 
 secret_lines, written, missing = [], [], []
 for source, key, env_name in REQUIRED:
@@ -122,4 +139,4 @@ except BaseException:
     raise
 print(f"[render-env] wrote {len(written)} secret names {sorted(written)} + {len(defaults_names)} defaults to {out_file} (mode 600)")
 PYEOF
-unset VOTEBOT_JSON API_JSON USE_API_SOURCE
+unset VOTEBOT_JSON API_JSON USE_API_SOURCE WITH_SLACK
