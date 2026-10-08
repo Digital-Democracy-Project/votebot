@@ -194,13 +194,20 @@ If the query mentions a specific bill:
 - Calls `BillVotesService.get_bill_info()` -> OpenStates API
 - If a legislator name is detected, calls `find_legislator_in_votes()` to extract their specific vote
 
+#### Jurisdiction guess from the message (state names and codes)
+- `_extract_jurisdiction_from_message()` is used only when the page context carries no jurisdiction. State names match as whole words, longest
+  first ("West Virginia" is WV, not VA); a two-letter code counts only in capitals directly before a bill prefix ("FL HB 7089"), so a
+  lower-case "in HB 7089", "or" or "me" is not a state (VOTEBOT-28). An all-caps message can still read "IN" as Indiana.
+
 #### Step 9c: Legislator Info Pre-fetch
 If on a bill page and a person is mentioned:
 - `_prefetch_legislator_info()` queries OpenStates `/people` API to get current role info
 - Overrides stale LLM training data (e.g., "Ashley Moody is now a Senator")
 
 #### Step 9d: Dispute Detection + Vote Verification
-- `_is_dispute_or_correction()` checks for phrases like "that's wrong", "verify", "check again"
+- `_is_dispute_or_correction()` checks for phrases like "that's wrong", "verify", "check again". Phrases are matched as whole words, and a
+  correction must name a person by pronoun ("she is a senator now", "he's the governor"); a bare "is the" in an ordinary question
+  ("What is the status of HB 7089?") is not a dispute (VOTEBOT-29)
 - If triggered, `_verify_legislator_vote()` goes directly to OpenStates for authoritative vote data
 
 #### Step 9e: Webflow CMS Org Position Pre-fetch (bidirectional)
