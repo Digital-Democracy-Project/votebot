@@ -3688,6 +3688,36 @@ logger.info("response_blocks_raw", block_count=len(parts), blocks=[repr(p) for p
 
 ---
 
+## Wrong Lookups, False Disputes and Bad Links (new index, VOTEBOT-23 to 30)
+
+All of these were found on the new index (`ddp-knowledge-base`) in October 2026. Each one leaves a line in the container log (`docker logs votebot-ddp-next`, or `logs/dev-server.log` on the local dev copy), so read the log first. To reproduce one without a production deploy, use the local dev copy (README, "Local dev copy on the Mac Studio") and the **websocket**: the REST endpoint skips the bill pre-fetch the widget uses.
+
+### A bill is looked up in the wrong state, or not found
+
+**Symptom:** `Bill not found in OpenStates` in the log, `bill_votes_tool_used` false, an answer that came from web search with outside links and no vote data.
+
+**Diagnosis:** find the `Pre-fetching bill info` line: it shows the `jurisdiction`, `session` and `bill_identifier` actually looked up. The jurisdiction is guessed from the message text **before** the page's own state is used (`_extract_jurisdiction_from_message`), so a wrong guess beats a right page context. Fixed so far: the letters "us" inside "status", "bonus" or "campus" read as the United States (VOTEBOT-25); a lower-case "in", "or" or "me" before a bill number read as Indiana, Oregon or Maine, and "West Virginia" read as Virginia (VOTEBOT-28). To test a message, call the function directly: `VoteBotAgent._extract_jurisdiction_from_message(None, "your message")`.
+
+**Open (VOTEBOT-30):** a bill number with a trailing letter, such as `HB 5601E`, is looked up as `HB5601` (`bill_identifier: HB5601` in the log) because the identifier patterns take digits only. Workaround: on the bill's own page ask without the number ("How did the vote on this bill go?"), which uses the page's own id.
+
+### An ordinary question runs a verification and a web search
+
+**Symptom:** `Vote verification returned empty - could not find legislator or vote`, `Web search triggered` with `dispute_trigger: true`, or `Correction detected` / `Dispute detected` / `Verification request detected` on a plain question such as "What is the status of HB 7089?".
+
+**Cause and check:** `_is_dispute_or_correction` decided the user was correcting the bot; the log line names the `phrase` that matched. A dispute runs vote verification, forces a web search and adds CMS or broker verification context, so a false one costs time and money even when the answer is right. It used to match bare words ("is the", "became", "was elected") as substrings (VOTEBOT-29). Phrases now match as whole words and every correction phrase names a person with a pronoun (`CORRECTION_PHRASES`); never add a bare phrase to the list. Real disputes ("that's wrong", "are you sure", "she is a senator now") must still log a phrase and trigger verification.
+
+### Answers contain a link that does not open
+
+**Symptom:** a link such as `digitaldemocracyproject.org/bills/<slug>`, `.../legislators/<slug>`, `.../organizations/<slug>` or `.../explore/organizations/<id>`. On the new site (ddp-next) a bill opens at `/explore/{jurisdiction}/{session}/{identifier}` (and at `/bills/<broker bill number>`, a number VoteBot does not have; `/bills/hb-5601e` is a 404), a legislator route takes a numeric id VoteBot does not have (`/legislators/jane-smith` is a 404), `/vote` opens, and there is no organization page (`/organizations/5155` and `/explore/organizations/5155` are 404s). Checked against the local ddp-next on 2026-10-08.
+
+**Causes found and fixed:** the base prompt's example links were in the old site's slug style and the model copied them (the new-index prompt now has a link rule instead, `CANONICAL_LINK_RULE`, VOTEBOT-23); organization chunks got a made-up `DDP URL` line (VOTEBOT-27). **Check:** `curl -s -o /dev/null -w '%{http_code}' <link>` against ddp-next. The model once made up `.../explore/organizations/5155` (VoteBot never builds it; it answers 404) and did not repeat it in the next check; if it recurs, the fix is a code check that drops a link on our site that is not in the sources, not more prompt wording. The `digitaldemocracyproject.org/vote` link is the sign-up link in the system prompt, on purpose.
+
+### Local dev copy will not start or answers look empty
+
+`curl localhost:8010/votebot/v1/health/ready` names the dependency that is down (pinecone, openai, ddp_openstates_replica, redis). Port 8000 is CAMS on the Mac Studio, so VoteBot uses 8010; its Redis is the `votebot-dev-redis` container on `127.0.0.1:6380`, never the CAMS Redis. FL HB 7089 is not in the dev broker; use FL 2026E HB 5601E. A real `.env` in the repo directory is read by any test that builds `Settings()` without `_env_file=None`: that is a test bug, not a VoteBot bug.
+
+---
+
 ## Getting Help
 
 If these troubleshooting steps don't resolve your issue:
