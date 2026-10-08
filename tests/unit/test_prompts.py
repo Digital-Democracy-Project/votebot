@@ -82,6 +82,31 @@ class TestBuildSystemPrompt:
         assert "DDP URL" not in text
         assert "/bills/" not in text
 
+    def test_an_organization_chunk_of_the_new_index_gets_no_made_up_page_link(self):
+        # VOTEBOT-27: the new site has no organization page; /organizations/<slug> opens nothing
+        chunk = {
+            "id": "organization:5155-chunk-0",
+            "content": "About the organization.",
+            "metadata": {
+                "source": "ddp-broker", "document_type": "organization", "broker_org_id": "5155",
+                "slug": "usf-faculty-senate", "url": "https://usffacultysenate.example",
+            },
+        }
+        text = format_retrieved_chunks([chunk])
+
+        assert "DDP URL" not in text
+        assert "/organizations/" not in text
+        assert "**Source URL:** https://usffacultysenate.example" in text  # the organization's own website stays
+
+    def test_a_legacy_organization_chunk_keeps_its_ddp_url(self):
+        chunk = {
+            "id": "organization-webflow-abc",
+            "content": "About the organization.",
+            "metadata": {"source": "Webflow CMS", "document_type": "organization", "slug": "usf-faculty-senate"},
+        }
+
+        assert "**DDP URL:** https://digitaldemocracyproject.org/organizations/usf-faculty-senate" in format_retrieved_chunks([chunk])
+
     def test_the_legacy_prompt_keeps_its_examples_unchanged(self):
         prompt = build_system_prompt(page_type="bill", page_info={"id": "HB 1", "title": "T"})
 
