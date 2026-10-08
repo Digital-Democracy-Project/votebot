@@ -54,6 +54,40 @@ logger = structlog.get_logger()
 CACHED_ANSWER_CONFIDENCE = 0.9
 
 
+def _phrase_in(text: str, phrase: str) -> bool:
+    """True when `phrase` is in `text` as whole words, not inside another word ("bull" is not in "bulletin",
+    "confirm" not in "confirmed", "is the" not in "this theory"). Letters and digits are word characters, on both
+    sides alike; punctuation and quotes are not. `text` is lower-case."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", text) is not None
+
+
+# A user correcting the bot states something about a PERSON ("she is a senator", "he became governor"). Every phrase
+# names the person with a pronoun: a bare "is the", "became" or "was elected" is in ordinary questions ("What is the
+# status...", "What became of this bill?", "Who was elected in 2024?") and made them look like corrections (VOTEBOT-29).
+# Written out per pronoun, so each phrase is grammatical ("they were elected", never "they was elected").
+CORRECTION_PHRASES = (
+    # she / he
+    *(
+        f"{pronoun} {verb}"
+        for pronoun in ("she", "he")
+        for verb in (
+            "is a", "is the", "is now a", "is now the", "is currently a", "is currently the",
+            "was elected", "was appointed", "became",
+        )
+    ),
+    "she's a", "she's the", "he's a", "he's the",
+    # they
+    *(
+        f"they {verb}"
+        for verb in (
+            "are a", "are the", "are now a", "are now the", "are currently a", "are currently the",
+            "were elected", "were appointed", "became",
+        )
+    ),
+    "they're a", "they're the",
+)
+
+
 # When the enrichment lookups of the message being processed (broker, legislators) must be done by
 # (a `time.monotonic()` value): ONE budget per message, not one per lookup.
 _enrichment_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar("enrichment_deadline", default=None)
@@ -2913,7 +2947,7 @@ class VoteBotAgent:
         Returns:
             True if the user appears to be correcting information
         """
-        message_lower = message.lower()
+        message_lower = message.lower().replace("\u2019", "'")  # a typed curly apostrophe is an apostrophe
 
         # Explicit dispute phrases
         dispute_phrases = [
@@ -2946,26 +2980,20 @@ class VoteBotAgent:
             "check congress", "official record",
         ]
 
-        # Correction phrases (user stating what they believe is true)
-        correction_phrases = [
-            "she is a", "he is a", "they are a",
-            "she's a", "he's a", "they're a",
-            "is now a", "is currently a", "is the",
-            "was appointed", "was elected", "became",
-        ]
+        # Correction phrases (user stating what they believe is true about a person): CORRECTION_PHRASES, above.
 
         for phrase in dispute_phrases:
-            if phrase in message_lower:
+            if _phrase_in(message_lower, phrase):
                 logger.info("Dispute detected, triggering verification", phrase=phrase)
                 return True
 
         for phrase in verification_phrases:
-            if phrase in message_lower:
+            if _phrase_in(message_lower, phrase):
                 logger.info("Verification request detected", phrase=phrase)
                 return True
 
-        for phrase in correction_phrases:
-            if phrase in message_lower:
+        for phrase in CORRECTION_PHRASES:
+            if _phrase_in(message_lower, phrase):
                 logger.info("Correction detected, triggering verification", phrase=phrase)
                 return True
 
