@@ -567,7 +567,7 @@ A copy of VoteBot runs on the Mac Studio against the **dev** stack, so a change 
 - **Config:** a git-ignored `.env` (mode 600). The OpenAI and Pinecone keys are the dev broker's (`ddp-broker-py/.env`) and the api-v3 key is `LOCAL_OPENSTATES_API_KEY` in `ddp-sync/.env`; set `DDP_BROKER_API_ROOT=http://localhost:8080`, `USE_DDP_OPENSTATES_REPLICA=true`, `DDP_OPENSTATES_API_ROOT=http://localhost:8002`, `DDP_OPENSTATES_AUTH_HEADER=x-api-key`, `REDIS_URL=redis://localhost:6380/0`, `DDP_SITE_BASE_URL=http://localhost:3000`. **No Slack tokens**: one Slack connection per app token, and production holds it. Tests cost real (small) OpenAI usage.
 - **Start:** `infrastructure/start-votebot-dev.sh` (creates the Redis container if missing, waits for Docker, the broker and api-v3, then runs `uvicorn`). As a system LaunchDaemon (`com.ddp.votebot-dev`, like ddp-sync and the others) it starts at boot; the plist is `infrastructure/launchd/com.ddp.votebot-dev.plist` and its header has the `sudo` install commands (an admin installs it; the service account has no sudo). Until it is installed, run the script by hand.
 - **Check:** `curl localhost:8010/votebot/v1/health/ready`, then `python scripts/smoke_ws.py --url ws://localhost:8010/ws/chat --cases scripts/smoke_cases.json --retrieval`.
-- **Use FL 2026E HB 5601E** (it has real organization positions); FL HB 7089 is not in the dev broker. The REST endpoint skips the bill pre-fetch the chat widget uses, so test the streaming path over the websocket.
+- **Use FL 2026E HB 5601E** (it has real organization positions); FL HB 7089 is not in the dev broker. Known open bug (VOTEBOT-30): naming that bill by number in a message ("Who voted in HB 5601E?") looks up `HB5601`, without the trailing letter, so the live vote lookup fails; ask without the number on the bill's page. The REST endpoint skips the bill pre-fetch the chat widget uses, so test the streaming path over the websocket.
 
 ### Running Tests
 
@@ -910,6 +910,7 @@ For common issues and diagnostic procedures, see [docs/TROUBLESHOOTING.md](docs/
 - Chat widget truncated on mobile (send button cut off due to layout viewport expansion on content-rich host pages — fixed with `screen.width` mobile detection)
 - Missing line breaks in responses (three bugs: SDK block-boundary whitespace loss → `_join_response_blocks()`; intermittent model bullet formatting → system prompt; widget markdown parser paragraph/list bugs → `chat-widget/src/ui.js`)
 - Production query monitoring (JSONL logging, offline evaluation)
+- Wrong-state lookups, false "dispute" detection, and links that do not open on the new index (VOTEBOT-23 to 30), with the log lines that tell them apart
 - Batch sync progress reporting and checkpoint/resume after worker crash
 - Large PDF memory management (incremental embed+upsert, gc per bill, page limit)
 - DDP-Sync issues (Redis health check, trigger endpoints)

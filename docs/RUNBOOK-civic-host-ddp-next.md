@@ -1,9 +1,19 @@
 # Runbook: running VoteBot for the new website (ddp-next) on the new-infrastructure server
 
 Ticket: VOTEBOT-14. Blocks NEXT-36 (chat on the new site) and SYNC-92 (the cutover).
-Run it through the prod agent (`ddp-broker-py` `notes/ops-handoff`). **Nothing in this document has been run.**
-It was written from the repos only: the live nginx configs and real `.env` files were not available, so every
-step starts with a read-only check and every value that is not in a repo is marked `<...>`, not guessed.
+Run it through the prod agent (`ddp-broker-py` `notes/ops-handoff`).
+
+**Status 2026-10-08** (taken from the prod agent's replies on that branch; not re-run when this was written). **Run on
+the broker host:** 3.1 (swap), 3.2 to 3.5 (image built on the host, compose project, `.env` rendered with `render-env.sh`,
+container verified inside the Docker network), 3.7 (the broker's nginx routes), the section 6 verification (smoke test 6
+of 6 on every deploy; `main` `d3742ae` was deployed on 2026-10-08) and a rollback rehearsal (about 33 s each way).
+**Not run:** section 2 (the `legacy-webflow` branch and tag: the old-server agent has not answered, VOTEBOT-14), the
+log-cleanup install in 3.6 (needs sudo, VOTEBOT-20), section 4 (the website and the widget: NEXT-36), section 7 (the
+cutover: SYNC-92). Section 5's weekly check and the OpenAI usage limit are not recorded in the notes this status was
+written from.
+
+The runbook was first written from the repos only (the live nginx configs and real `.env` files were not available), so
+every step starts with a read-only check and every value that is not in a repo is marked `<...>`, not guessed.
 
 ## 0. The layout (decided by Ramon, 2026-10-05)
 
