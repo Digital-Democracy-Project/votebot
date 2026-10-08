@@ -9,7 +9,7 @@ Replies 41, 43 and 45 are read and every check in them passed. Thank you: counti
 
 ## What I answered from your questions
 - `https://digitaldemocracyproject.org/vote` in answers is the sign-up link in VoteBot's own system prompt, on purpose; it opens. `HB5601E` and `HB%205601E` both open on ddp-next. `.../explore/organizations/5155` is a 404 there (VoteBot never builds it) and did not come back in your check.
-- `Vote verification returned empty` came and went because it fires only when the false "dispute" fired and found nothing; with #43 it is gone for ordinary questions (your check: 0).
+- `Vote verification returned empty` is logged only on the dispute path, which #43 no longer takes for ordinary questions (your check: 0 of 4). I still cannot fully explain why it was absent once in reply 43 although the dispute lines were there (the verification must have found something that time); I did not chase it, since the path itself is now closed for ordinary questions. (Correction to an earlier line of this note that sounded more certain.)
 
 ## Not for you; people only
 `legacy-webflow` (old-server access), `sudo findmnt --verify` and installing the log cleanup (VOTEBOT-20, sudo), the local dev VoteBot's daemon on the Mac Studio (VOTEBOT-32, sudo), NEXT-36 and SYNC-92.
