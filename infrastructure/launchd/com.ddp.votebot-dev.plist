@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  System LaunchDaemon for the LOCAL DEV copy of VoteBot on the Mac Studio (127.0.0.1:8010, against the dev broker :8080
+  and the local api-v3 :8002). Not the civic EC2 VoteBot and not the production container (those are
+  infrastructure/docker/docker-compose.prod.yml on the EC2 broker host).
+
+  Same pattern as com.ddp.ddp-sync / com.ddp.openstates-api: a system daemon, because this machine is administered over
+  SSH with no console login, so per-user GUI agents never come up after a reboot (see ddp-infra README, Fleet Topology).
+  Runs as agentsmith so it keeps read access to the repo, the .venv, the git-ignored .env and the Colima Docker socket.
+  Needs the git-ignored votebot/.env (local dev settings; no Slack tokens on purpose).
+
+  Install (from an admin account; agentsmith has no sudo):
+    sudo cp infrastructure/launchd/com.ddp.votebot-dev.plist /Library/LaunchDaemons/com.ddp.votebot-dev.plist
+    sudo chown root:wheel /Library/LaunchDaemons/com.ddp.votebot-dev.plist
+    sudo chmod 644        /Library/LaunchDaemons/com.ddp.votebot-dev.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.ddp.votebot-dev.plist
+  Stop the hand-started copy first if one is running (it holds port 8010): pkill -f "uvicorn votebot.main:app".
+  Check:    curl localhost:8010/votebot/v1/health/ready      logs: logs/dev-server.log
+  Restart:  sudo launchctl kickstart -k system/com.ddp.votebot-dev
+  Remove:   sudo launchctl bootout system/com.ddp.votebot-dev && sudo rm /Library/LaunchDaemons/com.ddp.votebot-dev.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ddp.votebot-dev</string>
+
+    <key>UserName</key>
+    <string>agentsmith</string>
+    <key>GroupName</key>
+    <string>staff</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/agentsmith/Developer/repos/votebot/infrastructure/start-votebot-dev.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/agentsmith/Developer/repos/votebot</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- HOME must be set explicitly for a daemon: the script finds Colima's docker.sock under it. -->
+        <key>HOME</key>
+        <string>/Users/agentsmith</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- Start at boot and keep alive. The script waits (bounded) for Docker, the dev broker and api-v3 and exits
+         non-zero if they never come up, so launchd retries every ThrottleInterval seconds until they do. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/agentsmith/Developer/repos/votebot/logs/dev-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/agentsmith/Developer/repos/votebot/logs/dev-server.log</string>
+</dict>
+</plist>
