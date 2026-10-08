@@ -484,6 +484,12 @@ def _build_ddp_url(metadata: dict, doc_type: str) -> str | None:
     if not slug:
         return None
 
+    # An organization vector of the canonical-id index (it carries `broker_org_id`) has a slug but the new site has no
+    # organization page (ddp-next has no /organizations route; the broker's own search returns url null for the same
+    # reason), so build nothing: a made-up link is worse than none (VOTEBOT-27). The legacy index is unchanged.
+    if doc_type == "organization" and (metadata.get("broker_org_id") or metadata.get("extra", {}).get("broker_org_id")):
+        return None
+
     if doc_type == "bill":
         return f"{base_url}/bills/{slug}"
     elif doc_type == "legislator":
