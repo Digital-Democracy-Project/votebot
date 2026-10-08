@@ -48,3 +48,32 @@ def test_a_named_state_still_wins():
     assert guess(None, "What is the status of Texas HB 5?") == "TX"
     assert guess(None, "status of VA HB 2724") == "VA"
     assert guess(None, "Was Texas HB 5 discussed in Congress?") == "TX"  # a state beats a federal word
+
+
+# VOTEBOT-28: a two-letter English word before a bill number is not a state, and "West Virginia" is not Virginia
+@pytest.mark.parametrize("message", [
+    "Who voted in HB 7089?",
+    "What changed in HB 7089 between versions?",
+    "Is it or HB 5 better?",
+    "Tell me about me HB 3",
+    "What is hi HB 4?",
+    "ok HB 9 passed?",
+])
+def test_a_lower_case_word_before_a_bill_number_is_not_a_state(message):
+    assert guess(None, message) is None
+
+
+@pytest.mark.parametrize("message, expected", [
+    ("VA HB 2724", "VA"),
+    ("What is the status of FL SB 4?", "FL"),
+    ("va hb 2724", None),            # a code in lower case is not read as a state (the page's own state is used)
+    ("IN HB 7089 status", "IN"),     # written in capitals it is a code
+    ("What about West Virginia HB 12?", "WV"),
+    ("Virginia HB 3", "VA"),
+    ("virginia hb 3", "VA"),
+    ("Ohio HB 5", "OH"),
+    ("the remaining indiana bills", "IN"),
+    ("the remaining bills", None),   # no state inside "remaining"
+])
+def test_state_codes_in_capitals_and_state_names_as_whole_words(message, expected):
+    assert guess(None, message) == expected

@@ -2658,16 +2658,19 @@ class VoteBotAgent:
             "wisconsin": "WI", "wyoming": "WY",
         }
 
-        # Check for state names
-        for state_name, state_code in state_names.items():
-            if state_name in message_lower:
-                return state_code
+        # Check for state names: whole words, longest first, so "West Virginia" is WV and not the "virginia" inside it
+        # (retrieval.py's STATE_MAPPINGS matches whole words too, but covers only 11 states; this one needs all 50).
+        for state_name in sorted(state_names, key=len, reverse=True):
+            if re.search(rf"(?<![a-z]){re.escape(state_name)}(?![a-z])", message_lower):
+                return state_names[state_name]
 
-        # Check for explicit state codes (e.g., "VA HB 2724")
-        state_code_pattern = r'\b([A-Z]{2})\s+(hb|sb|hr|s|hj|sj)'
-        match = re.search(state_code_pattern, message, re.IGNORECASE)
+        # Check for explicit state codes (e.g., "VA HB 2724"). The code must be written in capitals: lower-case "in",
+        # "or", "me", "hi", "ok" before a bill number are words ("Who voted in HB 7089?" is not Indiana). The bill
+        # prefix may be any case.
+        state_code_pattern = r'\b([A-Z]{2})\s+(?i:hb|sb|hr|s|hj|sj)'
+        match = re.search(state_code_pattern, message)
         if match:
-            potential_code = match.group(1).upper()
+            potential_code = match.group(1)
             if potential_code in state_names.values():
                 return potential_code
 
