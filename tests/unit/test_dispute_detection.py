@@ -45,6 +45,22 @@ def test_an_ordinary_question_is_not_a_dispute(message):
     "They became senators last year",
     "she was elected in 2024",
     "I think she is currently a representative",
+    "They were elected in 2024",             # plural forms, written out with the right verb
+    "They were appointed last month",
+    "They are currently the senators",
+    "they're the new leadership",
+    "'that's wrong'",                        # a quoted phrase still matches (quotes are not word characters)
+    "\"are you sure\"",
 ])
 def test_a_real_dispute_or_correction_is_still_one(message):
     assert is_dispute(None, message) is True
+
+
+def test_every_correction_phrase_is_grammatical_and_names_a_person():
+    from votebot.core.agent import CORRECTION_PHRASES
+
+    for phrase in CORRECTION_PHRASES:
+        assert phrase.split()[0].split("'")[0] in ("she", "he", "they"), phrase
+        assert "they is" not in phrase and "they was" not in phrase and "she are" not in phrase and "he are" not in phrase
+    assert "they were elected" in CORRECTION_PHRASES and "they are currently the" in CORRECTION_PHRASES
+    assert len(CORRECTION_PHRASES) == len(set(CORRECTION_PHRASES))
