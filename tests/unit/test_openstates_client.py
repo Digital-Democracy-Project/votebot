@@ -30,7 +30,7 @@ def _settings(**overrides) -> Settings:
         openstates_api_key=SecretStr("public-key"),
     )
     defaults.update(overrides)
-    return Settings(**defaults)
+    return Settings(_env_file=None, **defaults)  # a developer's local .env must not change what these tests see
 
 
 class TestOpenstatesBaseUrl:
