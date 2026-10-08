@@ -2660,8 +2660,11 @@ class VoteBotAgent:
 
         # Check for state names: whole words, longest first, so "West Virginia" is WV and not the "virginia" inside it
         # (retrieval.py's STATE_MAPPINGS matches whole words too, but covers only 11 states; this one needs all 50).
+        # Words of a multi-word name may be separated by spaces, line breaks or a hyphen ("West-Virginia"), so a
+        # formatting variant of "west virginia" does not fall through to the "virginia" inside it.
         for state_name in sorted(state_names, key=len, reverse=True):
-            if re.search(rf"(?<![a-z]){re.escape(state_name)}(?![a-z])", message_lower):
+            name_pattern = r"[\s-]+".join(re.escape(word) for word in state_name.split())
+            if re.search(rf"(?<![a-z]){name_pattern}(?![a-z])", message_lower):
                 return state_names[state_name]
 
         # Check for explicit state codes (e.g., "VA HB 2724"). The code must be written in capitals: lower-case "in",

@@ -74,6 +74,17 @@ def test_a_lower_case_word_before_a_bill_number_is_not_a_state(message):
     ("Ohio HB 5", "OH"),
     ("the remaining indiana bills", "IN"),
     ("the remaining bills", None),   # no state inside "remaining"
+    ("VA hb 3", "VA"),               # a capital code with a lower-case bill prefix
+    ("West-Virginia HB 12", "WV"),   # a hyphen, repeated spaces or a line break inside a two-word name
+    ("West  Virginia HB 12", "WV"),
+    ("West\nVirginia HB 12", "WV"),
+    ("New Mexico HB 2", "NM"),
+    ("north carolina sb 5", "NC"),
+    ("South Dakota HB 1", "SD"),
+    ("Virginia's HB 3", "VA"),       # a possessive and a comma are not part of the name
+    ("Virginia, HB 3", "VA"),
+    ("(Virginia) HB 3", "VA"),
+    ("VirginiaBeach HB 3", None),    # a state name inside a longer word is not a state
 ])
 def test_state_codes_in_capitals_and_state_names_as_whole_words(message, expected):
     assert guess(None, message) == expected
