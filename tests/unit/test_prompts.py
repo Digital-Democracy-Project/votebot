@@ -98,6 +98,16 @@ class TestBuildSystemPrompt:
         assert "/organizations/" not in text
         assert "**Source URL:** https://usffacultysenate.example" in text  # the organization's own website stays
 
+    def test_the_marker_is_found_under_extra_too_and_an_empty_one_does_not_count(self):
+        def chunk(**md):
+            return {"id": "org-x", "content": "c", "metadata": {"document_type": "organization", "slug": "usf", **md}}
+
+        nested = format_retrieved_chunks([chunk(extra={"broker_org_id": "5155"})])
+        assert "DDP URL" not in nested  # a retriever that nests the field under extra gets the same result
+
+        empty = format_retrieved_chunks([chunk(broker_org_id="")])
+        assert "**DDP URL:** https://digitaldemocracyproject.org/organizations/usf" in empty  # no id: not a new-index chunk
+
     def test_a_legacy_organization_chunk_keeps_its_ddp_url(self):
         chunk = {
             "id": "organization-webflow-abc",
