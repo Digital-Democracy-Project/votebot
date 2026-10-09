@@ -10,7 +10,8 @@
   Runs as agentsmith so it keeps read access to the repo, the .venv, the git-ignored .env and the Colima Docker socket.
   Needs the git-ignored votebot/.env (local dev settings; no Slack tokens on purpose).
 
-  Install (from an admin account; agentsmith has no sudo):
+  Install (from an admin account; agentsmith has no sudo). Easiest: sudo bash infrastructure/install-votebot-dev-daemon.sh
+  (it does the steps below, checks first, waits for health; its check flag changes nothing, its uninstall flag removes it). By hand:
     sudo cp infrastructure/launchd/com.ddp.votebot-dev.plist /Library/LaunchDaemons/com.ddp.votebot-dev.plist
     sudo chown root:wheel /Library/LaunchDaemons/com.ddp.votebot-dev.plist
     sudo chmod 644        /Library/LaunchDaemons/com.ddp.votebot-dev.plist
