@@ -53,23 +53,21 @@ const DDPUI = (function() {
             html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
             html = html.replace(/_(.+?)_/g, '<em>$1</em>');
 
-            // Markdown links [text](url): only http(s) and mailto are links (a javascript: or data: URL stays text), and a quote
-            // in the URL is encoded so it cannot end the href attribute. Only & < > were escaped above.
-            // A rejected link is set aside under a placeholder while the bare URLs are linked, so an https:// inside it
-            // ([x](javascript:https://example.test)) is not turned into a link either; it is put back right after.
-            var rejected = [];
-            html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(match, text, url) {
-                var href = safeHref(url);
-                if (href) return '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
-                rejected.push(match);
-                return '\u0000' + (rejected.length - 1) + '\u0000';
-            });
-
-            // Auto-link bare URLs (not already in an href)
-            html = html.replace(/(^|[^"'>])(https?:\/\/[^\s<]+[^\s<.,;:!?"'\)\]])/g, function(match, before, url) {
-                return before + '<a href="' + safeHref(url) + '" target="_blank" rel="noopener noreferrer">' + url + '</a>';
-            });
-            html = html.replace(/\u0000(\d+)\u0000/g, function(match, index) { return rejected[index]; });
+            // Links, in ONE pass so no text is looked at twice: either a markdown link [text](url), or a bare http(s) URL.
+            // A markdown link is rendered only when safeHref accepts its URL (http(s) and mailto; a javascript: or data: URL
+            // stays text exactly as typed, and the https:// inside it is not linked either, because this replace never
+            // rescans what it has matched); a quote in any URL is percent-encoded so it cannot end the href attribute
+            // (only & < > were escaped above). A bare URL is not linked right after a quote or >, i.e. inside an href.
+            html = html.replace(
+                /\[([^\]]+)\]\(([^)]+)\)|(^|[^"'>])(https?:\/\/[^\s<]+[^\s<.,;:!?"'\)\]])/g,
+                function(match, text, markdownUrl, before, bareUrl) {
+                    if (bareUrl !== undefined) {
+                        return before + '<a href="' + safeHref(bareUrl) + '" target="_blank" rel="noopener noreferrer">' + bareUrl + '</a>';
+                    }
+                    var href = safeHref(markdownUrl);
+                    return href ? '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + text + '</a>' : match;
+                }
+            );
 
             // Blockquotes
             html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
