@@ -62,9 +62,21 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections[session_id] = websocket
 
+        # With several workers the visitor may have last talked to another one: what it left in Redis wins over
+        # anything this process remembers (which can be older), and is what makes the history and a Slack handoff
+        # in progress survive the move
+        redis_store = get_redis_store()
+        if redis_store.is_available:
+            saved = await redis_store.load_session(session_id)
+            local = sessions.get(session_id)
+            # ...unless this process has a newer copy (a save that failed leaves Redis behind)
+            if saved and not (local and local.get("revision", 0) >= saved.get("revision", 0)):
+                sessions[session_id] = saved
+
         # Initialize session if new
         if session_id not in sessions:
             sessions[session_id] = {
+                "revision": 0,  # counts the saves to Redis: tells which copy of a session is the newer (see save_session)
                 "created_at": time.time(),
                 "messages": [],
                 "handoff_active": False,
@@ -105,6 +117,24 @@ class ConnectionManager:
                 await websocket.send_json(data)
             except Exception as e:
                 logger.error("Failed to send message", session_id=session_id, error=str(e))
+
+    async def save_session(self, session_id: str):
+        """Write this process's copy of the session to Redis. Called after each thing that changes it: a client message,
+        a Slack event, a disconnect.
+
+        Each save raises the session's `revision`, and a copy is never saved over a stored one with a higher revision:
+        a worker that has not noticed its socket died keeps an older copy, and saving it when it finally does would
+        erase what happened on the worker the visitor moved to (a message, a handoff, a page change alike). Not atomic
+        (a read, then a write): the window is a Redis round trip, and it takes a stale worker saving in that instant."""
+        redis_store = get_redis_store()
+        if not (redis_store.is_available and session_id in sessions):
+            return
+        session = sessions[session_id]
+        stored = await redis_store.load_session(session_id)
+        if stored and stored.get("revision", 0) > session.get("revision", 0):
+            return
+        session["revision"] = session.get("revision", 0) + 1
+        await redis_store.save_session(session_id, session)
 
     def get_session(self, session_id: str) -> dict | None:
         """Get session data."""
@@ -328,6 +358,8 @@ class ConnectionManager:
             # Clean up local mapping
             if thread_ts:
                 thread_to_session.pop(thread_ts, None)
+
+        await self.save_session(session_id)
 
 
 manager = ConnectionManager()
@@ -582,6 +614,7 @@ async def websocket_chat_endpoint(
             session["conversation_had_handoff"] = False
             session["conversation_had_fallback"] = False
             session["conversation_had_retrieval_miss"] = False
+        await manager.save_session(session_id)
         manager.disconnect(session_id)
     except Exception as e:
         logger.exception("WebSocket error", session_id=session_id, error=str(e))
@@ -596,6 +629,7 @@ async def websocket_chat_endpoint(
             session["conversation_had_handoff"] = False
             session["conversation_had_fallback"] = False
             session["conversation_had_retrieval_miss"] = False
+        await manager.save_session(session_id)
         manager.disconnect(session_id)
 
 
@@ -609,16 +643,20 @@ async def handle_client_message(
     message_type = data.get("type")
     payload = data.get("payload", {})
 
-    if message_type == "user_message":
-        await handle_user_message(session_id, payload, client_ip=client_ip, user_agent=user_agent)
-    elif message_type == "context_update":
-        await handle_context_update(session_id, payload)
-    elif message_type == "confirm_handoff":
-        await handle_confirm_handoff(session_id)
-    elif message_type == "ping":
-        await manager.send_json(session_id, {"type": "pong"})
-    else:
-        logger.warning("Unknown message type", type=message_type, session_id=session_id)
+    try:
+        if message_type == "user_message":
+            await handle_user_message(session_id, payload, client_ip=client_ip, user_agent=user_agent)
+        elif message_type == "context_update":
+            await handle_context_update(session_id, payload)
+        elif message_type == "confirm_handoff":
+            await handle_confirm_handoff(session_id)
+        elif message_type == "ping":
+            await manager.send_json(session_id, {"type": "pong"})
+        else:
+            logger.warning("Unknown message type", type=message_type, session_id=session_id)
+    finally:
+        if message_type in ("user_message", "context_update", "confirm_handoff"):
+            await manager.save_session(session_id)
 
 
 async def handle_confirm_handoff(session_id: str):
