@@ -137,6 +137,46 @@ LEGISLATOR_CUES = re.compile(
 
 
 @dataclass
+class _Services:
+    """The clients and caching lookups an agent uses. Built once per process and shared (VOTEBOT-37)."""
+
+    llm: LLMService
+    retrieval: RetrievalService
+    web_search: WebSearchService
+    bill_votes: BillVotesService
+    broker_lookup: BrokerLookupService
+    legislators: LegislatorLookupService
+
+
+_shared_services: tuple[Settings, _Services] | None = None
+
+
+def _services_for(settings: Settings) -> _Services:
+    """The process-wide services for `settings`.
+
+    The routes build a `VoteBotAgent` for every message; building the services with it meant a new Pinecone, OpenAI and
+    httpx client each time, and caches that live on a service (api-v3's bill versions, party lookups) never survived
+    to the next message. They are kept while the same settings object is used (always, in production), and rebuilt
+    for any other, so a test or a reload with new settings gets its own. Not here: `WebflowLookupService`, whose
+    caches never expire (it is the legacy index's, and builds no client).
+    """
+    global _shared_services
+    if _shared_services is None or _shared_services[0] is not settings:
+        _shared_services = (
+            settings,
+            _Services(
+                llm=LLMService(settings),
+                retrieval=RetrievalService(settings),
+                web_search=WebSearchService(settings),
+                bill_votes=BillVotesService(settings),
+                broker_lookup=BrokerLookupService(settings),
+                legislators=LegislatorLookupService(settings),
+            ),
+        )
+    return _shared_services[1]
+
+
+@dataclass
 class AgentResult:
     """Result from the agent's message processing."""
 
@@ -185,13 +225,14 @@ class VoteBotAgent:
             settings: Application settings. Uses default if not provided.
         """
         self.settings = settings or get_settings()
-        self.llm = LLMService(self.settings)
-        self.retrieval = RetrievalService(self.settings)
-        self.web_search = WebSearchService(self.settings)
-        self.bill_votes = BillVotesService(self.settings)
+        services = _services_for(self.settings)
+        self.llm = services.llm
+        self.retrieval = services.retrieval
+        self.web_search = services.web_search
+        self.bill_votes = services.bill_votes
         self.webflow_lookup = WebflowLookupService(self.settings)
-        self.broker_lookup = BrokerLookupService(self.settings)
-        self.legislators = LegislatorLookupService(self.settings)
+        self.broker_lookup = services.broker_lookup
+        self.legislators = services.legislators
 
     def _normalize_button(self, button: str | None) -> str | None:
         """Apply the feature flag and validate the button type.

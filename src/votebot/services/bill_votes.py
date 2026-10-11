@@ -4,6 +4,7 @@ This service provides real-time vote lookup for bills via the OpenStates API.
 """
 
 import re
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -13,6 +14,8 @@ from votebot.config import Settings, get_settings
 from votebot.services.openstates_client import openstates_base_url, openstates_headers
 
 logger = structlog.get_logger()
+
+PARTY_CACHE_SECONDS = 3600  # the service lives as long as the process (VOTEBOT-37), so a party change must be picked up
 
 
 @dataclass
@@ -89,8 +92,8 @@ class BillVotesService:
         """
         self.settings = settings or get_settings()
         self.api_base = openstates_base_url(self.settings)
-        # Cache for legislator lookups
-        self._legislator_cache: dict[str, dict] = {}
+        # Cache for legislator lookups: jurisdiction -> (when stored, {name: party})
+        self._legislator_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
     async def get_bill_votes(
         self,
@@ -310,8 +313,9 @@ class BillVotesService:
         cache_key = f"legislators-{jurisdiction.lower()}"
 
         # Check cache first
-        if cache_key in self._legislator_cache:
-            return self._legislator_cache[cache_key]
+        cached = self._legislator_cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < PARTY_CACHE_SECONDS:
+            return cached[1]
 
         logger.info("Fetching legislators for party info", jurisdiction=jurisdiction)
 
@@ -355,7 +359,7 @@ class BillVotesService:
                     offset += per_page
 
             # Cache the results
-            self._legislator_cache[cache_key] = name_to_party
+            self._legislator_cache[cache_key] = (time.monotonic(), name_to_party)
             logger.info(
                 "Cached legislator party info",
                 jurisdiction=jurisdiction,
