@@ -33,6 +33,7 @@ const ALLOWED_TAGS = new Set(['p', 'a', 'strong', 'em', 'code', 'pre', 'h1', 'h2
 // What the output may contain whatever the input was: only known tags, and every anchor of the strict shape with a safe href.
 function assertSafeOutput(html) {
     for (const [, tag] of html.matchAll(/<\/?([a-z0-9]+)/gi)) assert.ok(ALLOWED_TAGS.has(tag.toLowerCase()), `unexpected <${tag}> in ${html}`);
+    for (const [tag] of html.matchAll(/<(?!a[ >])[a-z0-9]+[^>]*>/gi)) assert.match(tag, /^<[a-z0-9]+>$/i, `a tag with attributes: ${tag} in ${html}`);
     for (const anchor of html.match(/<a [^>]*>/g) || []) {
         assert.strictEqual((anchor.match(LINK_TAG) || []).length, 1, `anchor has another shape: ${anchor}`);
         assert.match(anchor, /^<a href="(https?:|mailto:)/i, anchor);
@@ -120,6 +121,15 @@ for (const target of Object.keys(TARGETS)) {
         // no placeholder machinery: NUL input is just text, and rejected links come back exactly as typed
         assert.strictEqual(parse('\u00000\u0000'), '<p>\u00000\u0000</p>');
         assert.strictEqual(parse('[a](javascript:1)[b](data:2)'), '<p>[a](javascript:1)[b](data:2)</p>');
+    });
+
+    test(`an entity-obfuscated scheme is not a link (the & is escaped before the scheme is checked) [${target}]`, () => {
+        const { parse } = loadParser(target);
+        for (const url of ['javascript&colon;alert(1)', 'JAVASCRIPT&colon;alert(1)', '&#106;avascript:alert(1)', '&#x6A;avascript:alert(1)', 'java&Tab;script:alert(1)', 'java&NewLine;script:alert(1)', '&#104;ttps://ok.test', 'ht&#116;ps://ok.test']) {
+            const html = parse(`[x](${url})`);
+            assert.ok(!html.includes('<a '), `${url} -> ${html}`);
+            assertSafeOutput(html);
+        }
     });
 
     test(`text, bold and a title with quotes are untouched [${target}]`, () => {
