@@ -84,6 +84,15 @@ for (const target of Object.keys(TARGETS)) {
         assert.match(parse('[x](HTTPS://example.test/UP)'), /<a href="HTTPS:\/\/example\.test\/UP"/);
     });
 
+    test(`a rejected link stays plain text, even when it holds an http(s) URL [${target}]`, () => {
+        const { parse } = loadParser(target);
+        for (const text of ['[x](javascript:https://example.test)', '[x](data:text/html,https://example.test)', '[x](vbscript:y)']) {
+            assert.strictEqual(parse(text), `<p>${text}</p>`);
+        }
+        // and the surrounding text is still processed
+        assert.strictEqual(parse('see [x](javascript:https://example.test) and https://ok.test/a'), '<p>see [x](javascript:https://example.test) and <a href="https://ok.test/a" target="_blank" rel="noopener noreferrer">https://ok.test/a</a></p>');
+    });
+
     test(`text, bold and a title with quotes are untouched [${target}]`, () => {
         const { parse } = loadParser(target);
         assert.strictEqual(parse('**The "Fair" Act** isn\'t a link'), '<p><strong>The "Fair" Act</strong> isn\'t a link</p>');
