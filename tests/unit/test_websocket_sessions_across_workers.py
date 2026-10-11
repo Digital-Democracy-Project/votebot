@@ -130,13 +130,16 @@ def test_a_worker_that_missed_the_move_cannot_overwrite_the_newer_session(make_w
         _read_until(conn, "stream_end")
         stale = json.loads(json.dumps(ws.sessions["s1"]))
 
-    with make_worker().websocket_connect("/ws/chat?session_id=s1") as conn:  # worker 2 hears the second message
+    with make_worker().websocket_connect("/ws/chat?session_id=s1") as conn:  # worker 2: a handoff, no new message
         assert conn.receive_json()["payload"]["restored"] is True
         conn.receive_json()
-        conn.send_json(_user_message("second"))
-        _read_until(conn, "stream_end")
+        ws.sessions["s1"].update(handoff_active=True, slack_thread_ts="111.222")
+        conn.send_json({"type": "context_update", "payload": {"page_context": {"type": "general"}}})
+        conn.send_json({"type": "ping"})
+        assert conn.receive_json()["type"] == "pong"
     newer = json.loads(redis.data["s1"])
-    assert len(newer["messages"]) == 4
+    assert newer["handoff_active"] is True
+    assert newer["last_message_time"] == stale["last_message_time"]  # same time: only the revision tells them apart
 
     ws.sessions.clear()
     ws.sessions["s1"] = stale  # worker 1 finally notices its dead socket and saves what it remembers
@@ -144,6 +147,28 @@ def test_a_worker_that_missed_the_move_cannot_overwrite_the_newer_session(make_w
 
     asyncio.run(ws.ConnectionManager().save_session("s1"))
     assert json.loads(redis.data["s1"]) == newer
+
+
+def test_a_fresher_copy_in_this_process_is_not_replaced_by_an_older_one_in_redis(make_worker, redis, monkeypatch):
+    client = make_worker()
+    with client.websocket_connect("/ws/chat?session_id=s1") as conn:
+        conn.receive_json()
+        conn.send_json(_user_message("first"))
+        _read_until(conn, "stream_end")
+        stored_after_first = redis.data["s1"]
+
+        async def failing_save(session_id, session):  # Redis failing: RedisStore logs and carries on
+            pass
+
+        monkeypatch.setattr(redis, "save_session", failing_save)
+        conn.send_json(_user_message("second"))  # saved nowhere
+        _read_until(conn, "stream_end")
+    assert redis.data["s1"] == stored_after_first
+
+    with client.websocket_connect("/ws/chat?session_id=s1") as conn:  # same worker: its copy is the newer one
+        conn.receive_json()
+        restored = conn.receive_json()
+    assert [m["content"] for m in restored["payload"]["messages"]][:3] == ["first", "The bill does X.", "second"]
 
 
 async def test_a_slack_reply_delivered_on_this_worker_is_saved(monkeypatch, redis):
@@ -197,3 +222,29 @@ async def test_redis_store_round_trips_a_session_with_a_ttl_and_never_raises():
     store._client = FakeRedisClient(fail=True)  # Redis failing costs the save, not the chat
     await store.save_session("s1", {})
     assert await store.load_session("s1") is None
+
+    store._client = FakeRedisClient()  # what is stored is not a session object: ignored, not trusted
+    store._client.kv[f"{SESSION_PREFIX}s1"] = "[1, 2]"
+    assert await store.load_session("s1") is None
+    store._client.kv[f"{SESSION_PREFIX}s1"] = "{not json"
+    assert await store.load_session("s1") is None
+
+
+async def test_a_redis_that_hangs_costs_the_save_and_the_load_a_timeout_not_the_chat(monkeypatch):
+    import asyncio
+
+    from votebot.services import redis_store as redis_store_module
+    from votebot.services.redis_store import RedisStore
+
+    class Hanging:
+        async def get(self, key):
+            await asyncio.sleep(30)
+
+        async def set(self, key, value, ex=None):
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(redis_store_module, "SESSION_REDIS_TIMEOUT", 0.05)
+    store = RedisStore()
+    store._client = Hanging()
+    await asyncio.wait_for(store.save_session("s1", {"a": 1}), 2)
+    assert await asyncio.wait_for(store.load_session("s1"), 2) is None

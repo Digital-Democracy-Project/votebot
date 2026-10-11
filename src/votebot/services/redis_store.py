@@ -28,6 +28,7 @@ BILL_VERSION_PREFIX = "votebot:bill_version:"
 BILL_VERSION_TTL = 86400 * 90  # 90 days
 SESSION_PREFIX = "votebot:session:"
 SESSION_TTL = 7200  # 2 hours since the visitor's last message: longer than the widget's 30 minutes of inactivity
+SESSION_REDIS_TIMEOUT = 2.0  # seconds: a Redis that hangs must not hold up a chat message or a connection
 
 
 class RedisStore:
@@ -126,7 +127,10 @@ class RedisStore:
         if not self._client:
             return
         try:
-            await self._client.set(f"{SESSION_PREFIX}{session_id}", json.dumps(session, default=str), ex=SESSION_TTL)
+            await asyncio.wait_for(
+                self._client.set(f"{SESSION_PREFIX}{session_id}", json.dumps(session, default=str), ex=SESSION_TTL),
+                SESSION_REDIS_TIMEOUT,
+            )
         except Exception as e:
             logger.error("Redis: failed to save session", session_id=session_id, error=str(e))
 
@@ -135,9 +139,12 @@ class RedisStore:
         if not self._client:
             return None
         try:
-            data = await self._client.get(f"{SESSION_PREFIX}{session_id}")
-            if data:
-                return json.loads(data)
+            data = await asyncio.wait_for(self._client.get(f"{SESSION_PREFIX}{session_id}"), SESSION_REDIS_TIMEOUT)
+            session = json.loads(data) if data else None
+            if isinstance(session, dict):
+                return session
+            if session is not None:
+                logger.error("Redis: stored session is not an object; ignoring it", session_id=session_id)
         except Exception as e:
             logger.error("Redis: failed to load session", session_id=session_id, error=str(e))
         return None

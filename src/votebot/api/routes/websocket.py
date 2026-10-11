@@ -68,12 +68,15 @@ class ConnectionManager:
         redis_store = get_redis_store()
         if redis_store.is_available:
             saved = await redis_store.load_session(session_id)
-            if saved:
+            local = sessions.get(session_id)
+            # ...unless this process has a newer copy (a save that failed leaves Redis behind)
+            if saved and not (local and local.get("revision", 0) >= saved.get("revision", 0)):
                 sessions[session_id] = saved
 
         # Initialize session if new
         if session_id not in sessions:
             sessions[session_id] = {
+                "revision": 0,  # counts the saves to Redis: tells which copy of a session is the newer (see save_session)
                 "created_at": time.time(),
                 "messages": [],
                 "handoff_active": False,
@@ -119,15 +122,19 @@ class ConnectionManager:
         """Write this process's copy of the session to Redis. Called after each thing that changes it: a client message,
         a Slack event, a disconnect.
 
-        Not over a copy that has seen a later message: a worker that has not noticed its socket died keeps an older
-        copy, and saving it when it finally does would erase what the visitor said to the worker they moved to."""
+        Each save raises the session's `revision`, and a copy is never saved over a stored one with a higher revision:
+        a worker that has not noticed its socket died keeps an older copy, and saving it when it finally does would
+        erase what happened on the worker the visitor moved to (a message, a handoff, a page change alike). Not atomic
+        (a read, then a write): the window is a Redis round trip, and it takes a stale worker saving in that instant."""
         redis_store = get_redis_store()
         if not (redis_store.is_available and session_id in sessions):
             return
+        session = sessions[session_id]
         stored = await redis_store.load_session(session_id)
-        if stored and (stored.get("last_message_time") or 0) > (sessions[session_id].get("last_message_time") or 0):
+        if stored and stored.get("revision", 0) > session.get("revision", 0):
             return
-        await redis_store.save_session(session_id, sessions[session_id])
+        session["revision"] = session.get("revision", 0) + 1
+        await redis_store.save_session(session_id, session)
 
     def get_session(self, session_id: str) -> dict | None:
         """Get session data."""
