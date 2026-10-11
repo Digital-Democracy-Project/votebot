@@ -368,13 +368,18 @@ the processes at 100 simultaneous chats, with VOTEBOT-36, 37 and 38 (stubbed LLM
 
 So one worker holds 100 simultaneous chats with room to spare, and the container limit is 1 GiB (it was 768 MiB: the old
 code reached 546 MiB at 100 chats). More workers add resilience (one process dying does not drop every chat) and a second
-core, at about 140 to 190 MiB each; they do not add speed at this size. **To change the count:** a PR editing
+core, at about 140 to 190 MiB each; they do not add speed at this size. **Before deploying the memory limit or any count above 1,** the checkout must contain VOTEBOT-36, 37 and 38 (`git log --oneline | grep -E 'VOTEBOT-3[678]'` shows all three); the figures above depend on them. **To change the count:** a PR editing
 `WEB_CONCURRENCY` in `prod.env.defaults`; then `infrastructure/render-env.sh --check`, `render-env.sh`, and
-`up -d --force-recreate votebot` (check there are no open chats first, and tag the running image as in 3.4). Afterwards
-`docker stats votebot-ddp-next` should show the memory above, and `docker logs votebot-ddp-next | grep "Started server process"`
-should show one line per worker. Re-run the load test (below) before going beyond 3.
+`up -d --force-recreate votebot` (check there are no open chats first, and tag the running image as in 3.4). Afterwards, check that the setting arrived and took effect:
+`docker exec votebot-ddp-next printenv WEB_CONCURRENCY` (the rendered `.env` reaches the container through `env_file`),
+`docker logs votebot-ddp-next | grep -c "Started server process"` (one line per worker),
+`docker inspect -f '{{.HostConfig.Memory}}' votebot-ddp-next` (1073741824 for 1g) and `docker stats votebot-ddp-next` (the
+memory above); then run the smoke test of section 6. To go back: revert the PR, `render-env.sh`, and recreate (or retag the
+previous image, see "Rollback tag" in 3.4). Re-run the load test (below) before going beyond 3.
 
-Run it in dev, never against production: `python scripts/load_ws.py --workers 1 2 3 --clients 10 25 50 100`.
+The two tables are separate runs (the second includes VOTEBOT-38's Redis saves, and a run varies by a few tenths of a
+second: 1.1 s and 1.4 s for 100 clients on one worker are the same result). Run it in dev, never against production:
+`python scripts/load_ws.py --workers 1 2 3 --clients 10 25 50 100`.
 
 **Audit of what is per-process (the prod agent's note of 2026-10-11, checked against the code):**
 
