@@ -2,14 +2,16 @@
 
 Starts `scripts/load_app.py` (the real app, LLM stubbed) with --workers N on a free local port, opens C websockets at
 once, each asking the same three questions in turn (a quick-action button, a typed question, a "what changed" one), and
-reports per-question latency, errors, how long a trivial request (/health/live) took while the load ran (a blocked event
-loop shows up there), and peak memory of the server's processes.
+reports per-question latency (successful questions only; failures are in the errors column), errors, how long a trivial
+request (/health/live) took while the load ran (a coarse responsiveness check: a blocked event loop shows up there, but with
+several workers the probe may be answered by an idle one), and peak memory of the server's processes.
 
     python scripts/load_ws.py --workers 1 --clients 25
     python scripts/load_ws.py --workers 1 2 3 --clients 10 25 50 100     # the whole matrix, one table row per run
 
 Needs the .env keys (Pinecone, OpenAI embeddings, api-v3), a Redis on localhost:6380 (the dev one) and a bill in the
-index, like smoke_ws.py, whose `discover_bill` it uses. Do NOT point it at production: use `--url` only for a dev copy.
+index, like smoke_ws.py, whose `discover_bill` it uses. It always starts its own local server, with its settings forced
+(see load_app.py), and cannot be pointed at anything else. The three questions of a client are asked one after another.
 """
 
 from __future__ import annotations
@@ -158,7 +160,11 @@ async def run(workers: int, clients: int, page_context: dict, ramp: float):
         await asyncio.gather(*watchers)
     finally:
         os.killpg(server.pid, signal.SIGTERM)
-        server.wait(timeout=30)
+        try:
+            server.wait(timeout=20)
+        except subprocess.TimeoutExpired:  # a worker that will not stop must not outlive the run
+            os.killpg(server.pid, signal.SIGKILL)
+            server.wait(timeout=10)
 
     def col(kind: str) -> str:
         values = [seconds for k, seconds in results if k == kind]
@@ -184,7 +190,7 @@ async def main(argv: list[str] | None = None) -> int:
 
     page_context = await discover_bill(args.jurisdiction)
     print(f"bill: {page_context['id']} {page_context['jurisdiction']} {page_context['session']}\n")
-    print("p50 / p95 seconds per question; health/live is p50 / p95 / max milliseconds while loaded\n")
+    print("p50 / p95 seconds per question (successful ones only); health/live is p50 / p95 / max milliseconds while loaded\n")
     print("| workers | clients | button | typed | what changed | health/live ms | errors | answers per worker | peak MiB | cpu % | s |")
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     all_errors: list = []

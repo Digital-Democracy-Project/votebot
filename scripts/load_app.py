@@ -8,10 +8,14 @@ Run by `load_ws.py`; by hand: `uvicorn load_app:app --app-dir scripts --workers 
 import asyncio
 import os
 
-# Before votebot.main reads its settings: nothing a test writes may reach the dev button cache (Redis db 5) or the query logs.
-os.environ.setdefault("REDIS_URL", "redis://localhost:6380/5")
-os.environ.setdefault("QUERY_LOG_ENABLED", "false")
-os.environ.setdefault("VOTEBOT_QUICK_ACTION_BUTTONS", "true")
+# Set (not setdefault) before votebot.main reads its settings, so nothing inherited from a shell or a .env can send a test's
+# writes anywhere else. What the app writes while answering: the button cache and chat sessions (Redis, db 5 here, which only
+# this script uses; entries expire by their TTLs), and the query logs (off). It writes nothing to Pinecone, Webflow or api-v3,
+# and Slack is not started without tokens. What it spends: a few embedding calls per message.
+os.environ["REDIS_URL"] = "redis://localhost:6380/5"
+os.environ["QUERY_LOG_ENABLED"] = "false"
+os.environ["VOTEBOT_QUICK_ACTION_BUTTONS"] = "true"
+os.environ["SLACK_BOT_TOKEN"] = os.environ["SLACK_APP_TOKEN"] = ""
 
 from votebot.main import app  # noqa: E402
 from votebot.services import llm  # noqa: E402
