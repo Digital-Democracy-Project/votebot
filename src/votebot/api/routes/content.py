@@ -9,6 +9,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Query
 
 from votebot.config import get_settings
+from votebot.utils.text import decode_entities
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/content", tags=["content"])
@@ -131,7 +132,7 @@ async def resolve_content(
         return {
             "type": "bill",
             "id": f"{fields.get('bill-prefix', '')} {fields.get('bill-number', '')}".strip() or slug,
-            "title": fields.get("name", ""),
+            "title": decode_entities(fields.get("name", "")),
             "jurisdiction": jurisdiction,
             "session": session,
             "description": truncate_text(strip_html(fields.get("description", "")), 200),
@@ -144,7 +145,7 @@ async def resolve_content(
         return {
             "type": "legislator",
             "id": fields.get("openstatesid", slug),
-            "title": fields.get("name", ""),
+            "title": decode_entities(fields.get("name", "")),
             "jurisdiction": extract_jurisdiction(fields),
             "party": fields.get("party-2", fields.get("party", "")),
             "chamber": fields.get("chamber", ""),
@@ -156,7 +157,7 @@ async def resolve_content(
         return {
             "type": "organization",
             "id": slug,
-            "title": fields.get("name", ""),
+            "title": decode_entities(fields.get("name", "")),
             "organization_type": fields.get("type-2", ""),
             "url": url,
             "slug": slug,
@@ -230,7 +231,7 @@ async def resolve_ddp_next_bill(url: str, key: dict) -> dict:
                     "session": (meta.get("session") if isinstance(meta.get("session"), dict) else {}).get("code"),
                     "gov_id": meta.get("govId"),
                 }
-                title = meta.get("title")
+                title = decode_entities(meta.get("title"))
                 if not all(key.values()):
                     raise HTTPException(status_code=502, detail="Broker scorecard is missing bill identity fields")
             resolved = await _broker_get(client, f"{root}/api/bills/resolve/", params=key)

@@ -3,7 +3,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from votebot.utils.text import decode_entities
 
 
 class PageContext(BaseModel):
@@ -45,6 +47,12 @@ class PageContext(BaseModel):
         None,
         description="OpenStates bill id (bare UUID) for Pinecone filtering on the canonical-id index",
     )
+
+    @field_validator("title")
+    @classmethod
+    def _decode_title(cls, title: str | None) -> str | None:
+        """A title can arrive HTML-escaped ("America&#39;s"); the prompt, the web search and the logs want text."""
+        return decode_entities(title)
 
 
 class NavigationContext(BaseModel):

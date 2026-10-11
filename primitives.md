@@ -250,6 +250,7 @@ Singleton: `get_redis_store() -> RedisStore`. All methods no-op gracefully when 
 
 ## API schemas (`api/schemas/chat.py`)
 
+- **`decode_entities(text)`** (`utils/text.py`, VOTEBOT-40) — turns the HTML entities a title can arrive with back into text (numeric ones and `&amp; &lt; &gt; &quot; &apos;`, one pass; anything else untouched). Applied to every `PageContext.title` (a pydantic validator, so the REST route and the websocket's `_page_context_from_payload` both get it) and to the titles `/content/resolve` returns (Webflow `name`, broker scorecard `title`). The widget has the same rule (`decodeEntities` in `chat-widget/src/widget.js`, VOTEBOT-1). A new place that receives a title from outside should use this, not a new regex.
 - **`PageContext`** — `type: "bill"|"legislator"|"organization"|"general"`, `id, jurisdiction, session, title, url, slug, webflow_id, ocd_bill_id`. `ocd_bill_id` is the bare OpenStates UUID (no `ocd-bill/` prefix, matching the vectors' metadata). The filter source for retrieval — always pass through rather than building filters from raw message text. (Note the `session` field — legislative session, e.g. `"2025"`/`"119"` — is easy to miss.)
 - **`NavigationContext`** — `previous_pages: list[str], time_on_page, scroll_depth` — optional navigation signal for intent disambiguation
 - **`ClientMetadata`** — `client_id, client_version, user_agent, platform, entry_referrer, page_url` — optional client/analytics metadata
