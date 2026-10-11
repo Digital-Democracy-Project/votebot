@@ -67,6 +67,23 @@ for (const target of Object.keys(TARGETS)) {
         }
     });
 
+    test(`an entity-encoded quote stays data, and a rejected link never produces a non-http href [${target}]`, () => {
+        const { parse } = loadParser(target);
+        for (const quote of ['&quot;', '&#34;', '&#x22;', '&apos;', '&#39;']) {
+            const html = parse(`[x](https://a.test/${quote}onmouseover=${quote}alert(1))`);
+            const tags = html.match(/<a [^>]*>/g) || [];
+            assert.strictEqual(tags.length, 1, html);
+            assert.strictEqual((tags[0].match(LINK_TAG) || []).length, 1, tags[0]);
+            assert.ok(!/\sonmouseover=/.test(tags[0]), tags[0]);
+        }
+        for (const text of ['[x](javascript:https://example.test)', '[x](data:text/html,https://example.test)', '[x](vbscript:y)']) {
+            for (const href of parse(text).match(/href="[^"]*"/g) || []) {
+                assert.match(href, /^href="(https?:|mailto:)/, `${text} -> ${href}`);
+            }
+        }
+        assert.match(parse('[x](HTTPS://example.test/UP)'), /<a href="HTTPS:\/\/example\.test\/UP"/);
+    });
+
     test(`text, bold and a title with quotes are untouched [${target}]`, () => {
         const { parse } = loadParser(target);
         assert.strictEqual(parse('**The "Fair" Act** isn\'t a link'), '<p><strong>The "Fair" Act</strong> isn\'t a link</p>');
