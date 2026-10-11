@@ -1,5 +1,7 @@
 """Pinecone vector store service."""
 
+import asyncio
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -48,29 +50,35 @@ class VectorStoreService:
         self.index_name = self.settings.pinecone_index_name
         self.namespace = self.settings.pinecone_namespace
         self._index = None
+        self._index_lock = threading.Lock()  # the index is looked up on worker threads (see `query`)
         self.embedding_service = EmbeddingService(self.settings)
 
     @property
     def index(self):
-        """Get or create the Pinecone index."""
-        if self._index is None:
-            # Check if index exists
-            existing_indexes = [idx.name for idx in self.pc.list_indexes()]
+        """Get or create the Pinecone index.
 
-            if self.index_name not in existing_indexes:
-                logger.info("Creating Pinecone index", index_name=self.index_name)
-                self.pc.create_index(
-                    name=self.index_name,
-                    dimension=EmbeddingService.get_dimension(),
-                    metric="cosine",
-                    spec=ServerlessSpec(
-                        cloud="aws",
-                        region=self.settings.pinecone_environment,
-                    ),
-                )
+        Blocking (it lists and describes indexes the first time): call it from a worker thread, as `query` does,
+        never straight from the event loop. The lock keeps two threads from creating the index twice.
+        """
+        with self._index_lock:
+            if self._index is None:
+                # Check if index exists
+                existing_indexes = [idx.name for idx in self.pc.list_indexes()]
 
-            self._index = self.pc.Index(self.index_name)
-        return self._index
+                if self.index_name not in existing_indexes:
+                    logger.info("Creating Pinecone index", index_name=self.index_name)
+                    self.pc.create_index(
+                        name=self.index_name,
+                        dimension=EmbeddingService.get_dimension(),
+                        metric="cosine",
+                        spec=ServerlessSpec(
+                            cloud="aws",
+                            region=self.settings.pinecone_environment,
+                        ),
+                    )
+
+                self._index = self.pc.Index(self.index_name)
+            return self._index
 
     @retry(
         stop=stop_after_attempt(3),
@@ -174,13 +182,16 @@ class VectorStoreService:
             filter=filter,
         )
 
-        # Query Pinecone
-        results = self.index.query(
-            vector=query_embedding,
-            top_k=top_k,
-            filter=filter,
-            include_metadata=include_metadata,
-            namespace=self.namespace,
+        # Query Pinecone. The client is synchronous: called on the event loop it stalls every chat on this worker
+        # (and the health checks) for the length of the request, so it runs on a worker thread (VOTEBOT-36).
+        results = await asyncio.to_thread(
+            lambda: self.index.query(
+                vector=query_embedding,
+                top_k=top_k,
+                filter=filter,
+                include_metadata=include_metadata,
+                namespace=self.namespace,
+            )
         )
 
         # Convert to SearchResult objects
@@ -294,7 +305,7 @@ class VectorStoreService:
         """
         try:
             # Describe index to verify connectivity
-            stats = self.index.describe_index_stats()
+            stats = await asyncio.to_thread(lambda: self.index.describe_index_stats())
             logger.debug(
                 "Pinecone health check passed",
                 total_vectors=stats.total_vector_count,

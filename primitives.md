@@ -16,7 +16,7 @@ grep -rn "class <Name>\|def <name>" src/votebot/
 
 ## Pinecone layer (`services/vector_store.py`)
 
-- **`VectorStoreService`** — Pinecone client. Lazy-initialized. Methods:
+- **`VectorStoreService`** — Pinecone client. Lazy-initialized. **The Pinecone client is synchronous**: every call to it from async code goes through `asyncio.to_thread` (`query` and `health_check` do; VOTEBOT-36), because on the event loop one request stalls every chat on the worker and the health checks. The `index` property is blocking too (lists and describes indexes the first time, under a lock) and is only touched from those threads. Do not call `self.index.<anything>` from a coroutine. Methods:
   - `query(query, top_k, filter, include_metadata) -> list[SearchResult]`
   - `query_with_filter(query, document_type, bill_id, legislator_id, jurisdiction, top_k) -> list[SearchResult]`
   - `upsert_documents(documents: list[Document], batch_size=100) -> int`
