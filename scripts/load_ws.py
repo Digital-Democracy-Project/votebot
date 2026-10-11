@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
 import socket
 import statistics
@@ -68,7 +69,8 @@ def tree_stats(root_pid: int) -> tuple[float, float]:
     return sum(r[2] for r in mine) / 1024, sum(r[3] for r in mine)
 
 
-async def one_client(url: str, page_context: dict, results: list, errors: list) -> None:
+async def one_client(url: str, page_context: dict, results: list, errors: list, workers_seen: list, delay: float) -> None:
+    await asyncio.sleep(delay)  # visitors do not all arrive in the same instant (and then one worker would accept them all)
     try:
         async with websockets.connect(url, open_timeout=30, max_size=None) as conn:
             for kind, message, button in QUESTIONS:
@@ -79,6 +81,10 @@ async def one_client(url: str, page_context: dict, results: list, errors: list) 
                 await conn.send(json.dumps({"type": "user_message", "payload": payload}))
                 while True:
                     frame = json.loads(await asyncio.wait_for(conn.recv(), 120))
+                    if frame.get("type") == "stream_chunk":
+                        found = re.match(r"\[worker (\d+)\]", frame["payload"].get("text", ""))
+                        if found:
+                            workers_seen.append(found.group(1))
                     if frame.get("type") == "stream_end":
                         results.append((kind, time.perf_counter() - started))
                         break
@@ -130,7 +136,7 @@ async def wait_ready(http_base: str, server: subprocess.Popen, seconds: int = 90
     raise RuntimeError("the load-test server did not come up")
 
 
-async def run(workers: int, clients: int, page_context: dict) -> str:
+async def run(workers: int, clients: int, page_context: dict, ramp: float):
     port = free_port()
     http_base, ws_url = f"http://127.0.0.1:{port}", f"ws://127.0.0.1:{port}/ws/chat"
     server = start_server(workers, port)
@@ -140,10 +146,13 @@ async def run(workers: int, clients: int, page_context: dict) -> str:
         errors: list = []
         lags: list = []
         samples: list = []
+        workers_seen: list = []
         stop = asyncio.Event()
         watchers = [asyncio.create_task(probe(http_base, stop, lags, errors)), asyncio.create_task(sample(server.pid, stop, samples))]
         started = time.perf_counter()
-        await asyncio.gather(*(one_client(ws_url, page_context, results, errors) for _ in range(clients)))
+        await asyncio.gather(
+            *(one_client(ws_url, page_context, results, errors, workers_seen, ramp * i / clients) for i in range(clients))
+        )
         elapsed = time.perf_counter() - started
         stop.set()
         await asyncio.gather(*watchers)
@@ -155,12 +164,13 @@ async def run(workers: int, clients: int, page_context: dict) -> str:
         values = [seconds for k, seconds in results if k == kind]
         return f"{statistics.median(values):.2f} / {pct(values, 0.95):.2f}" if values else "-"
 
+    served = sorted((workers_seen.count(pid) for pid in set(workers_seen)), reverse=True)  # answers per worker
     peak_mib = max((s[0] for s in samples), default=float("nan"))
     mean_cpu = statistics.mean(s[1] for s in samples) if samples else float("nan")
     return (
         f"| {workers} | {clients} | {col('button')} | {col('typed')} | {col('changed')} | "
         f"{statistics.median(lags) * 1000:.0f} / {pct(lags, 0.95) * 1000:.0f} / {max(lags, default=0) * 1000:.0f} | "
-        f"{len(errors)} of {clients * len(QUESTIONS)} | {peak_mib:.0f} | {mean_cpu:.0f} | {elapsed:.0f} |"
+        f"{len(errors)} of {clients * len(QUESTIONS)} | {'/'.join(map(str, served)) or '-'} | {peak_mib:.0f} | {mean_cpu:.0f} | {elapsed:.0f} |"
     ), errors
 
 
@@ -168,18 +178,19 @@ async def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--workers", type=int, nargs="+", default=[1])
     parser.add_argument("--clients", type=int, nargs="+", default=[10])
+    parser.add_argument("--ramp", type=float, default=3.0, help="seconds over which the clients connect (default 3)")
     parser.add_argument("--jurisdiction", default="FL", help="the bill's jurisdiction (an embedded bill is discovered)")
     args = parser.parse_args(argv)
 
     page_context = await discover_bill(args.jurisdiction)
     print(f"bill: {page_context['id']} {page_context['jurisdiction']} {page_context['session']}\n")
     print("p50 / p95 seconds per question; health/live is p50 / p95 / max milliseconds while loaded\n")
-    print("| workers | clients | button | typed | what changed | health/live ms | errors | peak MiB | cpu % | s |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("| workers | clients | button | typed | what changed | health/live ms | errors | answers per worker | peak MiB | cpu % | s |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     all_errors: list = []
     for workers in args.workers:
         for clients in args.clients:
-            row, errors = await run(workers, clients, page_context)
+            row, errors = await run(workers, clients, page_context, args.ramp)
             print(row, flush=True)
             all_errors += errors[:3]
     for e in all_errors:

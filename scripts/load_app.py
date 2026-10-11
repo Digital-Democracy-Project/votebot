@@ -21,6 +21,7 @@ ANSWER = ["This is a ", "stubbed answer ", "for load testing."]
 
 
 async def _stub_stream(self, messages, system_prompt=None, max_tokens=None, temperature=None, enable_web_search=False):
+    yield llm.StreamChunk(text=f"[worker {os.getpid()}] ", done=False)  # load_ws.py counts these: which worker served what
     for part in ANSWER:
         await asyncio.sleep(STUB_SECONDS / len(ANSWER))
         yield llm.StreamChunk(text=part, done=False)
