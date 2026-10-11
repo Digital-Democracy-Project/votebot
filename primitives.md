@@ -310,6 +310,8 @@ Same index and namespace as DDP-Sync (`votebot-large` today; `ddp-knowledge-base
 
 Real `/ws/chat` client for cutover/rollback checks (`--cases` JSON, `--url`, `--index canonical|legacy`, `--retrieval`, `--expect-types`, `--forbid-types`); `check_turn`, `retrieval_checks`, `forbidden_types_check`, `discover_bill`, `run_case`, `main`. The websocket `stream_end` payload carries `bill_votes_tool_used` (from `ResponseMetadata`) so a vote question can be shown to have been answered by the live tool. Tests: `tests/unit/test_websocket_protocol.py` (route protocol with a `FakeAgent` and the FastAPI test client — **reuse that fixture** for any new websocket behaviour) and `tests/unit/test_smoke_ws.py` (script against a local uvicorn server). Don't write another websocket client for ops checks.
 
+Load test: **`scripts/load_ws.py`** (VOTEBOT-35) starts **`scripts/load_app.py`** (the real app, only the LLM stubbed) with N uvicorn workers, opens C websockets (connecting over `--ramp` seconds; all at once lets one worker accept most of them), has each ask a button, a typed and a "what changed" question, and prints a table row: latency p50/p95, errors, `/health/live` latency under load (event-loop lag), answers per worker, peak memory. It writes to Redis db 5 and no query logs. Dev only. Use it before changing a worker count or any code on the chat path; do not write another load client.
+
 ---
 
 ## Ops scripts (`infrastructure/`)
