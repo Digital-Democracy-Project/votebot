@@ -26,6 +26,8 @@ SYNC_CHECKPOINT_PREFIX = "votebot:sync:checkpoint:"
 SYNC_CHECKPOINT_TTL = 86400  # 24 hours
 BILL_VERSION_PREFIX = "votebot:bill_version:"
 BILL_VERSION_TTL = 86400 * 90  # 90 days
+SESSION_PREFIX = "votebot:session:"
+SESSION_TTL = 7200  # 2 hours since the visitor's last message: longer than the widget's 30 minutes of inactivity
 
 
 class RedisStore:
@@ -115,6 +117,30 @@ class RedisStore:
             await self._client.hdel(THREAD_HASH_KEY, thread_ts)
         except Exception as e:
             logger.error("Redis: failed to remove thread mapping", error=str(e))
+
+    # -- Chat sessions (history, handoff state), so any worker can serve a reconnecting visitor --
+
+    async def save_session(self, session_id: str, session: dict):
+        """Store a chat session (JSON, refreshed TTL). A visitor who reconnects lands on whichever worker accepts
+        the connection, and must find the history and the handoff state the last worker left."""
+        if not self._client:
+            return
+        try:
+            await self._client.set(f"{SESSION_PREFIX}{session_id}", json.dumps(session, default=str), ex=SESSION_TTL)
+        except Exception as e:
+            logger.error("Redis: failed to save session", session_id=session_id, error=str(e))
+
+    async def load_session(self, session_id: str) -> dict | None:
+        """The stored chat session, or None (not stored, expired, or Redis is down)."""
+        if not self._client:
+            return None
+        try:
+            data = await self._client.get(f"{SESSION_PREFIX}{session_id}")
+            if data:
+                return json.loads(data)
+        except Exception as e:
+            logger.error("Redis: failed to load session", session_id=session_id, error=str(e))
+        return None
 
     # -- Sync task storage --
 
