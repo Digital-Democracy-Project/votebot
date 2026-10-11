@@ -279,10 +279,11 @@ rebuild and `up -d`. Before the first rebuild, confirm the previous tag exists: 
 The env file is read by the compose file itself (`env_file: ../../.env`, resolved relative to the compose file, so `/opt/votebot/.env` when the
 repo is at `/opt/votebot`); no `--env-file` flag is needed, and no command needs `docker compose config`, which would print the secrets.
 
-VoteBot has a Redis of its own (never the broker's, never the host's 6379): only a button cache and a handoff map
-live in it, so no persistence. **One worker, on purpose**: a session's chat history is kept in the memory of the
-worker that served it, and the image's default command runs one. Restarting the container ends open chats and their
-history: expected, and the widget reconnects.
+VoteBot has a Redis of its own (never the broker's, never the host's 6379): a button cache, a handoff map and chat
+sessions (2 h) live in it, so no persistence. The image's command runs `WEB_CONCURRENCY` workers (1 today, set in
+`prod.env.defaults`; see 3.8). A session is kept in Redis as well as in the worker's memory, so a visitor who reconnects
+to another worker, or after a restart, finds the history and a handoff in progress (a Redis restart loses them: the
+widget then starts a fresh chat).
 
 ### 3.5 Start it and verify it INSIDE the Docker network, before any nginx change
 
@@ -340,6 +341,59 @@ the PR is merged**, in a quiet window:
 
 Rollback: revert the broker change and recreate nginx; VoteBot keeps running untouched. No DNS or certificate work is
 needed: `mapapp.digitaldemocracyproject.org` and its certificate already exist.
+
+### 3.8 How many workers
+
+**Today: 1** (`WEB_CONCURRENCY=1` in `infrastructure/docker/prod.env.defaults`). Measured on 2026-10-11 (VOTEBOT-34) with
+`scripts/load_ws.py`: the real app with only the LLM answer stubbed (so no LLM cost, and a floor of about 0.8 s per answer),
+Pinecone, embeddings and api-v3 real, clients connecting over 3 s, each asking a quick-action button, a typed question and a
+"what changed" question. p50 seconds per typed question, and the longest `/health/live` took while loaded:
+
+| clients | before the fixes, 1 worker | after VOTEBOT-36 and 37, 1 worker |
+|---|---|---|
+| 10 | 4.1 s, longest health check 2.4 s | 0.8 s, 0.1 s |
+| 25 | 8.8 s, 4.7 s | 0.8 s, 0.1 s |
+| 50 | 18.1 s, 17.1 s | 0.8 s, 0.1 s |
+| 100 | 32.1 s, 26.5 s, 6 of 300 questions failed (sockets dropped) | 1.1 s, 0.1 s, none failed |
+
+The cause was the Pinecone client, which is synchronous and ran on the event loop (VOTEBOT-36), so every chat waited for
+every other one while the CPU sat at about 14%; adding workers hid it only by dividing the queue. Peak memory of all
+the processes at 100 simultaneous chats, with VOTEBOT-36, 37 and 38 (stubbed LLM; a real answer adds waiting, not CPU):
+
+| workers | peak MiB | p50 / p95 typed | cpu % of one core (sum) |
+|---|---|---|---|
+| 1 | 234 | 1.4 / 2.7 s | 38 |
+| 2 | 421 | 1.3 / 2.7 s | 42 |
+| 3 | 559 | 1.2 / 2.8 s | 53 |
+
+So one worker holds 100 simultaneous chats with room to spare, and the container limit is 1 GiB (it was 768 MiB: the old
+code reached 546 MiB at 100 chats). More workers add resilience (one process dying does not drop every chat) and a second
+core, at about 140 to 190 MiB each; they do not add speed at this size. **Before deploying the memory limit or any count above 1,** the checkout must contain VOTEBOT-36, 37 and 38 (`git log --oneline | grep -E 'VOTEBOT-3[678]'` shows all three); the figures above depend on them. **To change the count:** a PR editing
+`WEB_CONCURRENCY` in `prod.env.defaults`; then `infrastructure/render-env.sh --check`, `render-env.sh`, and
+`up -d --force-recreate votebot` (check there are no open chats first, and tag the running image as in 3.4). Afterwards, check that the setting arrived and took effect:
+`docker exec votebot-ddp-next printenv WEB_CONCURRENCY` (the rendered `.env` reaches the container through `env_file`),
+`docker logs votebot-ddp-next | grep -c "Started server process"` (one line per worker),
+`docker inspect -f '{{.HostConfig.Memory}}' votebot-ddp-next` (1073741824 for 1g) and `docker stats votebot-ddp-next` (the
+memory above); then run the smoke test of section 6. To go back: revert the PR, `render-env.sh`, and recreate (or retag the
+previous image, see "Rollback tag" in 3.4). Re-run the load test (below) before going beyond 3.
+
+The two tables are separate runs (the second includes VOTEBOT-38's Redis saves, and a run varies by a few tenths of a
+second: 1.1 s and 1.4 s for 100 clients on one worker are the same result). Run it in dev, never against production:
+`python scripts/load_ws.py --workers 1 2 3 --clients 10 25 50 100`.
+
+**Audit of what is per-process (the prod agent's note of 2026-10-11, checked against the code):**
+
+| Item | Result |
+|---|---|
+| Websocket session state (history, handoff flag, counters) in each worker's memory | Was the blocker. Fixed (VOTEBOT-38): saved to Redis after every client message and Slack event, loaded on connect; a save never overwrites a copy with a later message. Tested by simulating a worker change; with the Slack handoff on, do the real handoff test (3.3.1, VOTEBOT-14) at the worker count that will be live |
+| Slack replies reaching the worker that holds the visitor's socket | Fine as designed: every worker subscribes to the Redis channel and only the worker holding the socket delivers; the thread-to-session map is in Redis. Each worker that has served a visitor opens its own Socket Mode connection with the same app token (Slack sends each event to one of them) |
+| An agent, with its Pinecone/OpenAI/httpx clients and caches, built for every message | Fixed (VOTEBOT-37): one set per process; the api-v3 version cache and the party cache now work across messages |
+| Blocking calls on the event loop | The Pinecone client was the one. Fixed (VOTEBOT-36). OpenAI, httpx, Redis, Slack and the log writes are async. Left: Pinecone `upsert`/`delete`, which only ddp-sync and scripts use |
+| Federal legislator cache "loaded over HTTP by every worker" | Not so: it is read from `data/cache/federal_legislators.json` (the file is excluded from the image by `.dockerignore`, so the cache is empty here, and on the canonical index what it finds is not used) |
+| `MetricsCollector` per worker | Unused; nothing reads it |
+| `reconcile_on_startup` in every worker | Fine: it only deletes button-cache entries saved before the bill's last check, so one worker cannot delete another's fresh entry, and it matches slug-keyed entries only |
+| Several processes appending to one daily query-log file | Fine: 4 processes each writing 100 lines of 20 KB at once gave 400 intact lines (appends, one per line) |
+| In-memory rate limiter | None exists |
 
 ## 4. The website
 

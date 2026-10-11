@@ -364,7 +364,7 @@ VoteBot supports seamless handoff to human agents via Slack when users request h
 7. The worker that owns the user's WebSocket receives the event and delivers it
 8. Agent reacts with ✅ to resolve and return to VoteBot
 
-**Multi-worker support**: VoteBot runs with 2 uvicorn workers. Redis ensures that Slack events received by one worker are delivered to the user's WebSocket on another worker. See [Troubleshooting](docs/TROUBLESHOOTING.md#human-handoff-messages-dropped-in-multi-worker-deployment) for details.
+**Multi-worker support**: the number of uvicorn workers is `WEB_CONCURRENCY` (1 in production today; see [the runbook](docs/RUNBOOK-civic-host-ddp-next.md#38-how-many-workers)). Redis ensures that Slack events received by one worker are delivered to the user's WebSocket on another worker, and a chat session (history, handoff state) is kept in Redis too, so a visitor who reconnects to another worker keeps both. See [Troubleshooting](docs/TROUBLESHOOTING.md#human-handoff-messages-dropped-in-multi-worker-deployment) for details.
 
 ### Thread Format
 
