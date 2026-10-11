@@ -106,7 +106,7 @@ pageContext: {
 }
 ```
 
-`ocd_bill_id`, `webflow_id` and `url` are passed through when set. Navigating between two bills is detected by `ocd_bill_id` when both pages have one, so pages without a slug still start a fresh session. `setPageContext()` sends the object you give it unchanged.
+A `title` that arrives HTML-escaped (`America&#39;s`, from a CMS, an API or a page attribute) is decoded to text (`America's`) before the widget shows or sends it, whichever way the context was supplied. `ocd_bill_id`, `webflow_id` and `url` are passed through when set. Navigating between two bills is detected by `ocd_bill_id` when both pages have one, so pages without a slug still start a fresh session. `setPageContext()` sends the object you give it unchanged.
 
 **Welcome message:** "Welcome! I can answer detailed questions about **One Big Beautiful Bill Act (HR 1)**. You can also ask me about other bills, legislators, or Digital Democracy Project in general."
 

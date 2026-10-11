@@ -350,11 +350,55 @@
     }
 
     /**
-     * Resolve the final page context from URL params, config, or auto-detection.
-     * Priority: URL params > explicit config > autoDetect > general
+     * Turn the HTML entities a title may arrive with back into text ("America&#39;s" -> "America's").
+     * A bill title reaches the widget from a CMS, an API or a page attribute, and any of them may hand it over
+     * HTML-escaped; the widget shows it as text, so the entity would be shown as typed. A pure function over the
+     * numeric entities and the five named ones: no DOM, so nothing in the title is ever parsed as markup. A numeric
+     * entity is decoded only to a printable character (not a control character such as a line break, and not a lone
+     * surrogate, which would break encoding further on). Decoding is one pass, so it does nothing to a title that is
+     * already text; one that was escaped twice loses one level each time it passes a decoder (the server decodes too).
+     * The server applies the same rule (decode_entities in votebot/utils/text.py).
+     * @param {string} text - A title
+     * @returns {string} The title with those entities decoded
+     */
+    function decodeEntities(text) {
+        if (typeof text !== 'string' || text.indexOf('&') === -1) return text;
+        var named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+        return text.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|lt|gt|quot|apos);/gi, function(match, entity) {
+            var code = entity.toLowerCase();
+            if (code.charAt(0) !== '#') return named[code];
+            var point = code.charAt(1) === 'x' ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+            var printable = (point >= 0x20 && point <= 0x7E) || (point >= 0xA0 && point <= 0x10FFFF && (point < 0xD800 || point > 0xDFFF));
+            return printable ? String.fromCodePoint(point) : match;
+        });
+    }
+
+    /**
+     * The context with its title decoded (the same object when there is nothing to decode).
+     * @param {Object} ctx - A page context
+     * @returns {Object} The page context
+     */
+    function withDecodedTitle(ctx) {
+        if (!ctx || typeof ctx.title !== 'string') return ctx;
+        var title = decodeEntities(ctx.title);
+        return title === ctx.title ? ctx : Object.assign({}, ctx, { title: title });
+    }
+
+    /**
+     * Resolve the final page context from URL params, config, or auto-detection, with its title decoded.
      * @returns {Object|Promise<Object>} Final page context (may be a promise if ddp_url needs resolution)
      */
     function resolvePageContext() {
+        var resolved = resolveRawPageContext();
+        return resolved && typeof resolved.then === 'function' ? resolved.then(withDecodedTitle) : withDecodedTitle(resolved);
+    }
+
+    /**
+     * Resolve the page context from URL params, config, or auto-detection.
+     * Priority: URL params > explicit config > autoDetect > general
+     * @returns {Object|Promise<Object>} Final page context (may be a promise if ddp_url needs resolution)
+     */
+    function resolveRawPageContext() {
         // 1. Check URL parameters first (highest priority)
         var urlContext = getContextFromUrlParams();
         if (urlContext) {
@@ -744,6 +788,7 @@
          * @param {boolean} showWelcome - Whether to show a new welcome message (default: false)
          */
         setPageContext: function(context, showWelcome) {
+            context = withDecodedTitle(context);
             DDPChat.setPageContext(context);
             DDPWebSocket.storageSet('page_context', JSON.stringify(context));
             if (showWelcome) {
