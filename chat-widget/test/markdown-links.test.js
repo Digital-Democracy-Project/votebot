@@ -28,6 +28,16 @@ function loadParser(target) {
 }
 
 const LINK_TAG = /<a href="[^"]*" target="_blank" rel="noopener noreferrer">/g; // the only shape of anchor the renderer may emit
+const ALLOWED_TAGS = new Set(['p', 'a', 'strong', 'em', 'code', 'pre', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol', 'li', 'blockquote', 'hr', 'br']);
+
+// What the output may contain whatever the input was: only known tags, and every anchor of the strict shape with a safe href.
+function assertSafeOutput(html) {
+    for (const [, tag] of html.matchAll(/<\/?([a-z0-9]+)/gi)) assert.ok(ALLOWED_TAGS.has(tag.toLowerCase()), `unexpected <${tag}> in ${html}`);
+    for (const anchor of html.match(/<a [^>]*>/g) || []) {
+        assert.strictEqual((anchor.match(LINK_TAG) || []).length, 1, `anchor has another shape: ${anchor}`);
+        assert.match(anchor, /^<a href="(https?:|mailto:)/i, anchor);
+    }
+}
 
 for (const target of Object.keys(TARGETS)) {
     test(`ordinary links render as before [${target}]`, () => {
@@ -64,6 +74,7 @@ for (const target of Object.keys(TARGETS)) {
             assert.strictEqual((tags[0].match(LINK_TAG) || []).length, 1, `anchor has another shape: ${tags[0]}`);
             assert.ok(!/<a [^>]*\sonmouseover=/.test(html), html);
             assert.ok(/%22|%27/.test(tags[0]), tags[0]);
+            assertSafeOutput(html);
         }
     });
 
@@ -91,6 +102,24 @@ for (const target of Object.keys(TARGETS)) {
         }
         // and the surrounding text is still processed
         assert.strictEqual(parse('see [x](javascript:https://example.test) and https://ok.test/a'), '<p>see [x](javascript:https://example.test) and <a href="https://ok.test/a" target="_blank" rel="noopener noreferrer">https://ok.test/a</a></p>');
+    });
+
+    test(`a rejected link next to a URL, repeated, or around odd characters cannot inject anything [${target}]`, () => {
+        const { parse } = loadParser(target);
+        for (const text of [
+            'https://ok.test/[x](javascript:" onmouseover="alert(1)',
+            'https://ok.test/a[x](javascript:https://e.test"onmouseover="alert(1))',
+            '[x](javascript:a)https://ok.test/b"onmouseover="alert(1)',
+            '[a](javascript:1)[b](javascript:2)[c](data:3)',
+            '[a](javascript:1) https://ok.test/x [b](vbscript:2)',
+            "[x](javascript:' onfocus='alert(1))https://ok.test/y",
+            '\u00000\u0000 and \u00001\u0000 and [x](javascript:https://e.test) \u00005\u0000',
+        ]) {
+            assertSafeOutput(parse(text));
+        }
+        // no placeholder machinery: NUL input is just text, and rejected links come back exactly as typed
+        assert.strictEqual(parse('\u00000\u0000'), '<p>\u00000\u0000</p>');
+        assert.strictEqual(parse('[a](javascript:1)[b](data:2)'), '<p>[a](javascript:1)[b](data:2)</p>');
     });
 
     test(`text, bold and a title with quotes are untouched [${target}]`, () => {

@@ -28,12 +28,12 @@ const WEBFLOW_CONFIG = {
     billId: 'S4974',
 };
 
-function load(target) {
+function load(target, config = WEBFLOW_CONFIG) {
     const source = TARGETS[target]()
         .replace('const markdownParser = {', 'const markdownParser = window.__mp = {')
         .replace(/\}\)\(\);\s*$/, 'window.__resolve = resolvePageContext;\nwindow.__quick = handleQuickActionClick;\n})();');
     const window = {
-        DDPChatConfig: { wsUrl: 'wss://example.test/ws/chat', pageContext: JSON.parse(JSON.stringify(WEBFLOW_CONFIG)) },
+        DDPChatConfig: { wsUrl: 'wss://example.test/ws/chat', pageContext: JSON.parse(JSON.stringify(config)) },
         location: { search: '', href: 'https://example.test/', pathname: '/', hostname: 'example.test' },
     };
     window.window = window;
@@ -82,5 +82,36 @@ for (const target of Object.keys(TARGETS)) {
         assert.strictEqual(payload.button, 'status_votes');
         assert.strictEqual(payload.page_context.title, "Making America's Food Safer Act (S 4974)");
         assert.strictEqual(payload.page_context.slug, 'making-americas-food-safer-act-s4974-2026');
+    });
+}
+
+const ALLOWED_TAGS = new Set(['p', 'a', 'strong', 'em', 'code', 'ul', 'li']); // no image, script or anything else; an anchor only of the strict shape below
+
+for (const target of Object.keys(TARGETS)) {
+    test(`an encoded-markup title never becomes an element, an event handler or a non-http link [${target}]`, () => {
+        for (const title of [
+            '&lt;img src=x onerror=alert(1)&gt;',
+            '&lt;script&gt;alert(1)&lt;/script&gt;',
+            '&lt;a href=&quot;https://evil.example&quot;&gt;x&lt;/a&gt;',
+            '&#91;x&#93;&#40;javascript:alert(1)&#41;',
+            '&#91;x&#93;&#40;https://evil.example/&quot;onmouseover=&quot;alert(1)&#41;',
+            'https://evil.example/&quot;onmouseover=&quot;alert(1)',
+        ]) {
+            // (a title that decodes to markdown link syntax with an https URL does render as that link, as a literal title
+            // always has; what must never happen is any other element, an event attribute, or a javascript: link)
+            const { window } = load(target, { ...WEBFLOW_CONFIG, title });
+            const welcome = window.DDPChatWidget.generateWelcomeMessage(window.__resolve());
+            const html = window.__mp.parse(welcome);
+            for (const [, tag] of html.matchAll(/<\/?([a-z0-9]+)/gi)) assert.ok(ALLOWED_TAGS.has(tag.toLowerCase()), `<${tag}> from ${title}: ${html}`);
+            for (const anchor of html.match(/<a [^>]*>/g) || []) {
+                assert.match(anchor, /^<a href="https?:[^"]*" target="_blank" rel="noopener noreferrer">$/, `${title}: ${anchor}`);
+                assert.ok(!/\son[a-z]+=/i.test(anchor), anchor);
+            }
+        }
+    });
+
+    test(`a title escaped twice loses exactly one level in the widget, and the resolver runs once [${target}]`, () => {
+        const { window } = load(target, { ...WEBFLOW_CONFIG, title: 'Tom &amp;amp; Jerry &amp;lt;b&amp;gt;' });
+        assert.strictEqual(window.__resolve().title, 'Tom &amp; Jerry &lt;b&gt;'); // one pass: the widget never decodes its own output
     });
 }
