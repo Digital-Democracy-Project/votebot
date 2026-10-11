@@ -31,7 +31,7 @@ const WEBFLOW_CONFIG = {
 function load(target) {
     const source = TARGETS[target]()
         .replace('const markdownParser = {', 'const markdownParser = window.__mp = {')
-        .replace(/\}\)\(\);\s*$/, 'window.__resolve = resolvePageContext;\n})();');
+        .replace(/\}\)\(\);\s*$/, 'window.__resolve = resolvePageContext;\nwindow.__quick = handleQuickActionClick;\n})();');
     const window = {
         DDPChatConfig: { wsUrl: 'wss://example.test/ws/chat', pageContext: JSON.parse(JSON.stringify(WEBFLOW_CONFIG)) },
         location: { search: '', href: 'https://example.test/', pathname: '/', hostname: 'example.test' },
@@ -44,12 +44,12 @@ function load(target) {
         URLSearchParams,
     });
     vm.runInContext(source, context);
-    return window;
+    return { window, context };
 }
 
 for (const target of Object.keys(TARGETS)) {
     test(`the Webflow embed's escaped title reaches the visitor as text, in the welcome message and the question [${target}]`, () => {
-        const window = load(target);
+        const { window } = load(target);
         const ctx = window.__resolve();
         assert.strictEqual(ctx.title, "Making America's Food Safer Act (S 4974)");
         assert.strictEqual(ctx.id, 'S4974');
@@ -61,8 +61,26 @@ for (const target of Object.keys(TARGETS)) {
         assert.ok(html.includes("<strong>Making America's Food Safer Act (S 4974)</strong>"), html);
         assert.ok(!html.includes('&#39;') && !html.includes('&amp;#39;'), html);
 
-        // the Status & votes button sends 'What is the latest status and vote history for <title or id>?'
-        const question = 'What is the latest status and vote history for ' + (ctx.title || ctx.id) + '?';
-        assert.strictEqual(question, "What is the latest status and vote history for Making America's Food Safer Act (S 4974)?");
+    });
+}
+
+for (const target of Object.keys(TARGETS)) {
+    test(`the Status & votes button asks about the bill by its decoded title, in the message actually sent [${target}]`, () => {
+        const { window, context } = load(target);
+        window.__ctx = window.__resolve();
+        // the real DDPChat module, with only the network send replaced
+        vm.runInContext(
+            'DDPWebSocket.isConnected = function() { return true; };' +
+            'DDPWebSocket.send = function(message) { window.__sent = message; return true; };' +
+            'DDPChat.init(null, window.__ctx);',
+            context
+        );
+        window.__quick('status_votes');
+        const { type, payload } = window.__sent;
+        assert.strictEqual(type, 'user_message');
+        assert.strictEqual(payload.message, "What is the latest status and vote history for Making America's Food Safer Act (S 4974)?");
+        assert.strictEqual(payload.button, 'status_votes');
+        assert.strictEqual(payload.page_context.title, "Making America's Food Safer Act (S 4974)");
+        assert.strictEqual(payload.page_context.slug, 'making-americas-food-safer-act-s4974-2026');
     });
 }
