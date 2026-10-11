@@ -12,6 +12,7 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from tests.unit.test_websocket_protocol import FakeAgent, _user_message
+from tests.unit.test_websocket_sessions_across_workers import FakeRedis
 from votebot.api.routes import websocket as ws
 
 
@@ -179,3 +180,53 @@ class TestOrdinaryClose:
         assert "s1" not in ws.manager.active_connections
         events = ended(logged)
         assert len(events) == 1 and events[0]["terminal_state"] == "abandoned"
+
+
+class ParkingRedis(FakeRedis):
+    """A Redis whose next load_session parks until released: the one place a cleanup that passed the ownership check can be
+    suspended (`save_session` awaits Redis; the conversation-ended event is only a background task and never suspends)."""
+
+    def __init__(self):
+        super().__init__()
+        self.park_next = False
+        self.parked = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def load_session(self, session_id):
+        if self.park_next:
+            self.park_next = False
+            self.parked.set()
+            await self.release.wait()
+        return await super().load_session(session_id)
+
+
+class TestReconnectDuringCleanup:
+    async def test_a_connection_that_arrives_while_the_old_cleanup_waits_on_redis_is_answered_and_stays_registered(
+        self, logged, monkeypatch
+    ):
+        redis = ParkingRedis()
+        monkeypatch.setattr(ws, "get_redis_store", lambda: redis)
+        old, old_task = await first_conversation()
+
+        redis.park_next = True
+        old.incoming.put_nowait(WebSocketDisconnect())  # the old cleanup passes the ownership check, then waits on Redis
+        await asyncio.wait_for(redis.parked.wait(), 2)
+        assert "s1" not in ws.manager.active_connections  # its own entry is gone, nobody else's is touched
+
+        new = FakeSocket()
+        new_task = asyncio.create_task(ws.websocket_chat_endpoint(new, "s1"))  # reconnects while that cleanup is suspended
+        await frame(new, "session_info")
+        assert ws.manager.active_connections["s1"] is new
+        new.incoming.put_nowait(_user_message("second question"))
+        await frame(new, "stream_end")  # answered while the old cleanup is still parked
+
+        redis.release.set()  # the old cleanup resumes and finishes
+        await asyncio.wait_for(old_task, 2)
+        assert ws.manager.active_connections["s1"] is new  # it did not remove the newer connection on the way out
+        new.sent.clear()
+        new.incoming.put_nowait(_user_message("third question"))
+        await frame(new, "stream_end")
+
+        new.incoming.put_nowait(WebSocketDisconnect())
+        await asyncio.wait_for(new_task, 2)
+        assert "s1" not in ws.manager.active_connections
