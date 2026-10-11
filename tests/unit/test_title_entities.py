@@ -25,9 +25,21 @@ class TestDecodeEntities:
     def test_one_pass_so_a_doubly_escaped_title_loses_one_level(self):
         assert decode_entities("&amp;#39;") == "&#39;"
 
-    @pytest.mark.parametrize("same", ["AT&T and Q&A", "Tax < 5 > 3", "&#0;", "&#1114112;", "&#99999999999999999999;", "&nbsp;", "&copy", "&#;", ""])
+    @pytest.mark.parametrize(
+        "same",
+        ["AT&T and Q&A", "Tax < 5 > 3", "&#0;", "&#1114112;", "&#99999999999999999999;", "&nbsp;", "&copy", "&#;", ""]
+        + ["&#10;", "&#13;", "&#9;", "&#1;", "&#x7F;", "&#x85;", "&#xD800;", "&#xDFFF;"],  # controls and lone surrogates
+    )
     def test_everything_else_is_left_alone(self, same):
         assert decode_entities(same) == same
+
+    def test_printable_non_ascii_is_decoded_and_the_result_encodes_as_utf8(self):
+        assert decode_entities("caf&#xE9; &#x1F600;") == "caf\u00e9 \U0001F600"
+        decode_entities("a&#xD800;b &#10; &#x1F600;").encode("utf-8")  # never a lone surrogate
+
+    @pytest.mark.parametrize("title", [FOOD, "It&#x27;s &amp; &quot;fair&quot;", "Plain"])
+    def test_decoding_text_again_changes_nothing(self, title):
+        assert decode_entities(decode_entities(title)) == decode_entities(title)
 
     def test_none_stays_none(self):
         assert decode_entities(None) is None
@@ -44,6 +56,10 @@ class TestPageContext:
 
     def test_the_websocket_payload_builder_decodes_it_too(self):
         assert ws._page_context_from_payload({"type": "bill", "id": "S 4974", "title": FOOD}).title == FOOD_TEXT
+
+
+def test_a_title_returned_by_resolve_is_unchanged_when_it_comes_back_as_page_context():
+    assert PageContext(type="bill", title=decode_entities(FOOD)).title == FOOD_TEXT
 
 
 class FakeSecret:
