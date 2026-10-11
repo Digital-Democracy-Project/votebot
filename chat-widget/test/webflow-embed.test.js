@@ -94,6 +94,8 @@ for (const target of Object.keys(TARGETS)) {
             '&lt;script&gt;alert(1)&lt;/script&gt;',
             '&lt;a href=&quot;https://evil.example&quot;&gt;x&lt;/a&gt;',
             '&#91;x&#93;&#40;javascript:alert(1)&#41;',
+            '&#91;x&#93;&#40;javascript&amp;colon;alert(1)&#41;', // decodes to [x](javascript&colon;alert(1)): the & is escaped before the scheme is checked
+            '&#91;x&#93;&#40;&amp;#106;avascript:alert(1)&#41;',
             '&#91;x&#93;&#40;https://evil.example/&quot;onmouseover=&quot;alert(1)&#41;',
             'https://evil.example/&quot;onmouseover=&quot;alert(1)',
         ]) {
@@ -103,6 +105,7 @@ for (const target of Object.keys(TARGETS)) {
             const welcome = window.DDPChatWidget.generateWelcomeMessage(window.__resolve());
             const html = window.__mp.parse(welcome);
             for (const [, tag] of html.matchAll(/<\/?([a-z0-9]+)/gi)) assert.ok(ALLOWED_TAGS.has(tag.toLowerCase()), `<${tag}> from ${title}: ${html}`);
+            for (const [tag] of html.matchAll(/<(?!a[ >])[a-z0-9]+[^>]*>/gi)) assert.match(tag, /^<[a-z0-9]+>$/i, `a tag with attributes: ${tag}`);
             for (const anchor of html.match(/<a [^>]*>/g) || []) {
                 assert.match(anchor, /^<a href="https?:[^"]*" target="_blank" rel="noopener noreferrer">$/, `${title}: ${anchor}`);
                 assert.ok(!/\son[a-z]+=/i.test(anchor), anchor);
