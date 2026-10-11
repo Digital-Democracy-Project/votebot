@@ -83,3 +83,53 @@ async def test_the_health_check_runs_off_the_event_loop_thread():
     store, _ = make_store(index)
     assert await store.health_check() is True
     assert index.threads[0] != threading.get_ident()
+
+
+async def test_a_transient_failure_is_retried_and_every_attempt_runs_off_the_event_loop(monkeypatch):
+    from tenacity import wait_none
+
+    monkeypatch.setattr(VectorStoreService.query.retry, "wait", wait_none())  # no real back-off in a test
+    index = FakeIndex()
+    attempts: list[int] = []
+    real_query = index.query
+
+    def flaky(**kwargs):
+        attempts.append(threading.get_ident())
+        if len(attempts) == 1:
+            raise ConnectionError("blip")
+        return real_query(**kwargs)
+
+    index.query = flaky
+    store, _ = make_store(index)
+    assert await store.query("q")
+    assert len(attempts) == 2 and all(t != threading.get_ident() for t in attempts)
+
+
+async def test_a_permanent_failure_gives_up_after_the_same_three_attempts_as_before(monkeypatch):
+    import pytest
+    from tenacity import RetryError, wait_none
+
+    monkeypatch.setattr(VectorStoreService.query.retry, "wait", wait_none())
+    index = FakeIndex()
+    calls = []
+
+    def always_fails(**kwargs):
+        calls.append(1)
+        raise ConnectionError("down")
+
+    index.query = always_fails
+    store, _ = make_store(index)
+    with pytest.raises(RetryError):
+        await store.query("q")
+    assert len(calls) == 3
+
+
+async def test_a_failed_index_lookup_releases_the_lock_and_the_next_attempt_succeeds(monkeypatch):
+    from tenacity import wait_none
+
+    monkeypatch.setattr(VectorStoreService.query.retry, "wait", wait_none())
+    store, pc = make_store(FakeIndex())
+    pc.list_indexes.side_effect = [RuntimeError("Pinecone is down"), [SimpleNamespace(name="ddp-knowledge-base")]]
+    assert await store.query("q")  # the retry looks the index up again
+    assert pc.list_indexes.call_count == 2
+    assert not store._index_lock.locked()
