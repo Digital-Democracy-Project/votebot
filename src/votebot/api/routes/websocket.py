@@ -104,11 +104,20 @@ class ConnectionManager:
 
         logger.info("WebSocket connected", session_id=session_id)
 
-    def disconnect(self, session_id: str):
-        """Remove connection but preserve session."""
-        if session_id in self.active_connections:
-            del self.active_connections[session_id]
+    def disconnect(self, session_id: str, websocket: WebSocket) -> bool:
+        """Remove this connection but preserve the session. Returns whether it was the registered one.
+
+        A client that reconnects with the same session id right behind a close registers the new socket under that id before
+        the old connection's cleanup has run. The cleanup must not remove the new one (the answer would then have nowhere to
+        go: `send_json` drops a message for an unknown id), so it removes only its own socket, and a connection that finds
+        a newer one in its place (False) has nothing left to clean up: the session now belongs to the newer connection.
+        """
+        if self.active_connections.get(session_id) is not websocket:
+            logger.info("WebSocket closed after a newer connection took over its session", session_id=session_id)
+            return False
+        del self.active_connections[session_id]
         logger.info("WebSocket disconnected", session_id=session_id)
+        return True
 
     async def send_json(self, session_id: str, data: dict):
         """Send JSON message to a specific session."""
@@ -596,6 +605,8 @@ async def websocket_chat_endpoint(
             data = await websocket.receive_json()
             await handle_client_message(session_id, data, client_ip=client_ip, user_agent=user_agent)
     except WebSocketDisconnect:
+        if not manager.disconnect(session_id, websocket):
+            return  # a newer connection owns this session now: its conversation goes on, so nothing here is over
         # Emit conversation_ended on disconnect
         session = manager.get_session(session_id)
         if session and session.get("conversation_message_counter", 0) > 0:
@@ -615,9 +626,10 @@ async def websocket_chat_endpoint(
             session["conversation_had_fallback"] = False
             session["conversation_had_retrieval_miss"] = False
         await manager.save_session(session_id)
-        manager.disconnect(session_id)
     except Exception as e:
         logger.exception("WebSocket error", session_id=session_id, error=str(e))
+        if not manager.disconnect(session_id, websocket):
+            return  # a newer connection owns this session now
         session = manager.get_session(session_id)
         if session and session.get("conversation_message_counter", 0) > 0:
             await _emit_conversation_ended_with_state(session_id, dict(session), "abandoned")
@@ -630,7 +642,6 @@ async def websocket_chat_endpoint(
             session["conversation_had_fallback"] = False
             session["conversation_had_retrieval_miss"] = False
         await manager.save_session(session_id)
-        manager.disconnect(session_id)
 
 
 async def handle_client_message(
