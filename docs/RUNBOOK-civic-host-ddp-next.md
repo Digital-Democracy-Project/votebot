@@ -3,13 +3,17 @@
 Ticket: VOTEBOT-14. Blocks NEXT-36 (chat on the new site) and SYNC-92 (the cutover).
 Run it through the prod agent (`ddp-broker-py` `notes/ops-handoff`).
 
-**Status 2026-10-08** (taken from the prod agent's replies on that branch; not re-run when this was written). **Run on
-the broker host:** 3.1 (swap), 3.2 to 3.5 (image built on the host, compose project, `.env` rendered with `render-env.sh`,
-container verified inside the Docker network), 3.7 (the broker's nginx routes), the section 6 verification (smoke test 6
-of 6 on every deploy; `main` `d3742ae` was deployed on 2026-10-08) and a rollback rehearsal (about 33 s each way).
-**Not run:** section 2 (the `legacy-webflow` branch and tag: the old-server agent has not answered, VOTEBOT-14), the
-log-cleanup install in 3.6 (needs sudo, VOTEBOT-20), section 4 (the website and the widget: NEXT-36), section 7 (the
-cutover: SYNC-92). Section 5's weekly check and the OpenAI usage limit are not recorded in the notes this status was
+**Status 2026-10-12** (taken from the prod agent's and the old-server agent's replies on `notes/ops-handoff`; not re-run when
+this was written). **Run on the broker host:** 3.1 (swap), 3.2 to 3.5 (image built on the host, compose project, `.env`
+rendered with `render-env.sh`, container verified inside the Docker network), 3.7 (the broker's nginx routes), 3.8
+(`WEB_CONCURRENCY=1`, 1 GiB memory limit), the section 6 verification (smoke test 6 of 6 on every deploy) and a rollback
+rehearsal (about 33 s each way). **Deployed now:** `main` `4472180` (VOTEBOT-42, the same-session reconnect fix, on top of
+the VOTEBOT-34 multi-worker work) in the held container: healthy, one worker, no site points at it. Its checks on 2026-10-12:
+smoke test 6 of 6 inside the network and 5 of 5 over public wss, and the same-session reconnect repro answered 12 of 12 at
+gaps of 0, 50, 200 and 1000 ms. **Old server:** section 2 is partly done: the `legacy-webflow` **branch** exists and the old
+checkout runs it (`7864abc`), but there is **no tag** and the ddp-sync checkout was not covered (see section 2).
+**Not run:** the log-cleanup install in 3.6 (needs sudo, VOTEBOT-20), section 4 (the website and the widget: NEXT-36), section
+7 (the cutover: SYNC-92). Section 5's weekly check and the OpenAI usage limit are not recorded in the notes this status was
 written from.
 
 The runbook was first written from the repos only (the live nginx configs and real `.env` files were not available), so
@@ -144,6 +148,28 @@ stop being deployed from `main`.
 3. The chat widget file is shared by both sites. Anything merged to `main` that changes it must keep working with
    the old server's page-context shape (it does today: Webflow fields are passed through unchanged).
 4. Slack human handoff stays with the old copy. Do not set Slack tokens on the new copy (see 3.3).
+
+**State on 2026-10-12 (reported by the old-server agent, reply `ac7e60c`):** the old VoteBot checkout
+(`/home/ubuntu/votebot`) is on the branch **`legacy-webflow` at `7864abc668296f2e700e7ca081c8e65455c24032`**, clean. That commit is
+the old code (`503fb99`) plus **one agreed exception to "nothing is merged": the VOTEBOT-1 widget fix** (only the `src/widget.js`
+hunks of `a3a1681`: it decodes the HTML entities Webflow puts in the bill title, so `America&#39;s` shows as `America's`).
+It was built without `terser` (unminified, as the file served since 2026-06-10 was), and the backend was not touched or
+restarted. Still open: the **tag** `legacy-webflow-2026-10` was not created (a tag and a branch with a similar name were
+judged ambiguous; say which name if it is still wanted), and the ddp-sync checkout, the unit files, `pip freeze` and the
+Slack variable names from the 2026-10-07 request are not answered. Nothing from VOTEBOT-41 (link hardening) is on the old
+server: its `ui.js` still has no scheme check and does not escape quotes in markdown links.
+
+**How the old server serves the widget** (same reply): nginx (`/etc/nginx/sites-enabled/votebot`, port 80 behind Cloudflare) has
+`root /home/ubuntu/votebot/chat-widget;`, so `https://votebot.digitaldemocracyproject.org/dist/ddp-chat.min.js` is the
+git-tracked file `chat-widget/dist/ddp-chat.min.js` **in that checkout**, not `/var/www/votebot/` (an older copy there,
+from 2026-01-31, is not used by this server block). The Webflow bill pages load that URL. The current file is the patch-only
+build, sha256 `5a1b77f35aa04c03957b00646c0c74d97ca1cf3bab1027a09aca9011db19e69e` (116,582 bytes); compare the served hash
+with that, **not** with a build of `main`. The bundle that was served before is kept at
+`/home/ubuntu/ddp-chat.min.js.bak-20261012-0245` (sha256 `20e4d7a4...2504`). To change the widget there: commit to
+`legacy-webflow`, pull on the old server, then **purge Cloudflare (everything)**. The response is
+`cache-control: public, max-age=604800, immutable`, which was left as it is, so a returning visitor who does not reload can keep the
+old bundle for up to 7 days (a purge does not reach browsers). Rollback of the widget: `git checkout main` in that checkout, or
+copy the backup over the served path, then purge.
 
 Rollback of the whole project is "send the website back to the old copy": it is untouched and still running.
 
@@ -471,7 +497,7 @@ first use and an empty one answers nothing). It prints the index and namespace i
 
 Failure paths, once, before cutover: stop the broker briefly in a quiet moment (or point `DDP_BROKER_API_ROOT` at a
 closed port and restart) and confirm answers still come, just without organization positions; restart VoteBot in
-the middle of a chat and confirm the widget reconnects; send an `/content/resolve` request from an origin that is
+the middle of a chat and confirm the widget reconnects; reconnect with the **same session id** right after a close (gaps of 0, 50, 200 and 1000 ms) and confirm the answer comes back each time (VOTEBOT-42: a closing connection must not remove a newer one); send an `/content/resolve` request from an origin that is
 not allowed and confirm it is refused; confirm `docker logs votebot-ddp-next` shows no Slack or Webflow activity. A small load check:
 run the smoke script from a few terminals at once and watch memory, CPU, `df` and the broker's response time; abort
 if the broker slows noticeably. Then, in a browser on the dev origin: open a bill page with the chat,
@@ -499,7 +525,7 @@ organizations from the broker, and the console shows no CORS error. In `docker l
 ## 8. Checklist for the ticket
 
 - [ ] 1.1 to 1.3 filled in, differences reported
-- [ ] Section 2: `legacy-webflow` branch and tag in votebot and ddp-sync, old checkouts pinned, paths recorded
+- [ ] Section 2: `legacy-webflow` branch and tag in votebot and ddp-sync, old checkouts pinned, paths recorded (votebot: branch done at `7864abc`, no tag; ddp-sync: not done)
 - [ ] 3.1 swap added; 3.2 to 3.5: image built on the host, container running and verified INSIDE the Docker network (`bill_filter_key=ocd_bill_id` in the startup log, no Slack), own Redis container, memory limits in place, query-log cleanup installed (3.6)
 - [ ] 3.7: broker PR #410 merged, template tested in a throwaway container, nginx recreated in a quiet window, public smoke test passing
 - [ ] Baseline health table filled in and unchanged after each step
