@@ -377,10 +377,22 @@ nohup sh -c 'PYTHONPATH=src uvicorn votebot.main:app --host 127.0.0.1 --port 800
 What is known from the repo and past deploys:
 
 1. Edit `src/`, run `npm run build`, commit the source and `dist/ddp-chat.min.js` (`git add -f`), and push.
-2. Someone with host access updates the checkout on the EC2 host (`~/votebot`, a manual pull; there is no CI) and copies the bundle to `/var/www/votebot/`, as in Step 2 above.
-3. Purge the Cloudflare cache for `ddp-chat.min.js`; the file is cached and an old bundle keeps being served otherwise.
+2. Someone with host access updates the checkout on the host and copies the bundle (manual; there is no CI). **Two servers
+   serve this file, and they are not deployed the same way:**
+   - **New server (the broker host, `votebot-ddp-next`):** the bundle is served by the new site (ddp-next) or wherever it puts
+     its static files (runbook 4.2); VoteBot itself runs as a container built from `main`.
+   - **Old server (`votebot.digitaldemocracyproject.org/dist/`, which the Webflow pages load):** frozen on the branch
+     **`legacy-webflow`** (currently `7864abc`: the old code plus only the VOTEBOT-1 title decoding). nginx's root is
+     `/home/ubuntu/votebot/chat-widget`, so the URL is the git-tracked `chat-widget/dist/ddp-chat.min.js` **in the old checkout**
+     (not `/var/www/votebot/`, which is an older unused copy). Never deploy `main` there. To change the widget: commit to
+     `legacy-webflow`, pull on that server, purge Cloudflare. Its current sha256 is
+     `5a1b77f35aa04c03957b00646c0c74d97ca1cf3bab1027a09aca9011db19e69e`, **not** the hash of a `main` build.
+3. Purge the Cloudflare cache for `ddp-chat.min.js`; the file is cached and an old bundle keeps being served otherwise. The old
+   server sends `cache-control: public, max-age=604800, immutable`, and a purge does not reach browsers, so a returning
+   visitor who does not reload can keep the previous bundle for up to 7 days. If a fix must reach everyone sooner, either
+   shorten that header on the old nginx or add a `?v=` to the script URL in the Webflow site's script tag.
 
-**Seen in the live Webflow bill page's HTML (2026-10-11):** the pages load the bundle from `https://votebot.digitaldemocracyproject.org/dist/ddp-chat.min.js` (the old server's static directory, not `api.../widget/`), so a Webflow visitor gets a new bundle only when it is copied there; and the page's "VoteBot page context for bills" embed fills `window.DDPChatConfig.pageContext` from CMS merge fields inside a `<script>`, where Webflow HTML-escapes them (`America&#39;s`): the widget decodes the title (VOTEBOT-1).
+**Seen in the live Webflow bill page's HTML (2026-10-11):** the pages load the bundle from `https://votebot.digitaldemocracyproject.org/dist/ddp-chat.min.js` (the old server's static directory, not `api.../widget/`), so a Webflow visitor gets a new bundle only when it is copied there; and the page's "VoteBot page context for bills" embed fills `window.DDPChatConfig.pageContext` from CMS merge fields inside a `<script>`, where Webflow HTML-escapes them (`America&#39;s`): the widget decodes the title (VOTEBOT-1; live on the old server since 2026-10-12, confirmed on the S 4974 page). The embed can only be edited in the Webflow Designer.
 
 **Not documented anywhere in this repo:** how `https://api.digitaldemocracyproject.org/widget/ddp-chat.min.js` maps to a file on that host (which nginx `location` or `alias`, and from which directory). The votebot README says the `/votebot` alias in ddp-api was removed, so older descriptions of the widget going through ddp-api may be stale. VOTEBOT-14 includes reading the live nginx config; fill in the exact path here when it has.
 
