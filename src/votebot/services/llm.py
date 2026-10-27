@@ -707,18 +707,17 @@ class LLMService:
 
     async def health_check(self) -> bool:
         """
-        Check if the OpenAI API is accessible.
+        Check if the OpenAI API is accessible, without generating anything (VOTEBOT-51).
+
+        Retrieving the configured model proves the key, the network and that the project can see the model, and
+        costs no tokens and no model latency, so polling `/health/ready` is free. (It used to ask the model for a
+        completion on every check.)
 
         Returns:
             True if the API is healthy, raises exception otherwise
         """
         try:
-            # Make a minimal API call to verify connectivity
-            response = await self.client.responses.create(
-                model=self.model,
-                input="ping",
-                max_output_tokens=16,  # Minimum allowed by the API
-            )
+            await self.client.models.retrieve(self.model)
             return True
         except Exception as e:
             logger.error("OpenAI health check failed", error=str(e))
