@@ -30,7 +30,7 @@ class EmbeddingService:
 
     # Query vectors kept in memory (VOTEBOT-46). One message makes several retrieval queries over the same text,
     # and a vector is ~100 KB as Python floats, so the bound is entries, not time: the same text always gives the
-    # same vector. Memory only, never logged or written out.
+    # same vector. Only finished vectors count toward it. Memory only, never logged or written out.
     QUERY_CACHE_MAX = 128
 
     def __init__(self, settings: Settings | None = None):
@@ -151,17 +151,28 @@ class EmbeddingService:
             Embedding vector as list of floats
         """
         task = self._query_vectors.get(query)
+        if task is not None and task.done() and (task.cancelled() or task.exception() is not None):
+            del self._query_vectors[query]  # never hand out a failure; its cleanup callback may not have run yet
+            task = None
         if task is None:
             task = asyncio.ensure_future(self.embed(query))
             self._query_vectors[query] = task
             task.add_done_callback(lambda t, q=query: self._settled(q, t))
-            while len(self._query_vectors) > self.QUERY_CACHE_MAX:
-                self._query_vectors.popitem(last=False)
+            self._trim()
         else:
             self._query_vectors.move_to_end(query)
             logger.debug("Query embedding reused", in_flight=not task.done())
         # shield: a caller that gives up (its time budget ran out) must not cancel the request others share
         return (await asyncio.shield(task)).embedding
+
+    def _trim(self) -> None:
+        """Drop the oldest FINISHED vectors beyond the bound. A request still in flight is never dropped, so
+        identical callers keep sharing it however many other texts are being embedded at the same moment."""
+        for text in list(self._query_vectors):
+            if len(self._query_vectors) <= self.QUERY_CACHE_MAX:
+                break
+            if self._query_vectors[text].done():
+                del self._query_vectors[text]
 
     def _settled(self, query: str, task: "asyncio.Task[EmbeddingResult]") -> None:
         """Keep a successful embedding; drop a failed (or cancelled) one so the next call tries again."""

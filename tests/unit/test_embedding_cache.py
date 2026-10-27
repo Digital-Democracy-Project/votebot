@@ -80,6 +80,26 @@ class TestEmbedQueryReuse:
         await service.embed_query("ccc")  # still there
         assert calls == ["a", "bb", "ccc", "a"]
 
+    async def test_a_request_still_in_flight_is_not_evicted_so_identical_callers_keep_sharing_it(self):
+        service, calls = _service(delay=0.1)
+        service.QUERY_CACHE_MAX = 2
+        slow = asyncio.ensure_future(service.embed_query("slow"))
+        await asyncio.sleep(0)  # "slow" is now in flight
+        # three more distinct texts arrive while it is still running: more than the bound
+        await asyncio.gather(*[service.embed_query(t) for t in ("a", "bb", "ccc")])
+        again = asyncio.ensure_future(service.embed_query("slow"))
+        assert await slow == await again
+        assert calls.count("slow") == 1  # shared, not started a second time
+
+    async def test_a_failure_that_has_finished_but_not_been_cleaned_up_is_never_reused(self):
+        service, calls = _service()
+        failed = asyncio.get_running_loop().create_future()
+        failed.set_exception(RuntimeError("openai down"))
+        failed.exception()  # retrieved here, as the cleanup callback would
+        service._query_vectors["text"] = failed  # terminal, and its cleanup callback has not run
+        assert await service.embed_query("text") == [4.0] * DIM
+        assert calls == ["text"]
+
     async def test_a_caller_that_gives_up_does_not_cancel_the_request_others_share(self):
         service, calls = _service(delay=0.1)
         impatient = asyncio.ensure_future(asyncio.wait_for(service.embed_query("shared"), 0.01))
