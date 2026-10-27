@@ -115,6 +115,12 @@ async def lifespan(app: FastAPI):
         await stop_invalidate_subscriber()
     except Exception:
         pass
+    try:
+        from votebot.core.agent import close_services
+
+        await close_services(settings)
+    except Exception:
+        logger.warning("Closing the shared HTTP client failed", exc_info=True)
     await redis_store.disconnect()
     logger.info("VoteBot shutdown complete")
 

@@ -187,6 +187,13 @@ def _services_for(settings: Settings) -> _Services:
     return _shared_services[1]
 
 
+async def close_services(settings: Settings) -> None:
+    """Close what the shared services hold open (the lifespan calls it at shutdown). Does nothing if no message
+    was ever served, so shutting down never builds the services just to close them."""
+    if _shared_services is not None and _shared_services[0] is settings:
+        await _shared_services[1].bill_votes.close()
+
+
 @dataclass
 class AgentResult:
     """Result from the agent's message processing."""

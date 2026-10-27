@@ -3,8 +3,10 @@
 This service provides real-time vote lookup for bills via the OpenStates API.
 """
 
+import asyncio
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import httpx
@@ -93,6 +95,30 @@ class BillVotesService:
         self.settings = settings or get_settings()
         # Cache for legislator lookups: jurisdiction -> (when stored, {name: party})
         self._legislator_cache: dict[str, tuple[float, dict[str, str]]] = {}
+        # One long-lived client for OpenStates and Congress.gov (VOTEBOT-50), made on first use
+        self._http: httpx.AsyncClient | None = None
+        self._http_loop: asyncio.AbstractEventLoop | None = None
+
+    @asynccontextmanager
+    async def _client(self):
+        """The shared HTTP client, so a lookup reuses an open connection instead of starting with a new TCP and TLS
+        handshake. Made on first use and rebuilt if the event loop changed (a client belongs to the loop it was made
+        on). The 30 s timeout is the client's, as before, and the pool is sized for a hundred chats at once. Request
+        headers, and so the credential's shape, are chosen per request by the callers, never fixed here."""
+        loop = asyncio.get_running_loop()
+        if self._http is None or self._http_loop is not loop:
+            self._http = httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(max_connections=200, max_keepalive_connections=50, keepalive_expiry=30.0),
+            )
+            self._http_loop = loop
+        yield self._http
+
+    async def close(self) -> None:
+        """Close the shared client (the lifespan does at shutdown). A later lookup makes a new one."""
+        client, self._http, self._http_loop = self._http, None, None
+        if client is not None:
+            await client.aclose()
 
     @property
     def api_base(self) -> str:
@@ -156,16 +182,36 @@ class BillVotesService:
             except ValueError:
                 pass
 
-        for try_session in sessions_to_try:
-            result = await self._fetch_bill_info(jurisdiction, try_session, clean_bill_id)
-            if result and result.found:
-                logger.info(
-                    "Found bill in session",
-                    jurisdiction=jurisdiction,
-                    session=try_session,
-                    bill_identifier=bill_identifier,
-                )
-                return result
+        # The specified session first. Only if it does not have the bill are the older ones asked, and then
+        # together rather than one after another: the newest older session that has the bill still wins, and an
+        # older one still running once a newer one has answered is cancelled (VOTEBOT-50).
+        result = await self._fetch_bill_info(jurisdiction, sessions_to_try[0], clean_bill_id)
+        if result and result.found:
+            logger.info(
+                "Found bill in session",
+                jurisdiction=jurisdiction,
+                session=sessions_to_try[0],
+                bill_identifier=bill_identifier,
+            )
+            return result
+
+        older = sessions_to_try[1:]
+        tasks = [asyncio.ensure_future(self._fetch_bill_info(jurisdiction, s, clean_bill_id)) for s in older]
+        try:
+            for try_session, task in zip(older, tasks, strict=True):
+                result = await task
+                if result and result.found:
+                    logger.info(
+                        "Found bill in session",
+                        jurisdiction=jurisdiction,
+                        session=try_session,
+                        bill_identifier=bill_identifier,
+                    )
+                    return result
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Return not-found result
         return BillInfoResult(
@@ -201,7 +247,7 @@ class BillVotesService:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with self._client() as client:
                 headers = {
                     "accept": "application/json",
                     **openstates_headers(self.settings),
@@ -521,7 +567,7 @@ class BillVotesService:
         url = f"{self.api_base}/bills/{jurisdiction.lower()}/{session}/{clean_bill_id}"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with self._client() as client:
                 headers = {
                     "accept": "application/json",
                     **openstates_headers(self.settings),
@@ -623,7 +669,7 @@ class BillVotesService:
         bill_url = f"https://api.congress.gov/v3/bill/{congress}/{bill_type}/{bill_number}"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with self._client() as client:
                 params = {"api_key": api_key, "format": "json"}
 
                 # Get bill info
