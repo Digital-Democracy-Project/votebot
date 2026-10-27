@@ -59,9 +59,11 @@ class TestPhaseTimings:
         assert PhaseTimings().get_mark("never") is None
 
 
-def _agent(*, retrieval_delay: float = 0.0, first_chunk_delay: float = 0.0, tool: bool = False) -> VoteBotAgent:
+def _agent(
+    *, retrieval_delay: float = 0.0, first_chunk_delay: float = 0.0, tool: bool = False, index: str = "ddp-knowledge-base"
+) -> VoteBotAgent:
     agent = VoteBotAgent.__new__(VoteBotAgent)
-    agent.settings = Settings(pinecone_index_name="ddp-knowledge-base", _env_file=None)
+    agent.settings = Settings(pinecone_index_name=index, _env_file=None)
 
     async def retrieve(**kwargs):
         await asyncio.sleep(retrieval_delay)
@@ -84,9 +86,9 @@ def _agent(*, retrieval_delay: float = 0.0, first_chunk_delay: float = 0.0, tool
     return agent
 
 
-async def _run(agent: VoteBotAgent) -> list:
+async def _run(agent: VoteBotAgent, page: PageContext = PAGE) -> list:
     return [
-        c async for c in agent.process_message_stream(message="How did the vote go?", session_id="s1", page_context=PAGE)
+        c async for c in agent.process_message_stream(message="How did the vote go?", session_id="s1", page_context=page)
     ]
 
 
@@ -108,6 +110,12 @@ class TestStreamingTimings:
         agent = _agent(tool=True)
         await _run(agent)
         assert "bill_info_prefetch" in agent.logged[0]["timings"].phases_ms
+
+    async def test_no_legislator_phase_when_the_legacy_index_has_no_lookup_to_run(self):
+        # legacy index + a page that is not a bill: neither lookup branch runs, so no phase key is invented
+        agent = _agent(index="votebot-large")
+        await _run(agent, PageContext(type="general"))
+        assert "legislator_lookup" not in agent.logged[0]["timings"].phases_ms
 
     async def test_first_token_is_the_first_text_not_the_done_marker(self):
         agent = _agent()

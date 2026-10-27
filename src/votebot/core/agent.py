@@ -1103,10 +1103,11 @@ class VoteBotAgent:
 
         # Step 2c: Pre-fetch legislator info if query mentions a person on a bill page
         legislator_info_context = ""
-        with timings.phase("legislator_lookup"):
-            if self.settings.bill_filter_key == "ocd_bill_id":
+        if self.settings.bill_filter_key == "ocd_bill_id":
+            with timings.phase("legislator_lookup"):
                 legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
-            elif page_context and page_context.type == "bill":
+        elif page_context and page_context.type == "bill":
+            with timings.phase("legislator_lookup"):
                 legislator_info_context = await self._prefetch_legislator_info(message)
         if legislator_info_context:
             logger.info("Pre-fetched legislator info for streaming")
