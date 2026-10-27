@@ -39,7 +39,9 @@ def _agent(rec: Recorder, delay: float = 0.0, retrieval_delay: float | None = No
     agent = VoteBotAgent.__new__(VoteBotAgent)
     agent.settings = Settings(pinecone_index_name="ddp-knowledge-base", _env_file=None)
 
-    def lookup(name, text, fail=False, wait=delay):
+    def lookup(name, text, fail=False):
+        wait = overrides.get("waits", {}).get(name, delay)
+
         async def run(*a, **k):
             rec.started[name] = loop.time()
             rec.deadlines[name] = _enrichment_deadline.get()
@@ -67,7 +69,7 @@ def _agent(rec: Recorder, delay: float = 0.0, retrieval_delay: float | None = No
         return RetrievalResult(chunks=[], query_used="q", filters_applied={}, total_retrieved=0)
 
     async def prefetch_bill_info(*a, **k):
-        return await lookup("bill_info", "BILLINFO-MARK")(*a, **k)
+        return await lookup("bill_info", "BILLINFO-MARK", fail=overrides.get("bill_info_fails", False))(*a, **k)
 
     async def stream(**kwargs):
         rec.prompt = kwargs["system_prompt"]
@@ -131,7 +133,29 @@ class TestTheContextIsAsBefore:
         assert sum(phases.values()) > rec.timings.get_mark("model_call_start")  # durations overlap
 
 
+class TestOverlappingPhases:
+    async def test_each_phase_is_timed_on_its_own_when_they_finish_out_of_start_order(self):
+        rec = Recorder()
+        # started in this order (bill info first), finishing in the opposite order
+        waits = {"bill_info": 0.15, "legislator": 0.10, "vote": 0.05, "webflow": 0.02}
+        await _ask(_agent(rec, delay=0.0, waits=waits))
+        phases = rec.timings.phases_ms
+        assert phases["webflow_verification"] < phases["vote_verification"] < phases["legislator_lookup"] < phases["bill_info_prefetch"]
+        assert phases["bill_info_prefetch"] >= 140  # its own wait, not the order it was entered or left in
+
+
 class TestFailures:
+    async def test_a_failing_bill_info_prefetch_is_an_empty_unused_tool_with_no_duration(self):
+        rec = Recorder()
+        agent = _agent(rec, bill_info_fails=True)
+        chunks = await _ask(agent)
+        final = [c for c in chunks if c.done][0]
+        assert final.metadata.bill_votes_tool_used is False
+        assert "BILLINFO-MARK" not in rec.prompt
+        assert all(m in rec.prompt for m in ("LEGISLATOR-MARK", "VOTEVERIFY-MARK", "BROKER-MARK"))
+        assert not (asyncio.all_tasks() - {asyncio.current_task()})  # nothing left over, no unretrieved failure
+
+
     async def test_a_lookup_that_fails_costs_only_its_own_context(self):
         rec = Recorder()
         chunks = await _ask(_agent(rec, legislator_fails=True))
