@@ -11,7 +11,7 @@ import pytest
 from tests.unit.test_broker_positions_and_links import _json, _mock_broker, _service_with_root
 from votebot.api.schemas.chat import PageContext
 from votebot.config import Settings
-from votebot.core.agent import BILL_SCORECARD_QUERY, VoteBotAgent
+from votebot.core.agent import VoteBotAgent, asks_about_alignment
 from votebot.services.broker_lookup import (
     SCORECARD_MOTIONS_SHOWN,
     SCORECARD_NAMES_SHOWN,
@@ -46,6 +46,10 @@ class TestTheUuid:
     @pytest.mark.parametrize("given", [BILL, BILL.upper(), f"ocd-bill/{BILL}", f"OCD-BILL/{BILL.upper()}", f" {BILL} "])
     def test_every_spelling_of_a_bill_id_becomes_the_bare_lowercase_uuid(self, given):
         assert bare_uuid(given) == BILL
+
+    @pytest.mark.parametrize("doubled", [f"ocd-bill/ocd-person/{BILL}", f"ocd-bill/ocd-bill/{BILL}", f"ocd-person/ocd-bill/{BILL}"])
+    def test_a_doubly_prefixed_value_is_not_an_id(self, doubled):
+        assert bare_uuid(doubled) is None
 
     def test_a_person_id_loses_its_prefix_too(self):
         assert bare_uuid("ocd-person/8056c810-7170-5009-88c3-a670ab30164b") == "8056c810-7170-5009-88c3-a670ab30164b"
@@ -135,17 +139,21 @@ class TestWhichQuestionsFetchIt:
         "question",
         ["How did constituents vote on this?", "Did legislators vote with their district?", "What is the alignment score?",
          "Show me the scorecard", "Were they accountable to voters?", "Did anyone vote against their voters?",
-         "is this in line with what people wanted"],
+         "is this in line with what people wanted", "How did voters feel about this bill?",
+         "Did representatives vote the way voters wanted?", "Did the vote match voter preferences?",
+         "Which districts voted for it?", "Do constituents support this?"],
     )
-    def test_questions_about_constituents(self, question):
-        assert BILL_SCORECARD_QUERY.search(question)
+    def test_questions_about_how_votes_compare_with_the_voters(self, question):
+        assert asks_about_alignment(question)
 
     @pytest.mark.parametrize(
         "question",
-        ["What does this bill do?", "How did the vote go?", "Who sponsored it?", "What is the latest status?", "Who is Representative Smith?"],
+        ["What does this bill do?", "How did the vote go?", "Who sponsored it?", "What is the latest status?",
+         "Who is Representative Smith?", "Which districts does this bill affect?", "What services does this provide to constituents?",
+         "Does this apply to every district?", "Who are the voters in Arizona?", "When is the next election?"],
     )
-    def test_ordinary_questions_do_not(self, question):
-        assert not BILL_SCORECARD_QUERY.search(question)
+    def test_ordinary_questions_and_geographic_uses_do_not(self, question):
+        assert not asks_about_alignment(question)
 
 
 def _agent(scorecard=None, **page) -> tuple[VoteBotAgent, PageContext]:
@@ -182,20 +190,48 @@ class TestTheAgentAsksOnlyWhenAskedAndHoldingAnId:
         agent, page = _agent(None)  # the broker answered 404, which the lookup turns into None
         assert await agent._prefetch_bill_broker_data("How did constituents vote on this?", page) == ""
 
-    async def test_a_slow_broker_costs_the_context_not_the_answer(self, monkeypatch):
+    async def test_a_slow_scorecard_costs_only_itself_the_analysis_that_arrived_is_kept(self, monkeypatch):
+        from votebot.services.broker_lookup import BillAnalysis
+
         agent, page = _agent(None)
+        agent.broker_lookup.get_bill_analysis = AsyncMock(return_value=BillAnalysis(summary="A fine summary."))
 
         async def slow(*a, **k):
             await asyncio.sleep(5)
 
         agent.broker_lookup.get_bill_scorecard = slow
         monkeypatch.setattr("votebot.core.agent._enrichment_budget_left", lambda: 0.05)
-        assert await agent._prefetch_bill_broker_data("How did constituents vote on this?", page) == ""
+        out = await agent._prefetch_bill_broker_data("How did constituents vote on this?", page)
+        assert "A fine summary." in out and "Scorecard" not in out
 
-    async def test_a_failing_broker_costs_the_context_not_the_answer(self):
+    async def test_a_failing_scorecard_costs_only_itself_too(self):
+        from votebot.services.broker_lookup import BillAnalysis
+
         agent, page = _agent(None)
+        agent.broker_lookup.get_bill_analysis = AsyncMock(return_value=BillAnalysis(summary="A fine summary."))
         agent.broker_lookup.get_bill_scorecard = AsyncMock(side_effect=ValueError("boom"))
-        assert await agent._prefetch_bill_broker_data("How did constituents vote on this?", page) == ""
+        out = await agent._prefetch_bill_broker_data("How did constituents vote on this?", page)
+        assert "A fine summary." in out and "Scorecard" not in out
+
+    async def test_a_failing_analysis_does_not_take_the_scorecard_with_it(self):
+        agent, page = _agent(parse_bill_scorecard(_body()))
+        agent.broker_lookup.get_bill_analysis = AsyncMock(side_effect=ValueError("boom"))
+        assert "DDP Scorecard for This Bill" in await agent._prefetch_bill_broker_data("How did constituents vote on this?", page)
+
+    async def test_a_page_with_only_the_uuid_asks_the_scorecard_and_sends_no_malformed_analysis_request(self, monkeypatch):
+        agent, page = _agent()
+        seen = []
+
+        def handler(request):
+            seen.append(request.url.path)
+            return _json(_body())
+
+        _mock_broker(monkeypatch, handler)
+        agent.broker_lookup = _service_with_root()  # the real lookups, a counting transport
+        only_uuid = PageContext(type="bill", ocd_bill_id=BILL)
+        out = await agent._prefetch_bill_broker_data("How did constituents vote on this?", only_uuid)
+        assert seen == [f"/api/bills/{BILL}/scorecard/"]  # no analysis request, no poll request: they need the triple
+        assert "DDP Scorecard for This Bill" in out
 
     def test_a_page_with_only_the_uuid_is_enough_to_ask(self):
         agent, _ = _agent()

@@ -115,9 +115,10 @@ def bare_uuid(value: object) -> str | None:
     segment, and any other spelling is a 404), so what is sent is always `str(UUID(...))`, and what is not a UUID
     is never sent at all."""
     text = str(value or "").strip()
-    for prefix in ("ocd-bill/", "ocd-person/"):
+    for prefix in ("ocd-bill/", "ocd-person/"):  # at most one: a doubly prefixed value is not an id
         if text.lower().startswith(prefix):
             text = text[len(prefix):]
+            break
     try:
         return str(uuid.UUID(text))
     except ValueError:

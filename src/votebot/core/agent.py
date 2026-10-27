@@ -143,12 +143,26 @@ POLL_QUERY = re.compile(
     re.IGNORECASE,
 )
 
-# A question about how a bill's votes compare with the voters (VOTEBOT-60): the scorecard is only fetched when asked about
-BILL_SCORECARD_QUERY = re.compile(
-    r"\b(constituents?|districts?|accountab\w*|align(?:ed|ment)?|scorecards?)\b"
-    r"|\bin line with\b|\b(?:match(?:ed)?|against|with) (?:their|his|her|the) (?:voters|district|constituents)\b",
+# A question about how votes compare with the voters (VOTEBOT-60): the scorecard is only fetched when asked about.
+# Some words say it on their own; "constituents", "district" and "voters" do only next to a word about voting or
+# wanting, so "which districts does this bill affect?" or "what services help constituents?" are not scorecard questions.
+_ALIGNMENT_ALONE = re.compile(r"\b(accountab\w*|align(?:ed|ment)?|scorecards?)\b|\bin line with\b", re.IGNORECASE)
+_ALIGNMENT_SUBJECT = re.compile(r"\b(constituents?|districts?|voters?)\b", re.IGNORECASE)
+_ALIGNMENT_ABOUT_VOTING = re.compile(
+    r"\b(vote[sd]?|voting|support\w*|oppos\w*|want(?:ed|s)?|prefer\w*|fe(?:el|lt)|match(?:ed|es|ing)?|against|agree\w*|"
+    r"disagree\w*|represent\w*)\b",
     re.IGNORECASE,
 )
+
+
+def asks_about_alignment(message: str, also: re.Pattern[str] | None = None) -> bool:
+    """True when the message asks how votes compare with the voters (the scorecard's subject)."""
+    return bool(
+        _ALIGNMENT_ALONE.search(message)
+        or (also is not None and also.search(message))
+        or (_ALIGNMENT_SUBJECT.search(message) and _ALIGNMENT_ABOUT_VOTING.search(message))
+    )
+
 
 LEGISLATOR_CUES = re.compile(
     r"(?<!\w)(senators?|sen\.|representatives?|reps?\.|congress(?:man|men|woman|women|person|people)|legislators?|"
@@ -2357,24 +2371,25 @@ class VoteBotAgent:
         deadline = _enrichment_deadline.get()
         args = (page_context.jurisdiction, page_context.session, page_context.id, deadline)
         asks_about_poll = bool(POLL_QUERY.search(message))
-        asks_about_scorecard = bool(BILL_SCORECARD_QUERY.search(message)) and bool(bare_uuid(page_context.ocd_bill_id))
-        try:
-            analysis, poll, scorecard = await asyncio.wait_for(
-                asyncio.gather(
-                    self.broker_lookup.get_bill_analysis(*args),
-                    self.broker_lookup.get_concept_poll(*args) if asks_about_poll else asyncio.sleep(0),
-                    self.broker_lookup.get_bill_scorecard(page_context.ocd_bill_id, deadline)
-                    if asks_about_scorecard
-                    else asyncio.sleep(0),
-                ),
-                _enrichment_budget_left(),
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Broker bill analysis took too long; answering without it")
-            return ""
-        except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
-            logger.error("Broker bill analysis failed; answering without it", error=str(e))
-            return ""
+        asks_about_scorecard = asks_about_alignment(message) and bool(bare_uuid(page_context.ocd_bill_id))
+
+        async def settled(name: str, call):
+            """One lookup's result, or None: a slow or failing one costs only its own context, not its siblings'."""
+            try:
+                return await asyncio.wait_for(call, _enrichment_budget_left())
+            except asyncio.TimeoutError:
+                logger.warning("Broker lookup took too long; answering without it", lookup=name)
+            except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
+                logger.error("Broker lookup failed; answering without it", lookup=name, error=str(e))
+            return None
+
+        analysis, poll, scorecard = await asyncio.gather(
+            settled("bill analysis", self.broker_lookup.get_bill_analysis(*args)),
+            settled("concept poll", self.broker_lookup.get_concept_poll(*args)) if asks_about_poll else asyncio.sleep(0),
+            settled("bill scorecard", self.broker_lookup.get_bill_scorecard(page_context.ocd_bill_id, deadline))
+            if asks_about_scorecard
+            else asyncio.sleep(0),
+        )
         parts = [
             format_bill_analysis(analysis),
             format_concept_poll(poll if asks_about_poll else None),
