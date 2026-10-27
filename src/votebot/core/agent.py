@@ -23,8 +23,10 @@ from votebot.services.bill_versions import current_version
 from votebot.services.broker_lookup import (
     BUDGET_SECONDS,
     BrokerLookupService,
+    bare_uuid,
     format_bill_analysis,
     format_bill_org_positions,
+    format_bill_scorecard,
     format_concept_poll,
     format_org_bill_positions,
     format_org_details,
@@ -140,6 +142,27 @@ POLL_QUERY = re.compile(
     r"|\bhow (are|do|did) (other |most )?(people|voters|visitors|users|others) (feel|voting|voted|vote|responding)\b",
     re.IGNORECASE,
 )
+
+# A question about how votes compare with the voters (VOTEBOT-60): the scorecard is only fetched when asked about.
+# Some words say it on their own; "constituents", "district" and "voters" do only next to a word about voting or
+# wanting, so "which districts does this bill affect?" or "what services help constituents?" are not scorecard questions.
+_ALIGNMENT_ALONE = re.compile(r"\b(accountab\w*|align(?:ed|ment)?|scorecards?)\b|\bin line with\b", re.IGNORECASE)
+_ALIGNMENT_SUBJECT = re.compile(r"\b(constituents?|districts?|voters?)\b", re.IGNORECASE)
+_ALIGNMENT_ABOUT_VOTING = re.compile(
+    r"\b(vote[sd]?|voting|support\w*|oppos\w*|want(?:ed|s)?|prefer\w*|fe(?:el|lt)|match(?:ed|es|ing)?|against|agree\w*|"
+    r"disagree\w*|represent\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def asks_about_alignment(message: str, also: re.Pattern[str] | None = None) -> bool:
+    """True when the message asks how votes compare with the voters (the scorecard's subject)."""
+    return bool(
+        _ALIGNMENT_ALONE.search(message)
+        or (also is not None and also.search(message))
+        or (_ALIGNMENT_SUBJECT.search(message) and _ALIGNMENT_ABOUT_VOTING.search(message))
+    )
+
 
 LEGISLATOR_CUES = re.compile(
     r"(?<!\w)(senators?|sen\.|representatives?|reps?\.|congress(?:man|men|woman|women|person|people)|legislators?|"
@@ -2363,40 +2386,47 @@ class VoteBotAgent:
         return format_org_bill_positions(org, positions, self.settings.ddp_site_base_url)
 
     def _wants_bill_broker_data(self, page_context: PageContext | None) -> bool:
-        """A bill page on the canonical-id index that names the bill (the broker keys its analysis by
-        jurisdiction, session and identifier) and a broker to ask."""
+        """A bill page on the canonical-id index that names the bill (the broker keys its analysis by jurisdiction,
+        session and identifier, and its scorecard by the OpenStates id) and a broker to ask."""
         return bool(
             page_context
             and page_context.type == "bill"
             and self.settings.bill_filter_key == "ocd_bill_id"
             and self.settings.ddp_broker_api_root
-            and page_context.jurisdiction
-            and page_context.session
-            and page_context.id
+            and ((page_context.jurisdiction and page_context.session and page_context.id) or page_context.ocd_bill_id)
         )
 
     async def _prefetch_bill_broker_data(self, message: str, page_context: PageContext) -> str:
-        """DDP's LegBot analysis of the page's bill, and its concept poll when the message asks about it,
-        from ddp-broker-py. One time budget with the other lookups; a slow or failing broker costs the
-        extra context, never the answer."""
+        """DDP's LegBot analysis of the page's bill, its concept poll when the message asks about it and its
+        constituent-alignment scorecard when the message asks about that, from ddp-broker-py. One time budget with
+        the other lookups; a slow or failing broker costs the extra context, never the answer."""
         deadline = _enrichment_deadline.get()
         args = (page_context.jurisdiction, page_context.session, page_context.id, deadline)
         asks_about_poll = bool(POLL_QUERY.search(message))
-        try:
-            analysis, poll = await asyncio.wait_for(
-                asyncio.gather(
-                    self.broker_lookup.get_bill_analysis(*args),
-                    self.broker_lookup.get_concept_poll(*args) if asks_about_poll else asyncio.sleep(0),
-                ),
-                _enrichment_budget_left(),
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Broker bill analysis took too long; answering without it")
-            return ""
-        except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
-            logger.error("Broker bill analysis failed; answering without it", error=str(e))
-            return ""
-        parts = [format_bill_analysis(analysis), format_concept_poll(poll if asks_about_poll else None)]
+        asks_about_scorecard = asks_about_alignment(message) and bool(bare_uuid(page_context.ocd_bill_id))
+
+        async def settled(name: str, call):
+            """One lookup's result, or None: a slow or failing one costs only its own context, not its siblings'."""
+            try:
+                return await asyncio.wait_for(call, _enrichment_budget_left())
+            except asyncio.TimeoutError:
+                logger.warning("Broker lookup took too long; answering without it", lookup=name)
+            except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
+                logger.error("Broker lookup failed; answering without it", lookup=name, error=str(e))
+            return None
+
+        analysis, poll, scorecard = await asyncio.gather(
+            settled("bill analysis", self.broker_lookup.get_bill_analysis(*args)),
+            settled("concept poll", self.broker_lookup.get_concept_poll(*args)) if asks_about_poll else asyncio.sleep(0),
+            settled("bill scorecard", self.broker_lookup.get_bill_scorecard(page_context.ocd_bill_id, deadline))
+            if asks_about_scorecard
+            else asyncio.sleep(0),
+        )
+        parts = [
+            format_bill_analysis(analysis),
+            format_concept_poll(poll if asks_about_poll else None),
+            format_bill_scorecard(scorecard if asks_about_scorecard else None),
+        ]
         return "\n\n".join(p for p in parts if p)
 
     async def _prefetch_bill_org_positions_from_broker(self, page_context: PageContext) -> str:
