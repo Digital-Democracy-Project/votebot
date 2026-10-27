@@ -24,6 +24,7 @@ grep -rn "class <Name>\|def <name>" src/votebot/
   - `health_check() -> bool`
 - **`Document`** — `id, content, metadata, embedding`
 - **`SearchResult`** — `id, content, score, metadata`
+- **`VectorStoreService.warm()`** (VOTEBOT-49) — opens the configured index and makes one `describe_index_stats` request, on a worker thread, so the first chat after a start pays for neither the index lookup nor the first connection. **It only reads**: unlike the `index` property (which creates a missing index, runbook 3.5), `warm` checks existence through `_open_existing_index` and returns False for a missing index without creating it. **`warm_up_services(settings)`** (`core/agent.py`) runs it and one tiny `embed("warm up")` (not `embed_query`, so nothing lands in the query-embedding cache) on the shared `_services_for(settings)` services; the `main.py` lifespan starts it as a background task (cancelled at shutdown, never awaited at startup), it never raises, and it logs `Warm-up finished` or `Warm-up incomplete` with which client failed.
 - **`VectorStoreServiceFactory.get_instance()`** — singleton accessor
 
 ## Retrieval service (`core/retrieval.py`)

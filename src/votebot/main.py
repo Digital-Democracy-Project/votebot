@@ -3,6 +3,7 @@
 VoteBot is a chat/RAG service. Sync/ingestion is handled by ddp-sync.
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -99,6 +100,12 @@ async def lifespan(app: FastAPI):
 
     check_query_log_dir()
 
+    # Warm Pinecone and the embedding client in the background: the first chat after a deploy should not pay for the
+    # index lookup and the first connections. Not awaited, so an unreachable service cannot delay or stop startup.
+    from votebot.core.agent import warm_up_services
+
+    warmup = asyncio.create_task(warm_up_services(settings))
+
     logger.info(
         "VoteBot started (chat-only mode)",
         version=settings.app_version,
@@ -109,6 +116,8 @@ async def lifespan(app: FastAPI):
     )
 
     yield
+
+    warmup.cancel()  # a no-op once it has finished
 
     from votebot.services.button_cache import stop_invalidate_subscriber
     try:
