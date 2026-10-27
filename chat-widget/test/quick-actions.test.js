@@ -20,7 +20,7 @@ const BILL = { type: 'bill', id: 'HB 1', title: 'A Bill', ocd_bill_id: 'a3f7c0d1
 const GENERAL = { type: 'general' };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function loadWidget(target, { features = { quick_action_buttons_enabled: true }, fetchFails = false } = {}) {
+function loadWidget(target, { features = { quick_action_buttons_enabled: true }, fetchFails = false, notOk = false } = {}) {
     const rec = { fetches: 0, sent: [], handler: null, wired: 0, shown: 0, hidden: 0, enabled: 0, context: GENERAL, release: null };
     const stubs = {
         DDPUI: {
@@ -41,7 +41,7 @@ function loadWidget(target, { features = { quick_action_buttons_enabled: true },
     const fetch = () => {
         rec.fetches++;
         return new Promise((resolve, reject) => {
-            rec.release = () => (fetchFails ? reject(new Error('offline')) : resolve({ ok: true, json: async () => features }));
+            rec.release = () => (fetchFails ? reject(new Error('offline')) : resolve({ ok: !notOk, json: async () => features }));
         });
     };
     const source = fs
@@ -169,6 +169,17 @@ for (const target of Object.keys(TARGETS)) {
         startFetch();
         await featuresArrive(rec);
         assert.strictEqual(rec.fetches, 1);
+
+        widget.setPageContext(BILL, true);
+        assert.strictEqual(rec.fetches, 2);
+    });
+
+    test(`a features answer that is not OK is tried again at the next context change [${target}]`, async () => {
+        const { widget, startFetch, rec } = loadWidget(target, { notOk: true });
+        startFetch();
+        await featuresArrive(rec);
+        assert.strictEqual(rec.fetches, 1);
+        assert.strictEqual(rec.wired, 0);
 
         widget.setPageContext(BILL, true);
         assert.strictEqual(rec.fetches, 2);
