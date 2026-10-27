@@ -437,7 +437,7 @@ class BrokerLookupService:
         """DDP's constituent-alignment scorecard of the legislator, by the bare OpenStates person UUID (an
         `ocd-person/` prefix is stripped: a `/` cannot ride in one path segment); None when the id is not a UUID
         (nothing is sent), the broker has no such legislator (404) or cannot answer."""
-        legislator_id = bare_uuid(person_id)
+        legislator_id = bare_uuid(person_id, "ocd-person/")
         if legislator_id is None:
             return None
         body = await self._get(f"/api/legislators/{legislator_id}/scorecard/", None, deadline)

@@ -49,7 +49,7 @@ class TestTheLookup:
         assert seen[0].url.path == f"/api/legislators/{PERSON}/scorecard/"  # no "%2F", no prefix
         assert card.name == "Nancy Pelosi" and card.score == 18.18
 
-    @pytest.mark.parametrize("bad", [None, "", "847", "Nancy Pelosi", "ocd-person/", f"ocd-person/ocd-person/{PERSON}", 847])
+    @pytest.mark.parametrize("bad", [None, "", "847", "Nancy Pelosi", "ocd-person/", f"ocd-person/ocd-person/{PERSON}", f"ocd-bill/{PERSON}", 847])
     async def test_what_is_not_a_uuid_sends_nothing(self, monkeypatch, bad):
         calls = []
         _mock_broker(monkeypatch, lambda r: calls.append(r) or _json(_body()))
@@ -117,7 +117,7 @@ class TestWhichQuestionsFetchIt:
         "question",
         ["How aligned is this legislator with voters?", "What is their score?", "How often do they vote with their constituents?",
          "Do they vote with their district?", "Are they accountable to their voters?", "Does she vote the way her voters want?",
-         "What is the alignment score?"],
+         "What is the alignment score?", "Show me their scorecard", "What is their DDP scorecard?", "scorecard"],
     )
     def test_questions_about_how_a_legislator_compares_with_their_voters(self, question):
         assert asks_about_alignment(question, LEGISLATOR_ALIGNMENT_ALSO)
@@ -125,10 +125,22 @@ class TestWhichQuestionsFetchIt:
     @pytest.mark.parametrize(
         "question",
         ["Who is this legislator?", "What committees are they on?", "How did they vote on HB 1?", "What district do they represent?",
-         "What is their party?", "How do I contact them?", "Which bills did they sponsor?"],
+         "What is their party?", "How do I contact them?", "Which bills did they sponsor?",
+         "What district does this representative serve?"],
     )
     def test_profile_questions_do_not(self, question):
         assert not asks_about_alignment(question, LEGISLATOR_ALIGNMENT_ALSO)
+
+    @pytest.mark.parametrize(
+        "question",
+        ["Do constituents support this bill?", "Did my representatives vote with their constituents?", "Were the representatives accountable?",
+         "How did the districts vote on this?", "Is this bill aligned with what voters want?"],
+    )
+    def test_the_bill_questions_still_fetch_without_the_word_represent(self, question):
+        assert asks_about_alignment(question)
+
+    def test_what_district_do_they_represent_is_a_profile_question_for_a_bill_page_too(self):
+        assert not asks_about_alignment("What district do they represent?")
 
 
 def _agent(card=None, index="ddp-knowledge-base", broker="https://broker.test", **page) -> tuple[VoteBotAgent, PageContext]:

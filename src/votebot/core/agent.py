@@ -157,7 +157,7 @@ _ALIGNMENT_ABOUT_VOTING = re.compile(
 
 
 # On a legislator's page a question about their score or how often they vote with their voters is the same question
-LEGISLATOR_ALIGNMENT_ALSO = re.compile(r"\bscore\b|\bhow often\b[^.?!]*\bvot\w*\b[^.?!]*\bwith\b|\bvot(?:e|es|ed|ing) with\b", re.IGNORECASE)
+LEGISLATOR_ALIGNMENT_ALSO = re.compile(r"\bscores?(?:card)?\b|\bhow often\b[^.?!]*\bvot\w*\b[^.?!]*\bwith\b|\bvot(?:e|es|ed|ing) with\b", re.IGNORECASE)
 
 
 def asks_about_alignment(message: str, also: re.Pattern[str] | None = None) -> bool:
@@ -2405,7 +2405,7 @@ class VoteBotAgent:
             and page_context.type == "legislator"
             and self.settings.bill_filter_key == "ocd_bill_id"
             and self.settings.ddp_broker_api_root
-            and bare_uuid(page_context.id)
+            and bare_uuid(page_context.id, "ocd-person/")
         )
 
     async def _prefetch_legislator_scorecard(self, message: str, page_context: PageContext) -> str:
