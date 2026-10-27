@@ -218,7 +218,7 @@ Singleton: `get_redis_store() -> RedisStore`. All methods no-op gracefully when 
 
 ## Embeddings service (`services/embeddings.py`)
 
-- **`EmbeddingService`** — OpenAI `text-embedding-3-large` (`EMBEDDING_DIMENSION = 3072`). Convenience methods: `embed_documents(texts) -> list[list[float]]`, `embed_query(text) -> list[float]` (wrap the lower-level `embed(text) -> EmbeddingResult` / `embed_batch(texts, batch_size=100) -> list[EmbeddingResult]`). `get_dimension()` classmethod returns `EMBEDDING_DIMENSION`.
+- **`EmbeddingService`** — OpenAI `text-embedding-3-large` (`EMBEDDING_DIMENSION = 3072`). Convenience methods: `embed_documents(texts) -> list[list[float]]`, `embed_query(text) -> list[float]` (**one embedding per distinct text** (VOTEBOT-46): a bounded in-memory LRU of 128 vectors, `QUERY_CACHE_MAX`, plus sharing of a request still in flight, so concurrent retrieval phases over the same text make one OpenAI call; a failed call is not kept; the returned list is shared, do not mutate it; a `Query embedding reused` debug line marks a reuse; do not add another query-embedding cache) (wrap the lower-level `embed(text) -> EmbeddingResult` / `embed_batch(texts, batch_size=100) -> list[EmbeddingResult]`). `get_dimension()` classmethod returns `EMBEDDING_DIMENSION`.
 - **`EmbeddingResult`** — `embedding, tokens_used, model`
 - **`EmbeddingServiceFactory.get_instance()`** — singleton
 
