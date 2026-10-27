@@ -184,11 +184,8 @@ class FederalLegislatorCache:
         """
         logger.info("Refreshing federal legislator cache from OpenStates")
 
-        if self.settings.use_ddp_openstates_replica:
-            if not self.settings.ddp_openstates_bearer_token.get_secret_value():
-                return {"success": False, "error": "DDP OpenStates bearer token not configured"}
-        elif not self.settings.openstates_api_key.get_secret_value():
-            return {"success": False, "error": "OpenStates API key not configured"}
+        if not self.settings.ddp_openstates_bearer_token.get_secret_value():
+            return {"success": False, "error": "DDP OpenStates credential not configured"}
 
         headers = openstates_headers(self.settings)
         legislators: dict[str, dict] = {}

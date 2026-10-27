@@ -91,9 +91,13 @@ class BillVotesService:
             settings: Application settings
         """
         self.settings = settings or get_settings()
-        self.api_base = openstates_base_url(self.settings)
         # Cache for legislator lookups: jurisdiction -> (when stored, {name: party})
         self._legislator_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+    @property
+    def api_base(self) -> str:
+        """The DDP replica's base URL, read when a request is made so building the service never fails."""
+        return openstates_base_url(self.settings)
 
     async def get_bill_votes(
         self,

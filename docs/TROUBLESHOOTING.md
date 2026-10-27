@@ -636,7 +636,7 @@ The current trigger phrases are in `agent.py:_is_dispute_or_correction()`. If a 
 
 ### If Verification Isn't Working
 
-1. **Check OpenStates API key**: Ensure `OPENSTATES_API_KEY` is set and valid
+1. **Check the OpenStates replica**: Ensure `DDP_OPENSTATES_API_ROOT` and `DDP_OPENSTATES_BEARER_TOKEN` are set and the replica answers (`/health/ready` reports `ddp_openstates_replica`)
 2. **Check bill identifier format**: The bill must be in OpenStates (e.g., "HR1" for federal, "HB123" for state)
 3. **Check legislator name extraction**: The lookup now searches for last name in addition to full name (e.g., "moody" matches "Moody (R-FL)")
 4. **Check session resolution**: Session can come from multiple sources (see flow below)

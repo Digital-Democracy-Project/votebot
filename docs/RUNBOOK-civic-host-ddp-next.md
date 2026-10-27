@@ -221,7 +221,6 @@ PINECONE_API_KEY=<...>
 PINECONE_INDEX_NAME=ddp-knowledge-base          # exactly this; the index name ddp-sync writes (KNOWLEDGE_BASE_INDEX_NAME)
 PINECONE_NAMESPACE=<ddp-sync's PINECONE_NAMESPACE; default is "default">
 DDP_BROKER_API_ROOT=<an address that serves the broker's public GETs and is not rejected as DisallowedHost; see 1.2>
-USE_DDP_OPENSTATES_REPLICA=true
 DDP_OPENSTATES_API_ROOT=http://10.0.0.11:8002     # api-v3 through the host address, as ddp-sync reaches it
 DDP_OPENSTATES_BEARER_TOKEN=<...>
 DDP_SITE_BASE_URL=https://dev.digitaldemocracyproject.org     # production host once decided; unset is a safe no-op
@@ -482,7 +481,7 @@ it alone, and find out whether reaching the limit only alerts or actually blocks
 
 ## 6. Verify
 
-**What this section needs from code.** `scripts/smoke_ws.py` (VOTEBOT-16, in `main`). Links to our own `/explore/...` pages need `DDP_SITE_BASE_URL` and organization positions from the broker need `DDP_BROKER_API_ROOT`; both are VOTEBOT-15 part 2 (PR #16, merged). Legislator answers and "what changed" read api-v3 live (VOTEBOT-15 part 3, PR #17) and need `USE_DDP_OPENSTATES_REPLICA=true`. Deploy a version of `main` that contains all of them before running this section, or the checks below will fail for the right reason. The startup line to check (`docker logs votebot-ddp-next | grep 'VoteBot started'`) is a structured log that includes `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id` (`src/votebot/main.py`).
+**What this section needs from code.** `scripts/smoke_ws.py` (VOTEBOT-16, in `main`). Links to our own `/explore/...` pages need `DDP_SITE_BASE_URL` and organization positions from the broker need `DDP_BROKER_API_ROOT`; both are VOTEBOT-15 part 2 (PR #16, merged). Legislator answers and "what changed" read api-v3 live (VOTEBOT-15 part 3, PR #17) and need the DDP replica (`DDP_OPENSTATES_API_ROOT`, which VoteBot now requires). Deploy a version of `main` that contains all of them before running this section, or the checks below will fail for the right reason. The startup line to check (`docker logs votebot-ddp-next | grep 'VoteBot started'`) is a structured log that includes `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id` (`src/votebot/main.py`).
 
 ```bash
 # first INSIDE the Docker network (before the nginx change), then through nginx

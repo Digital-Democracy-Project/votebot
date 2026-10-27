@@ -18,7 +18,9 @@ services:
       - PINECONE_INDEX_NAME=${PINECONE_INDEX_NAME:-votebot-dev}
       - REDIS_URL=redis://redis:6379/0
       - CONGRESS_API_KEY=${CONGRESS_API_KEY}
-      - OPENSTATES_API_KEY=${OPENSTATES_API_KEY}
+      - DDP_OPENSTATES_API_ROOT=${DDP_OPENSTATES_API_ROOT}
+      - DDP_OPENSTATES_BEARER_TOKEN=${DDP_OPENSTATES_BEARER_TOKEN}
+      - DDP_OPENSTATES_AUTH_HEADER=${DDP_OPENSTATES_AUTH_HEADER:-bearer}
     volumes:
       - ../../src:/app/src:ro
       - ../../scripts:/app/scripts:ro
