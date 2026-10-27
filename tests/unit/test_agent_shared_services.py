@@ -1,12 +1,10 @@
 """VOTEBOT-37: the routes build a VoteBotAgent per message, so its services must not be rebuilt (and their caches lost) with it."""
 
-import time
 from unittest.mock import AsyncMock, patch
 
 from votebot.config import Settings
 from votebot.core import agent as agent_module
 from votebot.core.agent import VoteBotAgent
-from votebot.services import bill_votes as bill_votes_module
 from votebot.services.bill_votes import BillVotesService
 
 
@@ -45,7 +43,7 @@ def test_the_shared_set_is_per_settings_object_not_per_process_forever():
     assert agent_module._shared_services[0] is not s
 
 
-async def test_party_lookups_are_remembered_for_an_hour_and_then_asked_again():
+async def test_party_lookups_are_remembered():
     service = BillVotesService(settings(ddp_openstates_api_root="http://api-v3.test"))
     calls = []
 
@@ -57,9 +55,4 @@ async def test_party_lookups_are_remembered_for_an_hour_and_then_asked_again():
     assert (await service._get_legislator_parties("fl", Client(), {}))["ann"] == "Democratic"
     first_round = len(calls)
     await service._get_legislator_parties("fl", Client(), {})
-    assert len(calls) == first_round  # remembered
-
-    later = time.monotonic() + bill_votes_module.PARTY_CACHE_SECONDS + 1
-    with patch("votebot.services.bill_votes.time.monotonic", return_value=later):
-        await service._get_legislator_parties("fl", Client(), {})
-    assert len(calls) == 2 * first_round  # expired: asked again
+    assert len(calls) == first_round  # remembered; what happens at expiry is in test_party_roster_refresh.py
