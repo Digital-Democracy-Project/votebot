@@ -1,5 +1,7 @@
 """Embedding generation service using OpenAI."""
 
+import asyncio
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import structlog
@@ -26,6 +28,11 @@ class EmbeddingService:
     # Dimension for text-embedding-3-large
     EMBEDDING_DIMENSION = 3072
 
+    # Query vectors kept in memory (VOTEBOT-46). One message makes several retrieval queries over the same text,
+    # and a vector is ~100 KB as Python floats, so the bound is entries, not time: the same text always gives the
+    # same vector. Memory only, never logged or written out.
+    QUERY_CACHE_MAX = 128
+
     def __init__(self, settings: Settings | None = None):
         """
         Initialize the embedding service.
@@ -38,6 +45,8 @@ class EmbeddingService:
             api_key=self.settings.openai_api_key.get_secret_value()
         )
         self.model = self.settings.openai_embedding_model
+        # text -> the task embedding it (finished or still running); a finished one is the cache entry
+        self._query_vectors: OrderedDict[str, asyncio.Task[EmbeddingResult]] = OrderedDict()
 
     @retry(
         stop=stop_after_attempt(3),
@@ -131,7 +140,9 @@ class EmbeddingService:
         """
         Generate an embedding for a search query.
 
-        This is a convenience method that returns just the embedding vector.
+        This is a convenience method that returns just the embedding vector. The same text is embedded once:
+        later calls reuse the vector, and calls made while it is still being fetched share that one request.
+        The returned list is shared, so callers must not change it. A failed embedding is not kept.
 
         Args:
             query: The search query
@@ -139,8 +150,24 @@ class EmbeddingService:
         Returns:
             Embedding vector as list of floats
         """
-        result = await self.embed(query)
-        return result.embedding
+        task = self._query_vectors.get(query)
+        if task is None:
+            task = asyncio.ensure_future(self.embed(query))
+            self._query_vectors[query] = task
+            task.add_done_callback(lambda t, q=query: self._settled(q, t))
+            while len(self._query_vectors) > self.QUERY_CACHE_MAX:
+                self._query_vectors.popitem(last=False)
+        else:
+            self._query_vectors.move_to_end(query)
+            logger.debug("Query embedding reused", in_flight=not task.done())
+        # shield: a caller that gives up (its time budget ran out) must not cancel the request others share
+        return (await asyncio.shield(task)).embedding
+
+    def _settled(self, query: str, task: "asyncio.Task[EmbeddingResult]") -> None:
+        """Keep a successful embedding; drop a failed (or cancelled) one so the next call tries again."""
+        failed = task.cancelled() or task.exception() is not None
+        if failed and self._query_vectors.get(query) is task:
+            del self._query_vectors[query]
 
     async def embed_documents(self, documents: list[str]) -> list[list[float]]:
         """
