@@ -103,10 +103,17 @@ class BillVotesService:
     async def _client(self):
         """The shared HTTP client, so a lookup reuses an open connection instead of starting with a new TCP and TLS
         handshake. Made on first use and rebuilt if the event loop changed (a client belongs to the loop it was made
-        on). The 30 s timeout is the client's, as before, and the pool is sized for a hundred chats at once. Request
-        headers, and so the credential's shape, are chosen per request by the callers, never fixed here."""
+        on): a client whose loop has ended is dropped (its connections died with the loop, there is nothing left to
+        close), and one whose loop is still running is not taken over but refused. Production has one loop; this
+        keeps a service shared across the loops of a test suite from reusing a dead client. The 30 s timeout is the
+        client's, as before, and the pool is sized for a hundred chats at once. Request headers, and so the
+        credential's shape, are chosen per request by the callers, never fixed here."""
         loop = asyncio.get_running_loop()
-        if self._http is None or self._http_loop is not loop:
+        if self._http is not None and self._http_loop is not loop:
+            if not self._http_loop.is_closed():
+                raise RuntimeError("the shared HTTP client belongs to another running event loop")
+            self._http = None
+        if self._http is None:
             self._http = httpx.AsyncClient(
                 timeout=30.0,
                 limits=httpx.Limits(max_connections=200, max_keepalive_connections=50, keepalive_expiry=30.0),

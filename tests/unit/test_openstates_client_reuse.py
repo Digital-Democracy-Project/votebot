@@ -110,13 +110,30 @@ class TestOneLongLivedClient:
         await service.get_bill_votes("fl", "2026", "HB 1234")
         assert len(api.clients) == 2
 
-    async def test_a_client_is_not_reused_across_event_loops(self, monkeypatch):
+    async def test_a_client_of_a_loop_that_has_ended_is_replaced(self, monkeypatch):
         api = Api()
         service = _service(api, monkeypatch)
         await service.get_bill_votes("fl", "2026", "HB 1234")
-        service._http_loop = object()  # as if the service had been used on another loop
+        ended = asyncio.new_event_loop()
+        ended.close()
+        service._http_loop = ended  # as if the service had been used on a loop that is gone
         await service.get_bill_votes("fl", "2026", "HB 1234")
         assert len(api.clients) == 2
+        assert service._http_loop is asyncio.get_running_loop()
+
+    async def test_a_client_that_belongs_to_another_running_loop_is_refused_not_orphaned(self, monkeypatch):
+        api = Api()
+        service = _service(api, monkeypatch)
+        await service.get_bill_votes("fl", "2026", "HB 1234")
+        other = asyncio.new_event_loop()  # still open
+        try:
+            service._http_loop = other
+            with pytest.raises(RuntimeError, match="another running event loop"):
+                async with service._client():
+                    pass
+            assert len(api.clients) == 1  # nothing was built and nothing was dropped
+        finally:
+            other.close()
 
     async def test_lookups_at_the_same_time_share_the_client(self, monkeypatch):
         api = Api(delay={"2026": 0.02})
@@ -168,6 +185,14 @@ class TestOlderSessionsAreAskedTogether:
         assert result.session == "2025"
         assert time.perf_counter() - began < 1  # did not wait for the 5 s request
         assert api.cancelled == ["2024"] and api.in_flight == 0
+
+    async def test_the_shared_client_still_works_after_an_older_session_request_was_cancelled(self, monkeypatch):
+        api = Api(has=("2025", "2024"), delay={"2025": 0.01, "2024": 5})
+        service = _service(api, monkeypatch)
+        assert (await service.get_bill_info("fl", "2026", "HB 1234")).session == "2025"  # 2024's request is cancelled
+        again = await service.get_bill_votes("fl", "2025", "HB 1234")
+        assert again is not None and again.title == "Bill 2025"
+        assert len(api.clients) == 1  # the same client, still usable
 
     async def test_the_federal_jurisdiction_has_no_older_sessions(self, monkeypatch):
         api = Api(has=())
