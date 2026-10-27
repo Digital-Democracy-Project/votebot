@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -17,6 +19,9 @@ if TYPE_CHECKING:
     from votebot.services.bill_votes import BillVotesService
 
 logger = structlog.get_logger()
+
+HEALTH_OK_TTL = 60.0  # a healthy check is not repeated for this long
+HEALTH_FAIL_TTL = 10.0  # a failed one is retried sooner, so a recovery shows quickly
 
 
 def _join_response_blocks(response: object) -> str:
@@ -119,6 +124,9 @@ class LLMService:
         self.model = self.settings.openai_model
         self.max_tokens = self.settings.openai_max_tokens
         self.temperature = self.settings.openai_temperature
+        # the last health check's outcome (when, and the error if it failed); the lock makes checks share one call
+        self._health: tuple[float, Exception | None] | None = None
+        self._health_lock = asyncio.Lock()
 
     def _build_tools(
         self,
@@ -707,21 +715,38 @@ class LLMService:
 
     async def health_check(self) -> bool:
         """
-        Check if the OpenAI API is accessible, without generating anything (VOTEBOT-51).
+        Check that OpenAI can serve a completion, at most one real call per window (VOTEBOT-51).
 
-        Retrieving the configured model proves the key, the network and that the project can see the model, and
-        costs no tokens and no model latency, so polling `/health/ready` is free. (It used to ask the model for a
-        completion on every check.)
+        Readiness here means chat can be served: the check still asks the model for a minimal completion, so a key
+        without generation rights or an exhausted quota fails it, which a model lookup would not catch. What
+        changed is the cost: the outcome is kept for `HEALTH_OK_TTL` seconds (a failure for `HEALTH_FAIL_TTL`, so a
+        recovery is seen soon), and checks that arrive together share one call, so polling `/health/ready` makes at
+        most one call a minute however often it is polled.
 
         Returns:
             True if the API is healthy, raises exception otherwise
         """
-        try:
-            await self.client.models.retrieve(self.model)
+        async with self._health_lock:
+            cached = self._health
+            if cached is not None:
+                age = time.monotonic() - cached[0]
+                if age < (HEALTH_FAIL_TTL if cached[1] is not None else HEALTH_OK_TTL):
+                    if cached[1] is not None:
+                        raise cached[1]
+                    return True
+            try:
+                # Make a minimal API call to verify the service can generate
+                await self.client.responses.create(
+                    model=self.model,
+                    input="ping",
+                    max_output_tokens=16,  # Minimum allowed by the API
+                )
+            except Exception as e:
+                self._health = (time.monotonic(), e)
+                logger.error("OpenAI health check failed", error=str(e))
+                raise
+            self._health = (time.monotonic(), None)
             return True
-        except Exception as e:
-            logger.error("OpenAI health check failed", error=str(e))
-            raise
 
 
 class LLMServiceFactory:
