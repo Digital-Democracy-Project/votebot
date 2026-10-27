@@ -2371,7 +2371,7 @@ class VoteBotAgent:
         deadline = _enrichment_deadline.get()
         args = (page_context.jurisdiction, page_context.session, page_context.id, deadline)
         asks_about_poll = bool(POLL_QUERY.search(message))
-        asks_about_scorecard = asks_about_alignment(message) and bool(bare_uuid(page_context.ocd_bill_id))
+        asks_about_scorecard = asks_about_alignment(message) and bool(bare_uuid(page_context.ocd_bill_id, "ocd-bill/"))
 
         async def settled(name: str, call):
             """One lookup's result, or None: a slow or failing one costs only its own context, not its siblings'."""

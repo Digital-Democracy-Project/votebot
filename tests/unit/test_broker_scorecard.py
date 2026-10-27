@@ -45,18 +45,23 @@ def _body(groups=None, score=50.0, tally=(2, 4, 0), **bill):
 class TestTheUuid:
     @pytest.mark.parametrize("given", [BILL, BILL.upper(), f"ocd-bill/{BILL}", f"OCD-BILL/{BILL.upper()}", f" {BILL} "])
     def test_every_spelling_of_a_bill_id_becomes_the_bare_lowercase_uuid(self, given):
-        assert bare_uuid(given) == BILL
+        assert bare_uuid(given, "ocd-bill/") == BILL
 
     @pytest.mark.parametrize("doubled", [f"ocd-bill/ocd-person/{BILL}", f"ocd-bill/ocd-bill/{BILL}", f"ocd-person/ocd-bill/{BILL}"])
     def test_a_doubly_prefixed_value_is_not_an_id(self, doubled):
-        assert bare_uuid(doubled) is None
+        assert bare_uuid(doubled, "ocd-bill/") is None
 
-    def test_a_person_id_loses_its_prefix_too(self):
-        assert bare_uuid("ocd-person/8056c810-7170-5009-88c3-a670ab30164b") == "8056c810-7170-5009-88c3-a670ab30164b"
+    def test_another_kinds_id_is_not_a_bill_id(self):
+        assert bare_uuid(f"ocd-person/{BILL}", "ocd-bill/") is None  # a person's id must not reach a bill's route
+
+    def test_a_person_id_loses_its_own_prefix_only(self):
+        person = "8056c810-7170-5009-88c3-a670ab30164b"
+        assert bare_uuid(f"ocd-person/{person}", "ocd-person/") == person
+        assert bare_uuid(f"ocd-bill/{person}", "ocd-person/") is None
 
     @pytest.mark.parametrize("bad", [None, "", "580", "not-a-uuid", "HB 1", "8f4ea029", f"{BILL}/extra", 580, "ocd-bill/"])
     def test_anything_else_is_not_an_id(self, bad):
-        assert bare_uuid(bad) is None
+        assert bare_uuid(bad, "ocd-bill/") is None
 
 
 class TestTheLookup:
@@ -141,7 +146,8 @@ class TestWhichQuestionsFetchIt:
          "Show me the scorecard", "Were they accountable to voters?", "Did anyone vote against their voters?",
          "is this in line with what people wanted", "How did voters feel about this bill?",
          "Did representatives vote the way voters wanted?", "Did the vote match voter preferences?",
-         "Which districts voted for it?", "Do constituents support this?"],
+         "Which districts voted for it?", "Do constituents support this?", "Did my representatives vote with their constituents?",
+         "Were the representatives accountable?"],
     )
     def test_questions_about_how_votes_compare_with_the_voters(self, question):
         assert asks_about_alignment(question)
