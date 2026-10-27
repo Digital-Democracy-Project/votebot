@@ -326,11 +326,22 @@ class BillVotesService:
                 self._refresh_parties_in_background(jurisdiction)  # the stale roster answers meanwhile
             return cached[1]
 
+        running = self._refreshing.get(cache_key)
+        if running is not None:
+            # a download of this roster is already under way (the startup warm): wait for that one instead of
+            # starting a second; shielded, so a visitor who leaves does not cancel it
+            await asyncio.shield(running)
+            cached = self._legislator_cache.get(cache_key)
+            if cached:
+                return cached[1]  # and if it failed there is nothing cached: fetch inline, as below
+
         logger.info("Fetching legislators for party info", jurisdiction=jurisdiction)
         name_to_party, complete = await self._download_parties(jurisdiction, client, headers)
         if complete:  # a partial roster answers this once and is asked for again next time
             self._legislator_cache[cache_key] = (time.monotonic(), name_to_party)
             logger.info("Cached legislator party info", jurisdiction=jurisdiction, count=len(name_to_party))
+        elif cached := self._legislator_cache.get(cache_key):
+            return cached[1]  # a whole roster arrived while this one failed: use it, not the partial one
         return name_to_party
 
     async def _download_parties(

@@ -181,6 +181,45 @@ class TestWarmingTheFederalRoster:
         assert (await _lookup(service))["bob lower"] == "Republican"
         assert api.requests == before  # no download on the chat's path
 
+    async def test_a_first_lookup_during_the_warm_up_joins_it_instead_of_downloading_again(self, monkeypatch):
+        api = FakeApi(ROSTER, delay=0.1)
+        service = _service(api, monkeypatch)
+        service.warm_parties("us")
+        await asyncio.sleep(0.01)  # the warm download is under way
+        got = await service._get_legislator_parties("us", api.client(), {})
+        assert got == {"ann upper": "Democratic", "bob lower": "Republican"}
+        assert api.requests == 2  # one download (an upper and a lower page), not two
+        assert not service._refreshing
+
+    async def test_a_first_lookup_whose_warm_up_failed_fetches_inline_as_before(self, monkeypatch):
+        api = FakeApi(ROSTER, delay=0.05)
+        api.boom = True
+        service = _service(api, monkeypatch)
+        service.warm_parties("us")
+        await asyncio.sleep(0.01)
+
+        async def recover():  # api-v3 is back by the time the visitor's own request goes out
+            await asyncio.sleep(0.06)
+            api.boom = False
+
+        recovery = asyncio.ensure_future(recover())
+        got = await service._get_legislator_parties("us", api.client(), {})
+        await recovery
+        assert got == {"ann upper": "Democratic", "bob lower": "Republican"}
+        assert "legislators-us" in service._legislator_cache
+
+    async def test_a_partial_inline_result_gives_way_to_a_whole_roster_that_arrived_meanwhile(self, monkeypatch):
+        api = FakeApi(ROSTER)
+        service = _service(api, monkeypatch)
+        whole = {"ann upper": "Democratic", "bob lower": "Republican", "cy extra": "Independent"}
+
+        class Racing:
+            async def get(self, url, headers=None, params=None):
+                service._legislator_cache["legislators-us"] = (time.monotonic(), whole)  # the warm finished first
+                raise RuntimeError("api-v3 down")  # while this visitor's own download fails
+
+        assert await service._get_legislator_parties("us", Racing(), {}) == whole
+
     async def test_a_warm_up_that_fails_is_silent(self, monkeypatch):
         api = FakeApi(ROSTER)
         api.boom = True
