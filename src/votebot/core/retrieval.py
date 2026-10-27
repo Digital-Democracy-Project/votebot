@@ -68,14 +68,14 @@ DIFF_NONE_NOTE = (
 )
 
 
-def _release(tasks: list) -> None:
-    """Cancel the queries a retrieval started and did not wait for (it failed or was given up on), and mark a
-    finished query's failure as seen, so nothing keeps running or warns about an unretrieved exception."""
+async def _release(tasks: list) -> None:
+    """Cancel the queries a retrieval started and did not wait for (it failed or was given up on) and wait until
+    they have ended, so none outlives the retrieval and no failure goes unretrieved. Cancelling stops the wait for
+    a query, not a Pinecone call already running on its thread: that finishes by itself."""
     for task in tasks:
         if not task.done():
             task.cancel()
-        elif not task.cancelled():
-            task.exception()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def diff_scope_note(shown) -> str:
@@ -400,13 +400,13 @@ class RetrievalService:
         )
 
     async def _query_together(self, calls: list[dict]) -> list[list[SearchResult]]:
-        """Run independent queries at the same time and return their results in the order given. If any fails
-        the first failure in that order is raised, as it was when they ran one after another."""
-        outcomes = await asyncio.gather(*(self.vector_store.query(**c) for c in calls), return_exceptions=True)
-        for outcome in outcomes:
-            if isinstance(outcome, BaseException):
-                raise outcome
-        return list(outcomes)
+        """Run independent queries at the same time and return their results in the order given. The first
+        failure is raised at once and the queries still running are cancelled and waited for."""
+        tasks = [asyncio.ensure_future(self.vector_store.query(**c)) for c in calls]
+        try:
+            return list(await asyncio.gather(*tasks))
+        finally:
+            await _release(tasks)
 
     async def _retrieve_bill_with_text_priority(
         self,
@@ -423,7 +423,7 @@ class RetrievalService:
         try:
             return await self._bill_phases(query, filters, max_chunks, page_context, version_filter, notes, started)
         finally:
-            _release(started)
+            await _release(started)
 
     async def _bill_phases(
         self,
@@ -441,7 +441,8 @@ class RetrievalService:
         Every query whose inputs are known up front is started first (`start`) and awaited where its result is
         first used, so the phases below read as they always did and the results are merged in the same order.
         A query that used to size itself from an earlier result (`remaining_slots`) now asks for the most it
-        could have needed and the phase cuts the (score-sorted) answer back to what it used to ask for.
+        could have needed and the phase cuts the (score-sorted) answer back to what it used to ask for: the
+        same chunks, up to how Pinecone orders results that tie at the cut.
 
         Phase 1: Get bill-text (PDF/legislative text) with the bill identity filter
         Phase 2: Get bill summaries with the bill identity filter
@@ -1226,7 +1227,7 @@ class RetrievalService:
 
             return combined[:max_chunks]
         finally:
-            _release(started)
+            await _release(started)
 
     def _build_filters(self, page_context: PageContext, query: str | None = None) -> dict:
         """

@@ -112,11 +112,47 @@ class TestFailuresAndGivingUp:
         await asyncio.sleep(0.05)
         assert store.in_flight == 0  # the other queries finished or were cancelled; none is left behind
 
-    async def test_giving_up_cancels_the_queries_still_running(self):
+    async def test_giving_up_cancels_the_queries_still_running_and_waits_for_them(self):
         svc, store, page, _q = prepare("org_question_prefers_orgs_that_name_the_bill", delay=0.5)
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(svc.retrieve(query="Which organizations support this bill?", page_context=page), 0.05)
-        await asyncio.sleep(0.05)
+        assert store.in_flight == 0  # at once: nothing is left behind when the retrieval has ended
+
+    async def test_a_query_that_is_slow_to_cancel_is_waited_for_too(self):
+        svc, store, page, _q = prepare("org_question_prefers_orgs_that_name_the_bill", delay=0.5)
+        real = store.query
+        cleaned_up = []
+
+        async def stubborn(query, top_k=10, filter=None, include_metadata=True):
+            try:
+                return await real(query, top_k, filter, include_metadata)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.05)  # cleanup that takes time
+                cleaned_up.append(filter["document_type"])
+                raise
+
+        svc.vector_store.query = stubborn
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(svc.retrieve(query="Which organizations support this bill?", page_context=page), 0.05)
+        assert len(cleaned_up) == 4  # every query finished its cleanup before the retrieval returned
+        others = asyncio.all_tasks() - {asyncio.current_task()}
+        assert not others
+
+    async def test_the_scoped_general_page_fails_at_once_and_cancels_its_slow_sibling(self):
+        svc, store, page, question = prepare("general_page_scoped_to_a_jurisdiction", delay=0.5)
+        real = store.query
+
+        async def one_fails(query, top_k=10, filter=None, include_metadata=True):
+            if "$nin" not in str(filter) and "$in" in str(filter):  # the scoped query fails straight away
+                raise RuntimeError("pinecone down")
+            return await real(query, top_k, filter, include_metadata)
+
+        svc.vector_store.query = one_fails
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        with pytest.raises(RuntimeError, match="pinecone down"):
+            await svc.retrieve(query=question, page_context=page)
+        assert loop.time() - began < 0.2  # not after the 0.5 s sibling
         assert store.in_flight == 0
 
     async def test_the_legacy_vote_phases_still_run_one_after_another(self):
