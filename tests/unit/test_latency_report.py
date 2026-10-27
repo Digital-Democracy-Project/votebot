@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from datetime import date
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import latency_report as lr  # noqa: E402
@@ -28,11 +31,11 @@ class TestPercentile:
     def test_it_interpolates_between_ranks_like_numpy(self):
         assert lr.percentile([100, 200], 0.5) == 150
         assert lr.percentile([10, 20, 30, 40], 0.5) == 25
-        assert lr.percentile(list(range(1, 101)), 0.95) == 95  # 95.05 rounds to 95
+        assert lr.percentile(list(range(1, 101)), 0.95) == pytest.approx(95.05)  # not rounded: only the display rounds
 
     def test_one_value_and_none(self):
         assert lr.percentile([700], 0.95) == 700
-        assert lr.percentile([], 0.5) == 0
+        assert lr.percentile([], 0.5) == 0.0
 
     def test_the_input_order_does_not_matter(self):
         assert lr.percentile([3, 1, 2], 0.5) == 2
@@ -42,18 +45,19 @@ class TestReading:
     def test_only_query_processed_events_and_not_junk_lines(self, tmp_path):
         _write(tmp_path, "2026-10-27", [_event(), {"event_type": "message_received"}, {"event_type": "conversation_ended"}],
                junk=["not json {", ""])
-        assert len(lr.read_events(tmp_path)) == 1
+        assert len(lr.read_events(tmp_path)[0]) == 1
+        assert lr.read_events(tmp_path)[1] == 1  # the line that was not JSON is counted, a blank line is not
 
     def test_the_last_days_by_file_date(self, tmp_path):
         for day in ("2026-10-20", "2026-10-25", "2026-10-27"):
             _write(tmp_path, day, [_event(duration=int(day[-2:]))])
-        got = lr.read_events(tmp_path, days=3, today=date(2026, 10, 27))
+        got, _ = lr.read_events(tmp_path, days=3, today=date(2026, 10, 27))
         assert sorted(e["duration_ms"] for e in got) == [25, 27]  # the 20th is older than three days
 
     def test_a_file_that_is_not_a_date_is_left_out_when_days_are_asked_for(self, tmp_path):
         _write(tmp_path, "notes", [_event()])
-        assert lr.read_events(tmp_path, days=7, today=date(2026, 10, 27)) == []
-        assert len(lr.read_events(tmp_path)) == 1  # but read when no window is asked for
+        assert lr.read_events(tmp_path, days=7, today=date(2026, 10, 27))[0] == []
+        assert len(lr.read_events(tmp_path)[0]) == 1  # but read when no window is asked for
 
 
 class TestCuts:
@@ -101,11 +105,51 @@ class TestTargets:
     def test_not_met_says_so_with_the_numbers(self):
         text = "\n".join(lr.verdicts(self._summary(duration=6000, first=2000)))
         assert "duration_ms p50 < 2500 ms: NOT MET (6000 ms, n=30)" in text
-        assert "duration_ms p95 < 5000 ms: NOT MET" in text and "first_token_ms p50 < 1500 ms: NOT MET" in text
+        assert "duration_ms p95 < 5000 ms: NOT MET" in text and "first_token_ms (server side) p50 < 1500 ms: NOT MET" in text
 
     def test_no_first_token_data_is_said_to_be_no_data(self):
         old = [{"event_type": "query_processed", "duration_ms": 2000, "page_context": {"type": "bill"}}]
-        assert "first_token_ms p50 < 1500 ms: NO DATA" in "\n".join(lr.verdicts(lr.summarize(old)))
+        assert "first_token_ms (server side) p50 < 1500 ms: NO DATA" in "\n".join(lr.verdicts(lr.summarize(old)))
+
+
+class TestTheTargetsAreStrict:
+    def _verdict(self, first_token_values):
+        events = [_event(first=v, duration=1000) for v in first_token_values]
+        return [line for line in lr.verdicts(lr.summarize(events)) if line.startswith("first_token_ms")][0]
+
+    def test_exactly_the_target_is_not_met(self):
+        assert "NOT MET" in self._verdict([1500] * 5)  # the README says "< 1.5 seconds"
+
+    def test_just_under_is_met_even_when_the_display_rounds_up_to_the_target(self):
+        # the p50 is 1499.6: shown as 1500 in the table, but it is below the target, and the verdict says so
+        assert "MET" in self._verdict([1499.6] * 5) and "NOT MET" not in self._verdict([1499.6] * 5)
+        assert "| 1500 |" in lr.render(lr.summarize([_event(first=1499.6) for _ in range(5)])).split("first_token_ms")[1]
+
+    def test_a_percentile_that_interpolates_across_the_target(self):
+        assert "NOT MET" in self._verdict([1400, 1600])  # p50 = 1500.0 exactly
+
+
+class TestOddInput:
+    def test_nan_and_infinity_are_ignored(self):
+        values = lr.metric_values([_event(duration=float("nan"), first=math.inf), _event(duration=2000, first=1000)])
+        assert values["duration_ms"] == [2000] and values["first_token_ms"] == [1000]
+
+    def test_skipped_lines_are_reported_on_stderr_and_in_json(self, tmp_path, capsys):
+        _write(tmp_path, "2026-10-27", [_event()], junk=["{broken", "also broken"])
+        assert lr.main(["--log-dir", str(tmp_path), "--json"]) == 0
+        captured = capsys.readouterr()
+        assert "2 line(s)" in captured.err
+        assert json.loads(captured.out)["skipped_lines"] == 2
+
+    def test_skip_button_leaves_those_messages_out(self, tmp_path, capsys):
+        events = [_event(duration=1000, button="summary") for _ in range(3)] + [_event(duration=9000, button="status_votes") for _ in range(2)]
+        _write(tmp_path, "2026-10-27", events)
+        assert lr.main(["--log-dir", str(tmp_path), "--json", "--skip-button", "summary"]) == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body["events"] == 2 and body["summary"]["all"]["duration_ms"]["p50"] == 9000
+
+    def test_the_report_says_the_cuts_overlap(self):
+        assert "The cuts overlap" in lr.render(lr.summarize([_event()]))
 
 
 class TestOutput:

@@ -890,19 +890,22 @@ A guided opinion-elicitation system — capturing voter opinions on legislation 
 
 ### Measured (VOTEBOT-53, dev, 2026-10-27)
 
-How to read the timing: `scripts/latency_report.py --log-dir <query log dir> --days 7` prints p50 / p90 / p95 and the sample size of `duration_ms`, `first_token_ms`, the wait before the model is asked (`model_call_start`) and every phase, cut by page kind, live bill lookup, button and cache hit, and says which of the targets above are met. Phases overlap since VOTEBOT-45 and VOTEBOT-47, so they do not add up to the wait: read `first_token_ms` and `model_call_start`.
+How to read the timing: `scripts/latency_report.py --log-dir <query log dir> --days 7` prints p50 / p90 / p95 and the sample size of `duration_ms`, `first_token_ms`, the wait before the model is asked (`model_call_start`) and every phase, cut by page kind, live bill lookup, button and cache hit, and says which of the targets above are met. Phases overlap since VOTEBOT-45 and VOTEBOT-47, so they do not add up to the wait: read `first_token_ms` and `model_call_start`. The cuts overlap too (a message can be in several).
 
-The check below ran two instances side by side on the Mac Studio dev box (real gpt-4.1 and Pinecone; the broker and api-v3 are on localhost, so those lookups are faster than in production), asking the same 11 kinds of question twice each (plain, organization, vote and status with the live lookup, pros and cons, "what changed", the status button, a home page and a list page), **alternating** between them so network and OpenAI conditions affect both alike. **Before** is `main` at `18fce1e`; **after** is `main` plus the VOTEBOT-45 to 52 branches (`fcdbd5a`, `89bf647`, `eac7a64`, `a384612`, `49f7908`, `0cfe024`, `f48efb4`, `741c1dc`). n = 18 comparable messages per instance (the two cacheable buttons are left out: both instances shared a button cache, so the second to ask got a saved answer).
+The check below ran two instances side by side on the Mac Studio dev box (real gpt-4.1 and Pinecone; the broker and api-v3 are on localhost, so those lookups are faster than in production), asking the same 11 kinds of question twice each (plain, organization, vote and status with the live lookup, typed pros and cons, "what changed", the status button, a home page and a list page, plus the summary and pros-and-cons **buttons**), **alternating** between them so network and OpenAI conditions affect both alike. **Before** is `main` at `18fce1e`. **After** is `main` plus the heads of the VOTEBOT-45 to 52 branches (`fcdbd5a`, `89bf647`, `eac7a64`, `a384612`, `49f7908`, `0cfe024`, `f48efb4`, `741c1dc`), run from the merged tree `b8338205a949` (a local scratch merge, not pushed; the tree id identifies the code). The two cacheable buttons (summary, pros and cons) are **left out of every number below**: both instances shared a button cache, so the second to ask got a saved answer. That leaves n = 18 messages per instance, the same 18 questions on both sides, in the log figures and in the client figures alike. The log figures are what `scripts/latency_report.py --skip-button summary --skip-button pros_cons` prints for each instance's own query log; the client figure is send-to-first-chunk timed by the test client.
 
 | Metric | Target | Before | After | After vs target |
 | --- | --- | --- | --- | --- |
-| First token, p50 (as the client sees it) | < 1.5 s | 1.66 s | **1.18 s** | met |
-| First token, p95 | | 2.17 s | 1.91 s | |
-| Wait before the model is asked, p50 (server `model_call_start`, n = 19) | | 879 ms | **421 ms** | |
-| End to end, p50 | < 2.5 s | 3.70 s | 3.07 s | **not met** |
-| End to end, p95 | < 5 s | 6.59 s | 6.70 s | **not met** |
+| First token, p50 (query log, server side) | < 1.5 s | 1.65 s | **1.17 s** | met |
+| First token, p50 (client: send to first chunk) | | 1.66 s | 1.18 s | |
+| First token, p95 (query log) | | 2.16 s | 1.89 s | |
+| Wait before the model is asked, p50 (query log, `model_call_start`) | | 854 ms | **357 ms** | |
+| End to end, p50 (query log) | < 2.5 s | 3.69 s | 3.06 s | **not met** |
+| End to end, p95 (query log) | < 5 s | 6.57 s | 6.69 s | **not met** |
 
-By question, the median first token fell most where several lookups used to run one after another: organization question 2.21 s to 1.42 s, status 1.84 s to 1.15 s, "what changed" 1.47 s to 0.99 s, pros and cons 1.55 s to 1.15 s, list page 1.67 s to 1.25 s. A plain bill question (1.58 s to 1.55 s) and the home page (1.42 s to 1.39 s) did not move: for them the model's own start dominates.
+The log's `first_token_ms` starts when the agent starts the message, so the visitor's own wait is a little longer than the log says (1 to 2 hundredths of a second on this box, where the websocket is local; the production agent measured about 0.24 s from the frame arriving to the agent starting on 2.0).
+
+By question, the median first token (client) fell most where several lookups used to run one after another: organization question 2.21 s to 1.42 s, status 1.84 s to 1.15 s, "what changed" 1.47 s to 0.99 s, typed pros and cons 1.55 s to 1.15 s, list page 1.67 s to 1.25 s. A plain bill question (1.58 s to 1.55 s) and the home page (1.42 s to 1.39 s) did not move: for them the model's own start dominates.
 
 What this does not show: **production traffic** (the timing fields are not deployed there yet; run the report on the host's `/opt/votebot-logs/queries` before and after the deploy and keep the SHAs), the 100-client load (the VOTEBOT-35 harness stubs the model), and anything beyond a small sample (18 per instance; p95 on that is decided by the slowest one or two messages).
 
