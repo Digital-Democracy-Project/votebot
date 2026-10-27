@@ -23,7 +23,9 @@ from votebot.services.bill_versions import current_version
 from votebot.services.broker_lookup import (
     BUDGET_SECONDS,
     BrokerLookupService,
+    format_bill_analysis,
     format_bill_org_positions,
+    format_concept_poll,
     format_org_bill_positions,
     format_org_details,
 )
@@ -130,6 +132,14 @@ NAME_BREAKERS = frozenset(
 )
 
 # A word that says the message is about a legislator, so a name in it is worth looking up.
+# A question about the bill's concept poll (VOTEBOT-59): the poll is only fetched when asked about
+POLL_QUERY = re.compile(
+    r"\b(polls?|polled|surveys?|concept (poll|statements?|votes?)|concept-poll)\b"
+    r"|\bwhat (do|are|did) (other |most )?(people|voters|visitors|users|folks|others) (think|thinking|say|saying|vote|voting)\b"
+    r"|\bhow (are|do|did) (other |most )?(people|voters|visitors|users|others) (feel|voting|voted|vote|responding)\b",
+    re.IGNORECASE,
+)
+
 LEGISLATOR_CUES = re.compile(
     r"(?<!\w)(senators?|sen\.|representatives?|reps?\.|congress(?:man|men|woman|women|person|people)|legislators?|"
     r"assembly(?:man|woman|member)s?|delegates?|lawmakers?|speaker)(?!\w)",
@@ -756,6 +766,11 @@ class VoteBotAgent:
         if is_dispute and page_context and page_context.type in ("bill", "legislator", "organization"):
             webflow_verification_context = await self._verify_from_webflow(page_context)
 
+        # Step 3e: DDP's LegBot analysis (and, when asked about, the concept poll) of the page's bill
+        bill_broker_context = ""
+        if self._wants_bill_broker_data(page_context):
+            bill_broker_context = await self._prefetch_bill_broker_data(message, page_context)
+
         # Step 4: Build page info for prompt
         page_info = self._extract_page_info(page_context)
 
@@ -767,6 +782,8 @@ class VoteBotAgent:
         # 4. vote_verification_context (OpenStates votes)
         # 5. retrieved_context (RAG results)
         full_context = retrieved_context
+        if bill_broker_context:
+            full_context = f"{full_context}\n\n{bill_broker_context}"  # analysis, after the sources of record
         if self.settings.bill_filter_key == "ocd_bill_id":
             # Legislators are not in the canonical-id index: their facts come live from api-v3
             legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
@@ -1160,6 +1177,12 @@ class VoteBotAgent:
             with timings.phase("webflow_verification"):
                 webflow_verification_context = await self._verify_from_webflow(page_context)
 
+        # Step 2h: DDP's LegBot analysis (and, when asked about, the concept poll) of the page's bill
+        bill_broker_context = ""
+        if self._wants_bill_broker_data(page_context):
+            with timings.phase("bill_broker_data"):
+                bill_broker_context = await self._prefetch_bill_broker_data(message, page_context)
+
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
 
@@ -1176,6 +1199,8 @@ class VoteBotAgent:
             full_context = f"{retrieved_context}\n\n{bill_info_context}"
         if legislator_info_context:
             full_context = f"{full_context}\n\n{legislator_info_context}"
+        if bill_broker_context:
+            full_context = f"{full_context}\n\n{bill_broker_context}"  # analysis, after the sources of record
         if vote_verification_context:
             # Put verification context first - it's the authoritative source
             full_context = f"{vote_verification_context}\n\n{full_context}"
@@ -2227,6 +2252,43 @@ class VoteBotAgent:
             logger.warning("Broker org positions took too long; answering without them", org_id=org_id)
             return ""
         return format_org_bill_positions(org, positions, self.settings.ddp_site_base_url)
+
+    def _wants_bill_broker_data(self, page_context: PageContext | None) -> bool:
+        """A bill page on the canonical-id index that names the bill (the broker keys its analysis by
+        jurisdiction, session and identifier) and a broker to ask."""
+        return bool(
+            page_context
+            and page_context.type == "bill"
+            and self.settings.bill_filter_key == "ocd_bill_id"
+            and self.settings.ddp_broker_api_root
+            and page_context.jurisdiction
+            and page_context.session
+            and page_context.id
+        )
+
+    async def _prefetch_bill_broker_data(self, message: str, page_context: PageContext) -> str:
+        """DDP's LegBot analysis of the page's bill, and its concept poll when the message asks about it,
+        from ddp-broker-py. One time budget with the other lookups; a slow or failing broker costs the
+        extra context, never the answer."""
+        deadline = _enrichment_deadline.get()
+        args = (page_context.jurisdiction, page_context.session, page_context.id, deadline)
+        asks_about_poll = bool(POLL_QUERY.search(message))
+        try:
+            analysis, poll = await asyncio.wait_for(
+                asyncio.gather(
+                    self.broker_lookup.get_bill_analysis(*args),
+                    self.broker_lookup.get_concept_poll(*args) if asks_about_poll else asyncio.sleep(0),
+                ),
+                _enrichment_budget_left(),
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Broker bill analysis took too long; answering without it")
+            return ""
+        except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
+            logger.error("Broker bill analysis failed; answering without it", error=str(e))
+            return ""
+        parts = [format_bill_analysis(analysis), format_concept_poll(poll if asks_about_poll else None)]
+        return "\n\n".join(p for p in parts if p)
 
     async def _prefetch_bill_org_positions_from_broker(self, page_context: PageContext) -> str:
         """Canonical-id index: organizations' positions on this bill, from ddp-broker-py. The bill
