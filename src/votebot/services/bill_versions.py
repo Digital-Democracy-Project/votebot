@@ -82,9 +82,6 @@ class BillVersionService:
         every version, each labelled with its own version. A failure is remembered briefly so a
         down api-v3 does not add a timeout to every message.
         """
-        if not self.settings.use_ddp_openstates_replica:
-            return None  # the public OpenStates API carries none of the DDP version fields
-
         cached = self._cache.get(ocd_bill_id)
         if cached:
             ttl = CACHE_TTL_SECONDS if cached[1] is not None else FAILURE_TTL_SECONDS
@@ -126,8 +123,6 @@ class BillVersionService:
         archived, or when its row is missing (it is then simply absent). Not cached: diffs can be
         large and the question is rare. None when api-v3 cannot be asked or has no answer.
         """
-        if not self.settings.use_ddp_openstates_replica:
-            return None
         data = await self._fetch(ocd_bill_id)
         if data is None:
             return None

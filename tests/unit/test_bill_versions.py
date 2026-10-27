@@ -24,9 +24,8 @@ def _api_version(doc, stage, ordinal, note="X", date="2026-01-01"):
     return {"note": note, "date": date, "archived_document_id": doc, "version_stage": stage, "version_ordinal": ordinal}
 
 
-def _service(replica: bool = True) -> BillVersionService:
+def _service() -> BillVersionService:
     settings = Settings(
-        use_ddp_openstates_replica=replica,
         ddp_openstates_api_root=ROOT,
         ddp_openstates_bearer_token=SecretStr("tok"),
         _env_file=None,
@@ -68,12 +67,6 @@ class TestCurrentVersion:
 
 
 class TestGetVersions:
-    async def test_skipped_unless_openstates_is_routed_to_the_ddp_replica(self):
-        svc = _service(replica=False)
-        svc._fetch = AsyncMock(return_value={"versions": []})
-        assert await svc.get_versions(BILL) is None
-        svc._fetch.assert_not_called()  # the public API has none of the DDP version fields
-
     async def test_parses_api_v3_versions_in_order(self):
         svc = _service()
         svc._fetch = AsyncMock(
@@ -165,7 +158,7 @@ class TestFetch:
 
 
     async def test_a_missing_api_root_degrades_instead_of_raising(self):
-        svc = BillVersionService(Settings(use_ddp_openstates_replica=True, ddp_openstates_api_root=""))
+        svc = BillVersionService(Settings(ddp_openstates_api_root=""))
         assert await svc._fetch(BILL) is None
         assert await svc.get_versions(BILL) is None
 

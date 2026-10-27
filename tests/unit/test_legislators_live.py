@@ -48,7 +48,7 @@ def _service(monkeypatch, handler) -> LegislatorLookupService:
     monkeypatch.setattr(
         legislators_module.httpx, "AsyncClient", lambda **kw: REAL_CLIENT(transport=httpx.MockTransport(handler), **kw)
     )
-    settings = Settings(use_ddp_openstates_replica=True, ddp_openstates_api_root="https://api.test", _env_file=None)
+    settings = Settings(ddp_openstates_api_root="https://api.test", _env_file=None)
     return LegislatorLookupService(settings)
 
 
@@ -116,6 +116,28 @@ class TestMatchTotals:
         match = await _service(monkeypatch, lambda r: httpx.Response(200, json={"results": [_raw()]})).find_by_name("Moody")
         assert (len(match.people), match.total) == (1, 1)
 
+    async def test_one_person_on_one_page_is_one_match_whatever_total_items_says(self, monkeypatch):
+        # what api-v3 answers for "Nancy Pelosi": one person, total_items 3 (it counts joined rows), max_page 1
+        body = {"results": [_raw()], "pagination": {"total_items": 3, "per_page": 10, "page": 1, "max_page": 1}}
+        match = await _service(monkeypatch, lambda r: httpx.Response(200, json=body)).find_by_name("Ashley Moody", "us")
+        assert (len(match.people), match.total) == (1, 1)
+        text = format_legislators(match, asked="Ashley Moody")
+        assert "Legislator Profile" in text and "Several" not in text and "More people match" not in text
+
+    async def test_two_people_on_one_page_are_still_several_matches(self, monkeypatch):
+        # live "Smith" in FL: two people, total_items 8 (rows), max_page 1
+        body = {"results": [_raw(), _raw(name="Ashley Moody Jr", id="ocd-person/b")], "pagination": {"total_items": 8, "per_page": 10, "page": 1, "max_page": 1}}
+        match = await _service(monkeypatch, lambda r: httpx.Response(200, json=body)).find_by_name("Moody")
+        assert (len(match.people), match.total) == (2, 2)
+        text = format_legislators(match, asked="Moody")
+        assert "Several legislators match" in text and "Legislator Profile" not in text and "More people match" not in text
+
+    async def test_a_second_page_still_means_more_people_than_were_listed(self, monkeypatch):
+        body = {"results": [_raw()], "pagination": {"total_items": 3, "per_page": 1, "page": 1, "max_page": 3}}
+        match = await _service(monkeypatch, lambda r: httpx.Response(200, json=body)).find_by_name("Moody")
+        assert match.total == 3
+        assert "More people match than are listed" in format_legislators(match, asked="Moody")
+
     async def test_nobody_matching_is_an_empty_match_not_a_failure(self, monkeypatch):
         match = await _service(monkeypatch, lambda r: httpx.Response(200, json={"results": []})).find_by_name("Zzz")
         assert match is not None and match.people == [] and match.total == 0
@@ -150,11 +172,11 @@ class TestFormatting:
 
     def test_a_match_larger_than_what_was_returned_says_so(self):
         text = format_legislators(PeopleMatch([self._p(), self._p(person_id="b", name="Other Moody")], 37), asked="Moody")
-        assert "37 people match in all" in text and "ask for a fuller name" in text
+        assert "More people match than are listed" in text and "ask for a fuller name" in text
 
     def test_one_person_returned_out_of_many_is_not_presented_as_the_only_match(self):
         text = format_legislators(PeopleMatch([self._p()], 12), asked="Moody")
-        assert "Several legislators match" in text and "12 people match in all" in text
+        assert "Several legislators match" in text and "More people match than are listed" in text
 
 
 def _agent(index=NEW_INDEX, found=None, by_id=None) -> VoteBotAgent:

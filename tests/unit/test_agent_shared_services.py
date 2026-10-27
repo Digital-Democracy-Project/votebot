@@ -29,7 +29,7 @@ def test_other_settings_get_services_of_their_own():
 
 
 async def test_the_bill_version_lookup_is_remembered_from_one_message_to_the_next():
-    s = settings(use_ddp_openstates_replica=True, ddp_openstates_api_root="http://api-v3.test")
+    s = settings(ddp_openstates_api_root="http://api-v3.test")
     fetch = AsyncMock(return_value={"versions": []})
     with patch("votebot.services.bill_versions.BillVersionService._fetch", fetch):
         await VoteBotAgent(s).retrieval.bill_versions.get_versions("bill-1")  # message 1
@@ -46,7 +46,7 @@ def test_the_shared_set_is_per_settings_object_not_per_process_forever():
 
 
 async def test_party_lookups_are_remembered_for_an_hour_and_then_asked_again():
-    service = BillVotesService(settings())
+    service = BillVotesService(settings(ddp_openstates_api_root="http://api-v3.test"))
     calls = []
 
     class Client:
