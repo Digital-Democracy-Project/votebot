@@ -326,6 +326,8 @@ Real `/ws/chat` client for cutover/rollback checks (`--cases` JSON, `--url`, `--
 
 Load test: **`scripts/load_ws.py`** (VOTEBOT-35) starts **`scripts/load_app.py`** (the real app, only the LLM stubbed) with N uvicorn workers, opens C websockets (connecting over `--ramp` seconds; all at once lets one worker accept most of them), has each ask a button, a typed and a "what changed" question, and prints a table row: latency p50/p95, errors, `/health/live` latency under load (event-loop lag), answers per worker, peak memory. It writes to Redis db 5 and no query logs. Dev only. Use it before changing a worker count or any code on the chat path; do not write another load client.
 
+Latency report: **`scripts/latency_report.py`** (VOTEBOT-53) reads the `query_processed` events of a query-log directory (`--log-dir`, `--days`, `--json`) and prints p50 / p90 / p95 with sample sizes of `duration_ms`, `first_token_ms`, `model_call_start` and every `phase_ms`, cut by page kind, live bill lookup, button and cache hit, and says which README targets are met. It needs no network and no keys and no Webflow; it is **not** `scripts/evaluate_production.py` (the legacy weekly quality job: citation rate, pass rate against Webflow ground truth, end-to-end latency only). Phases overlap since VOTEBOT-45/47: read `first_token_ms` and `model_call_start`, not the sum. Do not write another latency report.
+
 ---
 
 ## Ops scripts (`infrastructure/`)
