@@ -134,7 +134,7 @@ NAME_BREAKERS = frozenset(
 # A word that says the message is about a legislator, so a name in it is worth looking up.
 # A question about the bill's concept poll (VOTEBOT-59): the poll is only fetched when asked about
 POLL_QUERY = re.compile(
-    r"\b(poll|polls|polled|concept|concepts|survey|statements?)\b"
+    r"\b(polls?|polled|surveys?|concept (poll|statements?|votes?)|concept-poll)\b"
     r"|\bwhat (do|are|did) (other |most )?(people|voters|visitors|users|folks|others) (think|thinking|say|saying|vote|voting)\b"
     r"|\bhow (are|do|did) (other |most )?(people|voters|visitors|users|others) (feel|voting|voted|vote|responding)\b",
     re.IGNORECASE,
@@ -2283,6 +2283,9 @@ class VoteBotAgent:
             )
         except asyncio.TimeoutError:
             logger.warning("Broker bill analysis took too long; answering without it")
+            return ""
+        except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
+            logger.error("Broker bill analysis failed; answering without it", error=str(e))
             return ""
         parts = [format_bill_analysis(analysis), format_concept_poll(poll if asks_about_poll else None)]
         return "\n\n".join(p for p in parts if p)
