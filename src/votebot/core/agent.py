@@ -23,8 +23,10 @@ from votebot.services.bill_versions import current_version
 from votebot.services.broker_lookup import (
     BUDGET_SECONDS,
     BrokerLookupService,
+    bare_uuid,
     format_bill_analysis,
     format_bill_org_positions,
+    format_bill_scorecard,
     format_concept_poll,
     format_org_bill_positions,
     format_org_details,
@@ -138,6 +140,13 @@ POLL_QUERY = re.compile(
     r"\b(polls?|polled|surveys?|concept (poll|statements?|votes?)|concept-poll)\b"
     r"|\bwhat (do|are|did) (other |most )?(people|voters|visitors|users|folks|others) (think|thinking|say|saying|vote|voting)\b"
     r"|\bhow (are|do|did) (other |most )?(people|voters|visitors|users|others) (feel|voting|voted|vote|responding)\b",
+    re.IGNORECASE,
+)
+
+# A question about how a bill's votes compare with the voters (VOTEBOT-60): the scorecard is only fetched when asked about
+BILL_SCORECARD_QUERY = re.compile(
+    r"\b(constituents?|districts?|accountab\w*|align(?:ed|ment)?|scorecards?)\b"
+    r"|\bin line with\b|\b(?:match(?:ed)?|against|with) (?:their|his|her|the) (?:voters|district|constituents)\b",
     re.IGNORECASE,
 )
 
@@ -2331,30 +2340,32 @@ class VoteBotAgent:
         return format_org_bill_positions(org, positions, self.settings.ddp_site_base_url)
 
     def _wants_bill_broker_data(self, page_context: PageContext | None) -> bool:
-        """A bill page on the canonical-id index that names the bill (the broker keys its analysis by
-        jurisdiction, session and identifier) and a broker to ask."""
+        """A bill page on the canonical-id index that names the bill (the broker keys its analysis by jurisdiction,
+        session and identifier, and its scorecard by the OpenStates id) and a broker to ask."""
         return bool(
             page_context
             and page_context.type == "bill"
             and self.settings.bill_filter_key == "ocd_bill_id"
             and self.settings.ddp_broker_api_root
-            and page_context.jurisdiction
-            and page_context.session
-            and page_context.id
+            and ((page_context.jurisdiction and page_context.session and page_context.id) or page_context.ocd_bill_id)
         )
 
     async def _prefetch_bill_broker_data(self, message: str, page_context: PageContext) -> str:
-        """DDP's LegBot analysis of the page's bill, and its concept poll when the message asks about it,
-        from ddp-broker-py. One time budget with the other lookups; a slow or failing broker costs the
-        extra context, never the answer."""
+        """DDP's LegBot analysis of the page's bill, its concept poll when the message asks about it and its
+        constituent-alignment scorecard when the message asks about that, from ddp-broker-py. One time budget with
+        the other lookups; a slow or failing broker costs the extra context, never the answer."""
         deadline = _enrichment_deadline.get()
         args = (page_context.jurisdiction, page_context.session, page_context.id, deadline)
         asks_about_poll = bool(POLL_QUERY.search(message))
+        asks_about_scorecard = bool(BILL_SCORECARD_QUERY.search(message)) and bool(bare_uuid(page_context.ocd_bill_id))
         try:
-            analysis, poll = await asyncio.wait_for(
+            analysis, poll, scorecard = await asyncio.wait_for(
                 asyncio.gather(
                     self.broker_lookup.get_bill_analysis(*args),
                     self.broker_lookup.get_concept_poll(*args) if asks_about_poll else asyncio.sleep(0),
+                    self.broker_lookup.get_bill_scorecard(page_context.ocd_bill_id, deadline)
+                    if asks_about_scorecard
+                    else asyncio.sleep(0),
                 ),
                 _enrichment_budget_left(),
             )
@@ -2364,7 +2375,11 @@ class VoteBotAgent:
         except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
             logger.error("Broker bill analysis failed; answering without it", error=str(e))
             return ""
-        parts = [format_bill_analysis(analysis), format_concept_poll(poll if asks_about_poll else None)]
+        parts = [
+            format_bill_analysis(analysis),
+            format_concept_poll(poll if asks_about_poll else None),
+            format_bill_scorecard(scorecard if asks_about_scorecard else None),
+        ]
         return "\n\n".join(p for p in parts if p)
 
     async def _prefetch_bill_org_positions_from_broker(self, page_context: PageContext) -> str:
