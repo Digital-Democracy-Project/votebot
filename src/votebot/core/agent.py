@@ -188,6 +188,38 @@ def _services_for(settings: Settings) -> _Services:
     return _shared_services[1]
 
 
+async def warm_up_services(settings: Settings) -> None:
+    """Warm the clients chat uses, so the first message after a deploy or restart is not the slow one (VOTEBOT-49).
+
+    Opens the Pinecone index (read only: it never creates one) and makes one request to it, and makes one tiny
+    embedding call, on the shared services (`_services_for`), so what is warm is what chat uses. Meant to run in the
+    background at startup: it never raises, and says in the log whether it ran or failed.
+    """
+    began = time.perf_counter()
+    try:
+        vector_store = _services_for(settings).retrieval.vector_store
+        outcomes = await asyncio.gather(
+            vector_store.warm(),
+            vector_store.embedding_service.embed("warm up"),  # `embed`, not `embed_query`: no entry in the query cache
+            return_exceptions=True,
+        )
+    except Exception as e:  # noqa: BLE001 -- a warm-up must never stop startup
+        logger.warning("Warm-up failed", error=str(e))
+        return
+    failed = []
+    for name, outcome in zip(("pinecone", "embeddings"), outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            failed.append(name)
+            logger.warning("Warm-up failed", client=name, error=str(outcome))
+    index_found = outcomes[0] is True
+    logger.info(
+        "Warm-up finished" if index_found and not failed else "Warm-up incomplete",
+        failed=failed,
+        pinecone_index_found=index_found,
+        duration_ms=int((time.perf_counter() - began) * 1000),
+    )
+
+
 async def close_services(settings: Settings) -> None:
     """Close what the shared services hold open (the lifespan calls it at shutdown). Does nothing if no message
     was ever served, so shutting down never builds the services just to close them."""
