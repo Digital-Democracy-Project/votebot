@@ -126,6 +126,11 @@ class WebflowLookupService:
         self._org_cache: dict[str, dict] = {}
         self._bill_cache: dict[str, dict] = {}
 
+    def _configured(self, collection_id: str) -> bool:
+        """A Webflow request needs the API key and the collection's id. The new deployment sets neither (the broker
+        replaced these lookups), and a request without them is only refused, after a round trip to Webflow (VOTEBOT-52)."""
+        return bool(self.api_key and collection_id)
+
     async def get_bill_org_positions(
         self,
         webflow_id: str | None = None,
@@ -194,6 +199,8 @@ class WebflowLookupService:
 
     async def _fetch_bill_by_id(self, webflow_id: str) -> dict | None:
         """Fetch a bill item from Webflow by its ID."""
+        if not self._configured(self.bills_collection_id):
+            return None
         url = f"{self.BASE_URL}/collections/{self.bills_collection_id}/items/{webflow_id}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -218,6 +225,8 @@ class WebflowLookupService:
 
     async def _fetch_bill_by_slug(self, slug: str) -> dict | None:
         """Fetch a bill item from Webflow by slug (paginated search fallback)."""
+        if not self._configured(self.bills_collection_id):
+            return None
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "accept": "application/json",
@@ -317,6 +326,8 @@ class WebflowLookupService:
 
     async def _fetch_org_by_id(self, org_id: str) -> dict | None:
         """Fetch a single organization from Webflow with in-memory caching."""
+        if not self._configured(self.organizations_collection_id):
+            return None
         # Check cache first
         if org_id in self._org_cache:
             return self._org_cache[org_id]
@@ -428,6 +439,8 @@ class WebflowLookupService:
 
     async def _fetch_org_item_by_id(self, webflow_id: str) -> dict | None:
         """Fetch a full organization item from Webflow by its ID (includes reference fields)."""
+        if not self._configured(self.organizations_collection_id):
+            return None
         if not self.organizations_collection_id:
             return None
 
@@ -455,6 +468,8 @@ class WebflowLookupService:
 
     async def _fetch_org_item_by_slug(self, slug: str) -> dict | None:
         """Fetch an organization item from Webflow by slug (paginated search fallback)."""
+        if not self._configured(self.organizations_collection_id):
+            return None
         if not self.organizations_collection_id:
             return None
 
@@ -548,6 +563,8 @@ class WebflowLookupService:
 
     async def _fetch_bill_info_by_id(self, bill_id: str) -> dict | None:
         """Fetch a single bill's info from Webflow with in-memory caching."""
+        if not self._configured(self.bills_collection_id):
+            return None
         # Check cache first
         if bill_id in self._bill_cache:
             return self._bill_cache[bill_id]
@@ -656,6 +673,8 @@ class WebflowLookupService:
 
     async def _fetch_legislator_by_id(self, webflow_id: str) -> dict | None:
         """Fetch a legislator item from Webflow by its ID."""
+        if not self._configured(self.legislators_collection_id):
+            return None
         if not self.legislators_collection_id:
             return None
 
@@ -683,6 +702,8 @@ class WebflowLookupService:
 
     async def _fetch_legislator_by_slug(self, slug: str) -> dict | None:
         """Fetch a legislator item from Webflow by slug (paginated search fallback)."""
+        if not self._configured(self.legislators_collection_id):
+            return None
         if not self.legislators_collection_id:
             return None
 
