@@ -46,6 +46,7 @@ from votebot.utils.intent import (
     classify_sub_intent,
     normalize_retrieval_sources,
 )
+from votebot.utils.timings import PhaseTimings
 
 logger = structlog.get_logger()
 
@@ -465,6 +466,7 @@ class VoteBotAgent:
         button_type: str | None = None,
         cache_hit: bool | None = None,
         cache_hit_metadata: dict | None = None,
+        timings: PhaseTimings | None = None,
     ) -> None:
         """Fire-and-forget log of a completed query to JSONL.
 
@@ -583,6 +585,9 @@ class VoteBotAgent:
                     time_on_page=time_on_page,
                     channel=channel,
                     duration_ms=duration_ms,
+                    first_token_ms=timings.get_mark("first_token") if timings else None,
+                    phase_ms=timings.phases_ms if timings else None,
+                    marks_ms=timings.marks_ms if timings else None,
                     citations=citations_dicts,
                     human_active=human_active,
                     client_ip=client_ip,
@@ -974,6 +979,7 @@ class VoteBotAgent:
             StreamChunkData objects with text fragments
         """
         _start_time = time.perf_counter()
+        timings = PhaseTimings(_start_time)
         _enrichment_deadline.set(time.monotonic() + BUDGET_SECONDS)  # one budget for this message's lookups
 
         # Normalize button — feature flag off OR unknown type means "no button"
@@ -988,10 +994,11 @@ class VoteBotAgent:
 
         # Step 0: Try button cache for cacheable button types (summary / pros_cons).
         # status_votes and free-typed messages skip this and run the full pipeline.
-        cache_hit_result = await self._maybe_serve_from_button_cache(
-            page_context=page_context,
-            button=effective_button,
-        )
+        with timings.phase("button_cache"):
+            cache_hit_result = await self._maybe_serve_from_button_cache(
+                page_context=page_context,
+                button=effective_button,
+            )
         if cache_hit_result is not None:
             cached_response = cache_hit_result["response"]
             cached_citations = cache_hit_result["citations"]
@@ -1001,6 +1008,7 @@ class VoteBotAgent:
             # `stream_chunk` for chunks where done=False, and the widget's
             # `finalizeStreamingMessage` early-returns when no streaming-message
             # was created. Yield the text first (done=False), then the done marker.
+            timings.mark("first_token")
             yield StreamChunkData(text=cached_response, done=False)
             yield StreamChunkData(
                 text="",
@@ -1046,14 +1054,16 @@ class VoteBotAgent:
                 button_type=effective_button,
                 cache_hit=True,
                 cache_hit_metadata=cache_hit_metadata,
+                timings=timings,
             )
             return
 
         # Step 1: Retrieve relevant context
-        retrieval_result = await self.retrieval.retrieve(
-            query=message,
-            page_context=page_context,
-        )
+        with timings.phase("retrieval"):
+            retrieval_result = await self.retrieval.retrieve(
+                query=message,
+                page_context=page_context,
+            )
 
         # Step 2: Format retrieved context
         retrieved_context = format_retrieved_chunks(
@@ -1078,7 +1088,8 @@ class VoteBotAgent:
         bill_votes_tool_duration_ms: int | None = None
         if self._should_use_bill_votes_tool(rag_confidence, message, page_context, conversation_history):
             _bv_start = time.perf_counter()
-            bill_info_context = await self._prefetch_bill_info(message, page_context, conversation_history)
+            with timings.phase("bill_info_prefetch"):
+                bill_info_context = await self._prefetch_bill_info(message, page_context, conversation_history)
             bill_votes_tool_duration_ms = int((time.perf_counter() - _bv_start) * 1000)
             # Tool counts as "used" only if prefetch actually returned live data —
             # an empty result means the resolution didn't find a bill or OpenStates had nothing.
@@ -1092,10 +1103,11 @@ class VoteBotAgent:
 
         # Step 2c: Pre-fetch legislator info if query mentions a person on a bill page
         legislator_info_context = ""
-        if self.settings.bill_filter_key == "ocd_bill_id":
-            legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
-        elif page_context and page_context.type == "bill":
-            legislator_info_context = await self._prefetch_legislator_info(message)
+        with timings.phase("legislator_lookup"):
+            if self.settings.bill_filter_key == "ocd_bill_id":
+                legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
+            elif page_context and page_context.type == "bill":
+                legislator_info_context = await self._prefetch_legislator_info(message)
         if legislator_info_context:
             logger.info("Pre-fetched legislator info for streaming")
 
@@ -1110,11 +1122,12 @@ class VoteBotAgent:
         )
         if is_dispute:
             logger.info("Dispute detected, attempting vote verification")
-            vote_verification_context = await self._verify_legislator_vote(
-                message=message,
-                page_context=page_context,
-                conversation_history=conversation_history,
-            )
+            with timings.phase("vote_verification"):
+                vote_verification_context = await self._verify_legislator_vote(
+                    message=message,
+                    page_context=page_context,
+                    conversation_history=conversation_history,
+                )
             if vote_verification_context:
                 logger.info(
                     "Vote verification successful",
@@ -1130,18 +1143,21 @@ class VoteBotAgent:
         org_positions_context = ""
         if (page_context and page_context.type == "bill"
                 and self._is_org_position_query(message)):
-            org_positions_context = await self._prefetch_bill_org_positions(page_context)
+            with timings.phase("org_positions"):
+                org_positions_context = await self._prefetch_bill_org_positions(page_context)
 
         # Step 2f: Pre-fetch bill positions from Webflow CMS for org pages
         org_bill_positions_context = ""
         if (page_context and page_context.type == "organization"
                 and self._is_bill_position_query(message)):
-            org_bill_positions_context = await self._prefetch_org_bill_positions(page_context)
+            with timings.phase("org_bill_positions"):
+                org_bill_positions_context = await self._prefetch_org_bill_positions(page_context)
 
         # Step 2g: Webflow CMS verification for all page types on disputes
         webflow_verification_context = ""
         if is_dispute and page_context and page_context.type in ("bill", "legislator", "organization"):
-            webflow_verification_context = await self._verify_from_webflow(page_context)
+            with timings.phase("webflow_verification"):
+                webflow_verification_context = await self._verify_from_webflow(page_context)
 
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
@@ -1189,12 +1205,15 @@ class VoteBotAgent:
         # Step 6: Stream response (with OpenAI web search if enabled)
         full_response = ""
         web_search_used_in_stream = False
+        timings.mark("model_call_start")  # everything before this is the wait before the model is even asked
         async for chunk in self.llm.stream(
             messages=messages,
             system_prompt=system_prompt,
             enable_web_search=enable_web_search,
         ):
             full_response += chunk.text
+            if chunk.text:
+                timings.mark("first_token")  # the first text as the agent hands it on; the socket send follows at once
             if chunk.web_search_used:
                 web_search_used_in_stream = True
 
@@ -1287,6 +1306,14 @@ class VoteBotAgent:
                     retrieval_result=retrieval_result,
                     button_type=effective_button,
                     cache_hit=False if effective_button else None,
+                    timings=timings,
+                )
+                logger.info(
+                    "Streaming timings",
+                    session_id=session_id,
+                    first_token_ms=timings.get_mark("first_token"),
+                    model_call_start_ms=timings.get_mark("model_call_start"),
+                    phase_ms=timings.phases_ms,
                 )
             else:
                 yield StreamChunkData(text=chunk.text, done=False)

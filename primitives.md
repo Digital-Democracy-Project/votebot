@@ -195,6 +195,7 @@ Canonical-id index only; the Webflow versions above stay for the legacy index an
 
 - **`QueryLogger`** — async JSONL logger, date-partitioned files (e.g. `logs/queries/2026-02-08.jsonl`), `aiofiles` + `O_APPEND` for atomic multi-worker writes.
   - `log_event(*, event_type, session_id, visitor_id=None, message=None, response=None, primary_intent=None, sub_intent=None, confidence=None, retrieval_count=None, grounding_status=None, web_search_used=False, bill_votes_tool_used=False, button_type=None, cache_hit=None, turn_count=None, terminal_state=None, page_context=None, ...) -> None` — **single unified method**, not three separate `log_message_received`/`log_query_processed`/`log_conversation_ended` methods. `event_type` (a free-form string set by the caller, e.g. `"message_received"`/`"query_processed"`/`"conversation_ended"`) distinguishes the event kind within one shared JSONL schema/file.
+  - `log_event(...)` also takes `first_token_ms`, `phase_ms: dict[str,int]`, `marks_ms: dict[str,int]` (VOTEBOT-44, `query_processed` on the streaming path); omitted from the JSONL when unset.
   - `log_query(*, session_id, message, response, confidence, citations, page_context, channel, duration_ms, ...)` — legacy-format wrapper kept for backward compatibility; new code should use `log_event()`.
 - `get_query_logger() -> QueryLogger | None` — module-level singleton accessor; returns `None` when `settings.query_log_enabled` is `False`
 - **Do not log PII** — scrub tokens, credentials, and personal data before logging
@@ -247,6 +248,7 @@ Singleton: `get_redis_store() -> RedisStore`. All methods no-op gracefully when 
 ## Misc utils (`utils/logging.py`, `utils/metrics.py`)
 
 - **`utils/logging.py`** — `setup_logging(log_level)` (called from `main.py` at startup), `get_logger(name=None)`, `RequestLogger` context manager, `log_performance(logger, operation, duration_ms, **extra)`.
+- **`utils/timings.py`** (VOTEBOT-44) — `PhaseTimings(start=None)`: per-message latency breakdown for the query log. `phase(name)` context manager (duration in ms, summed if entered twice, recorded even on exception) fills `phases_ms`; `mark(name)` (first call wins) / `get_mark(name)` record ms since the message started in `marks_ms`. Used by `process_message_stream` (phases `button_cache`, `retrieval`, `bill_info_prefetch`, `legislator_lookup`, `vote_verification`, `org_positions`, `org_bill_positions`, `webflow_verification`; marks `model_call_start`, `first_token`) and passed to `_log_query(timings=...)`. Not `MetricsCollector.timer` below: that is a process-wide aggregate with no per-message output. The non-streaming `process_message` is not instrumented.
 - **`utils/metrics.py`** — `MetricsCollector` (`record`, `increment`, `timer`, `get_summary`, `get_report`), `get_metrics()` singleton, convenience functions `record_latency`/`record_tokens`/`increment_request_count`/`increment_error_count`. **Currently unused/dead code** — nothing outside this file calls `get_metrics()` or the convenience functions; `structlog` + `QueryLogger` are the metrics path actually in use.
 
 ## API schemas (`api/schemas/chat.py`)

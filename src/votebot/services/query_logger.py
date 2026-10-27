@@ -117,6 +117,11 @@ class QueryLogger:
         time_on_page: int | None = None,
         channel: str | None = None,
         duration_ms: int | None = None,
+        # Latency breakdown (query_processed, streaming path), all in ms: when the first text left the agent, how
+        # long each phase before the model took, and when points in the message were reached (from message start)
+        first_token_ms: int | None = None,
+        phase_ms: dict[str, int] | None = None,
+        marks_ms: dict[str, int] | None = None,
         citations: list[dict[str, Any]] | None = None,
         human_active: bool = False,
         client_ip: str | None = None,
@@ -178,6 +183,9 @@ class QueryLogger:
             "time_on_page": time_on_page,
             "channel": channel,
             "duration_ms": duration_ms,
+            "first_token_ms": first_token_ms,
+            "phase_ms": phase_ms or None,
+            "marks_ms": marks_ms or None,
             "citations": citations,
             "human_active": human_active if human_active else None,
             "client_ip": client_ip,
