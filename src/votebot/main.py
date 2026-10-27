@@ -24,6 +24,7 @@ from votebot.api.routes import (
 )
 from votebot.api.schemas.common import ErrorResponse
 from votebot.config import get_settings
+from votebot.services.openstates_client import check_openstates_config
 from votebot.utils.logging import setup_logging
 
 # Clear settings cache to ensure fresh env vars on reload
@@ -62,6 +63,7 @@ def check_query_log_dir() -> bool:
 async def lifespan(app: FastAPI):
     """Startup: connect Redis + start button-cache subscriber. Shutdown: reverse."""
     setup_logging(settings.log_level)
+    check_openstates_config(settings)  # OpenStates only from the DDP replica: no root or credential, no start
 
     # Connect Redis (used for Slack thread mapping, pub/sub, button cache)
     from votebot.services.redis_store import get_redis_store

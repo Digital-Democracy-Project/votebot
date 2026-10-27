@@ -48,7 +48,7 @@ def _service(monkeypatch, handler) -> LegislatorLookupService:
     monkeypatch.setattr(
         legislators_module.httpx, "AsyncClient", lambda **kw: REAL_CLIENT(transport=httpx.MockTransport(handler), **kw)
     )
-    settings = Settings(use_ddp_openstates_replica=True, ddp_openstates_api_root="https://api.test", _env_file=None)
+    settings = Settings(ddp_openstates_api_root="https://api.test", _env_file=None)
     return LegislatorLookupService(settings)
 
 

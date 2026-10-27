@@ -107,17 +107,14 @@ class Settings(BaseSettings):
 
     # External APIs
     congress_api_key: SecretStr = Field(default=SecretStr(""))
-    openstates_api_key: SecretStr = Field(default=SecretStr(""))
 
-    # DDP-replica OpenStates routing (VOTEBOT-2): staged rollout flag, off by default
-    # so each environment opts in once its bearer token is provisioned. No default
-    # URL is hardcoded here -- it must be set via DDP_OPENSTATES_API_ROOT in the
-    # real .env for each environment, so a stale/wrong target can't hide behind a
-    # baked-in fallback (the exact class of bug found in ddp-api's own proxy config).
-    use_ddp_openstates_replica: bool = False
+    # OpenStates comes only from DDP's own replica (VOTEBOT-2, VOTEBOT-59); there is no public-API setting. No
+    # default URL is hardcoded here -- it must be set via DDP_OPENSTATES_API_ROOT in the real .env for each
+    # environment, so a stale/wrong target can't hide behind a baked-in fallback (the exact class of bug found
+    # in ddp-api's own proxy config). The app refuses to start without it and the credential below.
     ddp_openstates_api_root: str = ""
     ddp_openstates_bearer_token: SecretStr = Field(default=SecretStr(""))
-    # How the credential above is sent when the replica flag is on. "bearer" is for ddp-api's proxy
+    # How the credential above is sent. "bearer" is for ddp-api's proxy
     # (Authorization: Bearer); "x-api-key" is for api-v3 itself, which accepts only an X-API-Key header
     # (or ?apikey) and answers 403 to a Bearer token. The variable keeps its name: it holds whichever
     # credential the chosen shape needs.

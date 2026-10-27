@@ -40,10 +40,8 @@ API = {
 }
 
 
-def _versions_service(api=API, replica=True) -> BillVersionService:
-    settings = Settings(
-        use_ddp_openstates_replica=replica, ddp_openstates_api_root="https://api.test", _env_file=None
-    )
+def _versions_service(api=API) -> BillVersionService:
+    settings = Settings(ddp_openstates_api_root="https://api.test", _env_file=None)
     service = BillVersionService(settings)
     service._fetch = AsyncMock(return_value=api)
     return service
@@ -93,11 +91,6 @@ class TestGetDiffs:
     async def test_nothing_usable_is_none_or_empty(self, api):
         result = await _versions_service(api).get_diffs(BILL)
         assert not result
-
-    async def test_without_the_replica_flag_api_v3s_version_fields_do_not_exist(self):
-        service = _versions_service(replica=False)
-        assert await service.get_diffs(BILL) is None
-        service._fetch.assert_not_called()
 
     async def test_diffs_are_not_cached(self):
         service = _versions_service()
