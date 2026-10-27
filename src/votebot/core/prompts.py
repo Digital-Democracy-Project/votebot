@@ -169,6 +169,16 @@ The user is browsing the Digital Democracy Project website. Help them:
 - Learn about civic engagement
 """
 
+# Added to the general prompt when the site says which page the visitor is on (VOTEBOT-59): ddp-next sends a
+# title, the URL and, for a list, the jurisdiction and session it is filtered to.
+GENERAL_PAGE_PROMPT = """The visitor is on this page of the site:
+{page_info}
+
+Read short or vague questions ("what can I do here?", "what is this?", "explain this page") as questions about THIS page.
+A jurisdiction or session listed above is what the page is filtered to: for "these bills" or "the ones here", answer for it.
+You cannot see what the page shows. Say what you know of this kind of page and the retrieved information below, and offer to look up specifics; do not invent what is on screen.
+"""
+
 # RAG injection template
 RAG_CONTEXT_TEMPLATE = """## Retrieved Information
 
@@ -271,6 +281,9 @@ def build_system_prompt(
         prompt_parts.append(ORGANIZATION_CONTEXT_PROMPT.format(org_info=org_info))
     else:
         prompt_parts.append(GENERAL_CONTEXT_PROMPT)
+        general_page = _format_general_page_info(page_info) if page_info else ""
+        if general_page:
+            prompt_parts.append(GENERAL_PAGE_PROMPT.format(page_info=general_page))
 
     # Add RAG context if provided
     if include_rag_context and retrieved_context:
@@ -287,6 +300,26 @@ def build_system_prompt(
     prompt_parts.append(HUMAN_HANDOFF_PROMPT)
 
     return "\n\n".join(prompt_parts)
+
+
+def _one_line(value: object, limit: int = 200) -> str:
+    """Page text comes from the browser: one line, capped, so it cannot add structure to the prompt."""
+    return " ".join(str(value).split())[:limit]
+
+
+def _format_general_page_info(info: dict) -> str:
+    """Describe the page a visitor is on when it is not a bill, legislator or organization page."""
+    parts = []
+    title = _one_line(info.get("title") or info.get("name") or "")
+    if title:
+        parts.append(f"- Page: {title}")
+    if info.get("url"):
+        parts.append(f"- URL: {_one_line(info['url'])}")
+    if info.get("jurisdiction"):
+        parts.append(f"- Jurisdiction: {_one_line(info['jurisdiction'], 40)}")
+    if info.get("session"):
+        parts.append(f"- Session: {_one_line(info['session'], 60)}")
+    return "\n".join(parts)
 
 
 def _format_bill_info(info: dict) -> str:
