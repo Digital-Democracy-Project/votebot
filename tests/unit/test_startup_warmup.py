@@ -129,6 +129,56 @@ class TestStartupIsNeverBlockedOrStopped:
                 assert asyncio.get_running_loop().time() - began < 5  # not 30 s
                 await asyncio.wait_for(started.wait(), 1)  # and it did start
 
+    async def test_a_warm_up_still_running_is_cancelled_and_has_finished_cancelling_when_the_app_stops(self):
+        cleanup = []
+
+        async def blocked(settings):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.02)  # cleanup that takes a moment
+                cleanup.append("done")
+                raise
+
+        with patch.object(agent_module, "warm_up_services", blocked):
+            async with main_module.lifespan(SimpleNamespace()):
+                await asyncio.sleep(0.01)
+        assert cleanup == ["done"]  # finished before the lifespan returned, not left to the loop
+        assert not (asyncio.all_tasks() - {asyncio.current_task()})
+
+    async def test_the_warm_up_is_cleaned_up_when_the_app_stops_on_an_error_too(self):
+        cleanup = []
+
+        async def blocked(settings):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cleanup.append("done")
+                raise
+
+        with patch.object(agent_module, "warm_up_services", blocked), pytest.raises(RuntimeError, match="body failed"):
+            async with main_module.lifespan(SimpleNamespace()):
+                await asyncio.sleep(0.01)
+                raise RuntimeError("body failed")
+        assert cleanup == ["done"]
+        assert not (asyncio.all_tasks() - {asyncio.current_task()})
+
+    async def test_a_warm_up_that_ended_with_an_exception_leaves_nothing_unretrieved(self):
+        reported = []
+        asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: reported.append(ctx))
+
+        async def broken(settings):
+            raise RuntimeError("everything is down")
+
+        with patch.object(agent_module, "warm_up_services", broken):
+            async with main_module.lifespan(SimpleNamespace()):
+                await asyncio.sleep(0.01)
+        import gc
+
+        gc.collect()
+        await asyncio.sleep(0)
+        assert reported == []  # no "Task exception was never retrieved"
+
     async def test_startup_succeeds_when_the_warm_up_blows_up(self):
         async def broken(settings):
             raise RuntimeError("everything is down")

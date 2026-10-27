@@ -5,7 +5,7 @@ VoteBot is a chat/RAG service. Sync/ingestion is handled by ddp-sync.
 
 import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import structlog
@@ -115,9 +115,14 @@ async def lifespan(app: FastAPI):
         quick_action_buttons_enabled=settings.quick_action_buttons_enabled,
     )
 
-    yield
-
-    warmup.cancel()  # a no-op once it has finished
+    try:
+        yield
+    finally:
+        # however the app stops: cancel the warm-up if it is still running and wait for it, which also consumes
+        # an exception it may have ended with (it should not have one: it never raises)
+        warmup.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await warmup
 
     from votebot.services.button_cache import stop_invalidate_subscriber
     try:
