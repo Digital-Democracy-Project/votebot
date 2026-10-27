@@ -50,7 +50,9 @@ class TestTheCanonicalIndex:
         agent = _agent(NEW_INDEX)
         out = await agent._prefetch_bill_info("What is the status of this bill?", PAGE, None)
         assert out  # the live lookup still ran, for the page's own bill (HB 1), not a CMS-resolved one
-        assert agent.bill_votes.get_bill_info.await_args.kwargs["bill_identifier"] == "HB 1"
+        asked = agent.bill_votes.get_bill_info.await_args.kwargs
+        assert asked["bill_identifier"] == "HB 1"
+        assert (asked["jurisdiction"].lower(), asked["session"]) == ("fl", "2026")  # the page's, with no CMS to supply them
 
     async def test_a_page_without_a_slug_is_the_same(self):
         agent = _agent(NEW_INDEX)
