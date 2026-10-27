@@ -124,6 +124,14 @@ class TestMatchTotals:
         text = format_legislators(match, asked="Ashley Moody")
         assert "Legislator Profile" in text and "Several" not in text and "More people match" not in text
 
+    async def test_two_people_on_one_page_are_still_several_matches(self, monkeypatch):
+        # live "Smith" in FL: two people, total_items 8 (rows), max_page 1
+        body = {"results": [_raw(), _raw(name="Ashley Moody Jr", id="ocd-person/b")], "pagination": {"total_items": 8, "per_page": 10, "page": 1, "max_page": 1}}
+        match = await _service(monkeypatch, lambda r: httpx.Response(200, json=body)).find_by_name("Moody")
+        assert (len(match.people), match.total) == (2, 2)
+        text = format_legislators(match, asked="Moody")
+        assert "Several legislators match" in text and "Legislator Profile" not in text and "More people match" not in text
+
     async def test_a_second_page_still_means_more_people_than_were_listed(self, monkeypatch):
         body = {"results": [_raw()], "pagination": {"total_items": 3, "per_page": 1, "page": 1, "max_page": 3}}
         match = await _service(monkeypatch, lambda r: httpx.Response(200, json=body)).find_by_name("Moody")
