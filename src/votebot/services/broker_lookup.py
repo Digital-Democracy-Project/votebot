@@ -109,17 +109,16 @@ class ConceptPoll:
     statements: list[PollStatement] = field(default_factory=list)
 
 
-def bare_uuid(value: object) -> str | None:
-    """The canonical bare UUID text for an OpenStates id (`ocd-bill/` or `ocd-person/` prefix stripped), or None.
+def bare_uuid(value: object, prefix: str) -> str | None:
+    """The canonical bare UUID text for an OpenStates id of one kind (`prefix`: `ocd-bill/` or `ocd-person/`), or None.
 
     The broker's scorecard routes take only the bare, lowercase, hyphenated UUID (a `/` cannot ride in one path
     segment, and any other spelling is a 404), so what is sent is always `str(UUID(...))`, and what is not a UUID
-    is never sent at all."""
+    is never sent at all. Only the given kind's prefix is stripped, and only once: another kind's id (a bill's for a
+    person's route) and a doubly prefixed value are not ids of this kind."""
     text = str(value or "").strip()
-    for prefix in ("ocd-bill/", "ocd-person/"):  # at most one: a doubly prefixed value is not an id
-        if text.lower().startswith(prefix):
-            text = text[len(prefix):]
-            break
+    if text.lower().startswith(prefix):
+        text = text[len(prefix):]
     try:
         return str(uuid.UUID(text))
     except ValueError:
@@ -426,7 +425,7 @@ class BrokerLookupService:
     async def get_bill_scorecard(self, ocd_bill_id: object, deadline: float | None = None) -> BillScorecard | None:
         """DDP's constituent-alignment scorecard of the bill, by its bare OpenStates UUID; None when the id is not
         one (nothing is sent), the broker has no such bill (404) or cannot answer."""
-        bill_id = bare_uuid(ocd_bill_id)
+        bill_id = bare_uuid(ocd_bill_id, "ocd-bill/")
         if bill_id is None:
             return None
         body = await self._get(f"/api/bills/{bill_id}/scorecard/", None, deadline)
