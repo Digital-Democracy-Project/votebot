@@ -89,6 +89,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Button cache subscriber startup failed", exc_info=True)
 
+    # The federal party roster is most of the roster downloads (123 of 125 on 2.0): fetch it now, in the background,
+    # so no chat waits for it, and never let a failure here stop startup (VOTEBOT-48)
+    try:
+        from votebot.core.agent import _services_for
+
+        _services_for(settings).bill_votes.warm_parties("us")
+    except Exception:
+        logger.warning("Party roster warm-up could not start", exc_info=True)
+
     if not settings.index_is_recognized:
         logger.warning(
             "PINECONE_INDEX_NAME is neither the legacy nor the canonical index; "
