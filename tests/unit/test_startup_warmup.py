@@ -102,10 +102,13 @@ class TestWarmUpServices:
 
 @pytest.fixture
 def no_redis():
-    """The lifespan's Redis and button-cache parts are not under test (and a real Redis on a developer's machine
-    makes the subscriber's shutdown slow): stand-ins for them."""
+    """The lifespan's Redis, button-cache and OpenStates-settings parts are not under test (a real Redis on a
+    developer's machine makes the subscriber's shutdown slow): stand-ins for them."""
     store = SimpleNamespace(connect=AsyncMock(), disconnect=AsyncMock())
-    with patch("votebot.services.redis_store.get_redis_store", return_value=store), patch(
+    # nor is the OpenStates settings check: it would make these tests depend on the machine's .env
+    with patch("votebot.main.check_openstates_config"), patch(
+        "votebot.services.redis_store.get_redis_store", return_value=store
+    ), patch(
         "votebot.services.button_cache.reconcile_on_startup", AsyncMock()
     ), patch("votebot.services.button_cache.start_invalidate_subscriber", AsyncMock()), patch(
         "votebot.services.button_cache.stop_invalidate_subscriber", AsyncMock()
