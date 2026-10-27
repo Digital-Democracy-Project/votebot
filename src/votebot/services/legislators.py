@@ -100,6 +100,10 @@ class LegislatorLookupService:
         people = [p for p in map(_person, results) if p]
         meta = body.get("pagination") if isinstance(body.get("pagination"), dict) else {}
         total = meta.get("total_items") if isinstance(meta.get("total_items"), int) else len(people)
+        if meta.get("max_page") == 1:
+            # api-v3's total_items counts joined rows, not people (one person, three rows: total_items 3), so it
+            # overstates. When everything fits on one page nobody is missing, whatever it says.
+            total = len(people)
         logger.info("People lookup", params=params, returned=len(people), total=total)
         return PeopleMatch(people, max(total, len(people)))
 
@@ -147,7 +151,7 @@ def format_legislators(match: PeopleMatch | None, asked: str = "") -> str:
         lines = [f"## Several legislators match \"{asked}\" ({SOURCE})",
                  "Do not guess which one the user means; ask them."]
         if match.total > min(len(pool), MAX_CANDIDATES):
-            lines.append(f"{match.total} people match in all; only some are listed, so ask for a fuller name.")
+            lines.append("More people match than are listed, so ask for a fuller name.")
         for p in pool[:MAX_CANDIDATES]:
             role = ", ".join(x for x in (p.title, f"District {p.district}" if p.district else "", p.chamber, p.jurisdiction) if x)
             lines.append(f"- {p.name}" + (f" ({p.party})" if p.party else "") + (f": {role}" if role else ""))
