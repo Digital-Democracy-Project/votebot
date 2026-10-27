@@ -23,7 +23,7 @@ Embeddable chat widget for Digital Democracy Project VoteBot.
 - **Content resolution API** to fetch metadata from Webflow CMS
 - **Partial auto-scroll** — force-scrolls to show typing indicator and start of bot response, then stops; "scroll to bottom" arrow button appears when content extends below the visible area
 - **Bill info pre-fetching** - fetches bill details from OpenStates before streaming for bills not in RAG
-- **Quick-action buttons** (server-flagged) — three pill buttons on bill pages: "Summarize this bill", "Pros and cons", "Latest status & votes". Hidden by default; enabled at runtime when the server's `/votebot/v1/features` endpoint returns `quick_action_buttons_enabled: true`. WCAG 2.1 AA: keyboard nav, aria-labels, focus indicators
+- **Quick-action buttons** (server-flagged) — three pill buttons on bill pages: "Summarize this bill", "Pros and cons", "Latest status & votes". Hidden by default; enabled at runtime when the server's `/votebot/v1/features` endpoint returns `quick_action_buttons_enabled: true`. WCAG 2.1 AA: keyboard nav, aria-labels, focus indicators. They work whether the bill context is there at start-up or arrives later through `setPageContext()` (a host that learns the bill after the page loads)
 - **Auto-open modes**:
   - Explicit mode (`?ddp_url=...`): Widget auto-opens when URL parameter provided
   - Discovery mode: Widget stays closed, auto-detects page context when opened
