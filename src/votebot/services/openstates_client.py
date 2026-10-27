@@ -11,28 +11,36 @@ Two shapes of the same replica exist, chosen by `DDP_OPENSTATES_AUTH_HEADER`: dd
 Bearer token with 403). Exactly one shape is ever sent.
 """
 
+from urllib.parse import urlparse
+
 from votebot.config import Settings
+
+
+def _is_public_openstates(root: str) -> bool:
+    """True for openstates.org and any subdomain of it (the public API's host), whatever the scheme, port or path."""
+    host = (urlparse(root if "//" in root else "//" + root).hostname or "").lower()
+    return host == "openstates.org" or host.endswith(".openstates.org")
+
+
+def openstates_base_url(settings: Settings) -> str:
+    """Base URL for OpenStates requests: the DDP replica. Every request and the startup check go through here."""
+    root = settings.ddp_openstates_api_root.strip()
+    if not root:
+        raise RuntimeError("DDP_OPENSTATES_API_ROOT is not set -- set it in this environment's .env.")
+    if _is_public_openstates(root):
+        raise RuntimeError(
+            "DDP_OPENSTATES_API_ROOT points at the public OpenStates API; VoteBot reads OpenStates only from the DDP replica."
+        )
+    return root.rstrip("/")
 
 
 def check_openstates_config(settings: Settings) -> None:
     """Raise at startup when the replica is not fully configured (there is no public-API fallback)."""
-    missing = []
-    if not settings.ddp_openstates_api_root:
-        missing.append("DDP_OPENSTATES_API_ROOT")
-    if not settings.ddp_openstates_bearer_token.get_secret_value():
-        missing.append("DDP_OPENSTATES_BEARER_TOKEN")
-    if missing:
+    if not settings.ddp_openstates_bearer_token.get_secret_value().strip():
         raise RuntimeError(
-            f"{' and '.join(missing)} must be set: VoteBot reads OpenStates only from the DDP replica (api-v3), "
-            "never from the public API."
+            "DDP_OPENSTATES_BEARER_TOKEN must be set: VoteBot reads OpenStates only from the DDP replica (api-v3)."
         )
-
-
-def openstates_base_url(settings: Settings) -> str:
-    """Base URL for OpenStates requests: the DDP replica."""
-    if not settings.ddp_openstates_api_root:
-        raise RuntimeError("DDP_OPENSTATES_API_ROOT is not set -- set it in this environment's .env.")
-    return settings.ddp_openstates_api_root.rstrip("/")
+    openstates_base_url(settings)  # raises when the root is missing or is the public API
 
 
 def openstates_headers(settings: Settings) -> dict[str, str]:

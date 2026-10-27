@@ -78,6 +78,44 @@ class TestNoPublicOpenstatesApi:
         with pytest.raises(RuntimeError, match=missing.upper()):
             check_openstates_config(_settings(**{missing: blank}))
 
+    @pytest.mark.parametrize(
+        "root",
+        [
+            "https://v3.openstates.org",
+            "https://v3.openstates.org/",
+            "HTTPS://V3.OpenStates.org:443/people",
+            "http://v3.openstates.org:80",
+            "v3.openstates.org",
+            "https://openstates.org/api",
+            "https://api.openstates.org",
+        ],
+    )
+    def test_the_public_host_cannot_be_configured_as_the_root(self, root):
+        settings = _settings(ddp_openstates_api_root=root)
+        with pytest.raises(RuntimeError, match="public OpenStates API"):
+            check_openstates_config(settings)
+        with pytest.raises(RuntimeError, match="public OpenStates API"):
+            openstates_base_url(settings)  # and a request would refuse it too
+
+    @pytest.mark.parametrize(
+        "root",
+        [
+            "http://localhost:8002",
+            "http://10.0.0.11:8002",
+            "https://api.digitaldemocracyproject.org/openstates",
+            "https://notopenstates.org/x",
+            "https://openstates.org.example.test/x",
+        ],
+    )
+    def test_ddp_roots_are_accepted(self, root):
+        check_openstates_config(_settings(ddp_openstates_api_root=root))
+
+    def test_a_blank_root_or_credential_counts_as_missing(self):
+        with pytest.raises(RuntimeError, match="DDP_OPENSTATES_API_ROOT"):
+            check_openstates_config(_settings(ddp_openstates_api_root="   "))
+        with pytest.raises(RuntimeError, match="DDP_OPENSTATES_BEARER_TOKEN"):
+            check_openstates_config(_settings(ddp_openstates_bearer_token=SecretStr("  ")))
+
     def test_startup_accepts_a_complete_configuration(self):
         check_openstates_config(_settings())
 
