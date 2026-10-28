@@ -52,6 +52,18 @@ What the new VoteBot does to the broker, so the shared host is not at risk from 
 **GET** reads (`/api/bills/resolve/`, `/api/bills/{id}/scorecard/`, `/api/bill-organization-positions/current/`,
 `/api/organizations/{id}/` and `/positions/`). It holds no broker credential, writes nothing, and starts no job.
 
+What the broker has to serve for the answers (public GETs, nothing else): the list above, plus `/api/bill-artifacts/current/` and
+`/api/concept-statements/` (LegBot's analysis and the concept poll of a bill) and the two **scorecard routes by OpenStates UUID**,
+`/api/bills/{uuid}/scorecard/` and `/api/legislators/{uuid}/scorecard/` (BROKER-325, VOTEBOT-60). The scorecard routes are on the
+dev broker; **as of 2026-10-27 they were not yet deployed to the production broker** (from the BROKER-325 hand-off, not checked from
+this repo). A broker without them is not an outage: the lookup returns nothing and VoteBot answers as it did before (1.2 checks a
+route, 6 the answer).
+
+**Status after 2026-10-12.** The status paragraph at the top is as of 2026-10-12. `main` has since gained VOTEBOT-44 to 53 (timing
+fields, concurrent lookups, background warm-up, cheaper `/health/ready`), 58 and 59 (OpenStates only from the DDP replica) and 60 (scorecards).
+Which SHA is running now is not recorded in this runbook: read it from the ticket and `docker image ls votebot-ddp-next`. Sections 3.3, 3.5,
+3.9, 5 and 6 describe that code.
+
 Order of work: section 1 (read-only), section 2 (freeze the old copy), section 3 (install the new one),
 section 4 (the website and its origins), then 5 (bot protection and monitoring), 6 (verify), 7 (cutover and rollback).
 
@@ -107,9 +119,17 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<broker port>/api/orga
 curl -s "http://127.0.0.1:<broker port>/api/bills/resolve/?jurisdiction=FL&session=2026&gov_id=HB%201" # 200 {"bill_openstates_id": "<uuid>"} or 404 {"detail": "Bill not found"} (ddp-broker-py `resolve_bill`: GET, public, all three parameters required)
 ```
 
+```bash
+# the scorecard routes (BROKER-325): use a real bill UUID from the resolve call above. 200 = served; 404 with a bill that resolves
+# = the route is not on this broker (an unknown bill is a 404 as well, so use one that resolved)
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<broker port>/api/bills/<bare uuid, lower case>/scorecard/
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<broker port>/api/legislators/<bare person uuid>/scorecard/
+```
+
 Record the broker's local URL (this becomes `DDP_BROKER_API_ROOT`; calling it over the local network instead of
 the public internet is faster and removes a public dependency) and the ddp-open-states api-v3 URL and bearer token
-(`DDP_OPENSTATES_API_ROOT`, `DDP_OPENSTATES_BEARER_TOKEN`; version-aware answers need api-v3's version fields).
+(`DDP_OPENSTATES_API_ROOT`, `DDP_OPENSTATES_BEARER_TOKEN`; version-aware answers need api-v3's version fields). **Both are
+required to start** (see 3.3).
 
 | Value | Found |
 |---|---|
@@ -233,7 +253,13 @@ SLACK_BOT_TOKEN=
 SLACK_APP_TOKEN=
 ```
 
-No `WEBFLOW_*` variables at all. The empty Slack lines are deliberate (one Slack connection per app token; human
+**VoteBot will not start without `DDP_OPENSTATES_API_ROOT` and `DDP_OPENSTATES_BEARER_TOKEN`** (VOTEBOT-59,
+`check_openstates_config`, the first thing the startup does). It also refuses a root whose host is `openstates.org` or any subdomain of
+it (the public API: rate-limited, and without DDP's scraper corrections): VoteBot reads OpenStates only from the DDP replica, there is no
+fallback and no setting for the public API. A missing, blank or public value ends the startup with a `RuntimeError` naming the variable
+(`docker logs votebot-ddp-next`); with `restart: unless-stopped` the container then shows as restarting in `docker ps`. A token set to
+spaces counts as missing. `DDP_BROKER_API_ROOT` is not checked at startup: left empty, the broker lookups are skipped (and ddp-next URLs get 503 from
+`/content/resolve`), so check by name that it is filled. No `WEBFLOW_*` variables at all. The empty Slack lines are deliberate (one Slack connection per app token; human
 handoff stays with the old copy). **Create it with `umask 077`, edit it as root (`sudo -e`), then check `stat -c '%U %a' /opt/votebot/.env` shows `root 600`. How secrets reach this file follows however ddp-sync's are provisioned on this
 host; never write a key value into a note, a ticket or shell history.** The broker address warning: the broker's own
 health check fails with `DisallowedHost` because Django rejects requests addressed to an internal container name, so
@@ -283,7 +309,7 @@ human-handoff test (VOTEBOT-14).
 ### 3.4 The compose project
 
 `infrastructure/docker/docker-compose.prod.yml` (project name `votebot-ddp-next`): the `votebot` container
-(`votebot-ddp-next`, built from the Dockerfile above, `mem_limit` 768 MB, `env_file` `/opt/votebot/.env`, a bind mount
+(`votebot-ddp-next`, built from the Dockerfile above, `mem_limit` 1g (see 3.8), `env_file` `/opt/votebot/.env`, a bind mount
 `${VOTEBOT_LOG_DIR:-/opt/votebot-logs}` at `/app/logs`, joined to the broker's Docker network `ddp-broker-py_default`) and
 `votebot-redis` (128 MB dataset cap inside a 256 MB container limit, no persistence). The log directory must exist and be owned by uid 1000:
 `sudo install -d -o 1000 -g 1000 /opt/votebot-logs/queries`. Deploying is the same routine as the other projects:
@@ -291,7 +317,8 @@ human-handoff test (VOTEBOT-14).
 
 **Preflight, before the first `up`** (each answers yes/no; stop on a no): no container already named `votebot-ddp-next` or
 `votebot-redis` (`docker ps -a --filter name=votebot`); the network exists (`docker network ls | grep ddp-broker-py_default`);
-`/opt/votebot/.env` exists, is mode 600, and has every key filled (check by name only: `grep -c '^NAME=.' /opt/votebot/.env`);
+`/opt/votebot/.env` exists, is mode 600, and has every key filled (check by name only: `grep -c '^NAME=.' /opt/votebot/.env`;
+include `DDP_OPENSTATES_API_ROOT`, `DDP_OPENSTATES_BEARER_TOKEN` and `DDP_BROKER_API_ROOT`: without the first two VoteBot does not start, 3.3);
 `/opt/votebot-logs/queries` exists and is owned by uid 1000, and a write as that user works
 (`sudo -u '#1000' touch /opt/votebot-logs/queries/.t && sudo rm /opt/votebot-logs/queries/.t`); `free -m` shows at least
 about 600 MB available and `df -h /` has room. VoteBot also logs an ERROR at startup ("Query log directory is NOT writable")
@@ -326,6 +353,25 @@ The startup line must show `pinecone_index_name=ddp-knowledge-base` and `bill_fi
 about an unrecognised index (a wrong name makes Pinecone create an EMPTY index: confirm the index exists with vectors
 in the namespace first, read-only, as in section 1.2's check). Then section 6, run from inside the container.
 
+**Startup, what to expect (VOTEBOT-49, 59).** Startup stops at once, before Redis is touched, if the OpenStates settings are missing or
+point at the public host (3.3). Otherwise the `VoteBot started (chat-only mode)` line appears without waiting for anything slow: the
+warm-up of Pinecone (the index is opened and one `describe_index_stats` request made; it only reads, and never creates a missing
+index) and of the embedding client (one tiny embedding) runs in the background, so an unreachable Pinecone or OpenAI cannot delay or
+stop the start. Its outcome is one more line a few seconds later: `Warm-up finished`, or `Warm-up incomplete` / `Warm-up failed` with
+`failed=[...]` naming `pinecone` and/or `embeddings` and `pinecone_index_found`. An incomplete warm-up is not an outage (the first chat
+then pays for what did not warm), but `pinecone_index_found=False` is the cue to re-check the index name above. The warm-up is
+cancelled if the container stops before it ends. The federal party roster is also fetched in the background at start (VOTEBOT-48), so
+the first legislator question does not wait for it. `docker logs votebot-ddp-next 2>&1 | grep -E 'Warm-up|started'`.
+
+**Which health URL for what (VOTEBOT-51).** `/votebot/v1/health/live` answers `alive` and checks nothing: it is what a container or
+orchestrator health check should call, and what the image's `HEALTHCHECK` calls (it fails only if the process does not answer). `/votebot/v1/health/ready` checks
+Pinecone, the OpenAI model, the OpenStates replica's `/healthz` and Redis, and returns `degraded` with each dependency named
+(`pinecone`, `openai`, `ddp_openstates_replica`; `redis` shows `unavailable` and does not degrade). Its model check is a real completion
+of 16 tokens, so it proves the key can generate, but it is **made at most once a minute**: a healthy result is kept for 60 s, a failure
+for 10 s (so a recovery shows soon), and checks that arrive together share one call. Do not point a monitor that fires every few
+seconds at `/ready` expecting a fresh model call each time, and do not use it as the container health check; use it by hand,
+after a deploy and in section 6. Pinecone, the replica and Redis are checked on every `/ready` call.
+
 ### 3.6 Logs
 
 Query logs are one JSONL file per day in `/opt/votebot-logs/queries` (visitors' messages and addresses). They are personal
@@ -345,6 +391,8 @@ docker logs votebot-ddp-next 2>&1 | grep -c 'Query log directory is NOT writable
 ```
 
 Container logs are rotated by the `json-file` options in 3.4. Check `df -h /` after the first week and name who looks.
+
+Slow answers are looked at in 3.9, from the same log files.
 
 ### 3.7 nginx: the broker's, through the broker repo (PR #410)
 
@@ -420,6 +468,49 @@ second: 1.1 s and 1.4 s for 100 clients on one worker are the same result). Run 
 | Several processes appending to one daily query-log file | Fine: 4 processes each writing 100 lines of 20 KB at once gave 400 intact lines (appends, one per line) |
 | In-memory rate limiter | None exists |
 
+### 3.9 When answers are slow: the timing fields and the latency report (VOTEBOT-44, 45, 47, 53)
+
+Every streamed answer writes a `query_processed` event to the query log (3.6; in the container `/app/logs/queries`, on the host
+`/opt/votebot-logs/queries`) with `duration_ms` and, since VOTEBOT-44, `first_token_ms`, `marks_ms` and `phase_ms`. The same numbers are in the
+container log as a `Streaming timings` line. Only the streaming path is instrumented (the REST `POST /chat` is not), and
+the fields are absent from older lines.
+
+```bash
+cd /opt/votebot && python3 scripts/latency_report.py --log-dir /opt/votebot-logs/queries --days 7     # stdlib only: no network, no keys
+docker exec votebot-ddp-next python scripts/latency_report.py --log-dir /app/logs/queries --days 7     # the same, inside the container
+python3 scripts/latency_report.py --log-dir /opt/votebot-logs/queries --days 7 --json > report-<sha>.json
+```
+
+It prints p50 / p90 / p95 with the sample size for `duration_ms`, `first_token_ms`, `model_call_start` and every phase, cut by page kind,
+live bill lookup, button and saved-answer hit, and says whether the README targets are met (p50 under 2.5 s and p95 under 5 s end to end,
+first token p50 under 1.5 s; `first_token_ms` is measured on the server, so the visitor waits a little longer). A cut with fewer than 20
+messages is marked `(small sample)`: do not draw a conclusion from it. `--skip-button NAME` leaves out one quick-action button.
+Keep one report from before a change and one from after, with the deployed SHAs.
+
+**Read `first_token_ms` and `marks_ms.model_call_start`, not the sum of the phases.** Since VOTEBOT-45 and 47 the retrieval queries and the
+pre-model lookups run at the same time, so phase durations overlap and add up to more than anyone waited. `model_call_start` is the wait
+before the model was even asked (the slowest of retrieval and the lookups); `first_token` minus it is the model's own time to its first
+text. What each `phase_ms` key times (`core/agent.py`):
+
+| `phase_ms` key | What it is | When it is present |
+|---|---|---|
+| `button_cache` | the lookup of a saved quick-action answer in Redis | every streamed message; a hit ends the message here (no other phase) |
+| `retrieval` | all Pinecone work for the message, and the embedding of the query | every miss |
+| `bill_info_prefetch` | the live bill lookup in api-v3 (status, votes) | a vote/status question or a bill named in the message, or low retrieval confidence |
+| `legislator_lookup` | the legislator name lookup in api-v3 (and the party roster) | every message on the canonical-id index |
+| `vote_verification`, `webflow_verification` | verification of a disputed claim | a message detected as a dispute or correction |
+| `org_positions`, `org_bill_positions` | organization positions from the broker | a bill page asking who supports or opposes; an organization page asking which bills |
+| `bill_broker_data` | LegBot's analysis of the bill, the concept poll and the bill's scorecard, from the broker | a bill page that names the bill (the poll and the scorecard only when the question asks) |
+| `legislator_scorecard` | the legislator's scorecard from the broker | a legislator page whose `id` is `ocd-person/<uuid>`, and a question about votes against constituents |
+
+How to read it. A high `model_call_start_ms` with one large phase names the slow dependency: `retrieval` (Pinecone or OpenAI embeddings: check `/health/ready`),
+`bill_info_prefetch` or `legislator_lookup` (api-v3, the replica), or a broker phase. Broker and legislator lookups share one
+**8-second budget per message**, a single broker request waits at most 5 s, and a lookup that fails or runs out of time costs only its
+own context (a warning in the log, `Broker lookup took too long` or `failed`), so a broker phase near 5 to 8 s means the broker is slow or down and the
+answer went out without it. A small `model_call_start_ms` with a late `first_token` is the model. If only the first message after a
+start is slow, look for `Warm-up incomplete` (3.5): what did not warm is paid for by that message. The party roster (federal) is served stale while it refreshes, so only a never-seen
+jurisdiction waits for a download.
+
 ## 4. The website
 
 ### 4.1 Allowed origins
@@ -464,6 +555,8 @@ cd /opt/votebot-logs/queries
 jq -r 'select(.event_type=="message_received") | .client_ip' $(date +%F).jsonl | sort | uniq -c | sort -rn | head
 ```
 
+Slow answers are the other thing to look at weekly: run the latency report in 3.9 and compare it with last week's.
+
 Look for one address sending hundreds of messages, many short sessions from one address, or identical messages. Also
 set a **monthly usage limit and an email alert in the OpenAI dashboard**: it is the one real backstop for cost, needs no
 code, and works whatever the cause. Give the new VoteBot **its own OpenAI project and API key** so the limit applies to
@@ -493,6 +586,15 @@ docker exec votebot-ddp-next python scripts/smoke_ws.py --url wss://mapapp.digit
 the checks; the canonical index must already contain embedded bills, since Pinecone creates a missing index on
 first use and an empty one answers nothing). It prints the index and namespace it read; confirm they are
 `ddp-knowledge-base` and the namespace the new ddp-sync writes, and that an answer never cites old-index content.
+
+**Scorecard answers (VOTEBOT-60), by hand, once the broker serves the routes (1.2).** On a bill page whose `page_context` carries a
+bare `ocd_bill_id` (the websocket drops any other spelling to null), ask "do the legislators' votes line up with their constituents?":
+the answer should speak of DDP's constituent-alignment scorecard (a vote's district choice is the majority of that district's
+constituents on DDP). A legislator page needs `id` = `ocd-person/<uuid>` and a question such as "how often does she vote against her
+district?"; ddp-next sends only the name today (NEXT-77), so this check cannot pass from the site yet. Without the routes, or without
+those ids, VoteBot answers as before from the vote record and the profile, with no error: check the log for `Broker lookup failed` with
+the scorecard `path`. Only a question about alignment fetches a scorecard (`accountab*`, `align*`, `scorecard`, "in line with", or
+voters/constituents/district next to a word about voting).
 
 Failure paths, once, before cutover: stop the broker briefly in a quiet moment (or point `DDP_BROKER_API_ROOT` at a
 closed port and restart) and confirm answers still come, just without organization positions; restart VoteBot in
@@ -530,5 +632,6 @@ organizations from the broker, and the console shows no CORS error. In `docker l
 - [ ] Baseline health table filled in and unchanged after each step
 - [ ] 4.1 production origin supplied and added at cutover; 4.2 widget path documented in `chat-widget/README.md`
 - [ ] Section 5: weekly monitoring owner named; OpenAI usage limit and alert set; Turnstile or a proxied hostname only if needed
+- [ ] 1.2: the scorecard routes answer on the broker the host points at (BROKER-325; not on production as of 2026-10-27), or the gap is written down: answers degrade, nothing breaks
 - [ ] Section 6 verified with real bills, failure paths and the small load check done; rollback rehearsed on the dev site
 - [ ] Hand back to NEXT-36 (which `wsUrl`) and SYNC-92

@@ -81,7 +81,7 @@ Each chunk is a `Chunk` dataclass with: `content`, `index`, `token_count`, `star
 `EmbeddingService` generates vector embeddings:
 
 - **Model:** `text-embedding-3-large` (3072 dimensions)
-- `embed_query(text)` — embeds a single query string, returns `list[float]`
+- `embed_query(text)` — embeds a single query string, returns `list[float]`; a text is embedded once (a repeat or a concurrent call reuses the vector, VOTEBOT-46)
 - `embed_documents(texts)` — batch embeds multiple texts via `embed_batch()`, batches of 100
 - Retries 3 times with exponential backoff on failure
 
@@ -176,6 +176,8 @@ This is the online pipeline triggered when a user sends a message.
 **Package:** `structlog`, `asyncio`, `re`
 
 `VoteBotAgent.process_message_stream()` runs this sequence:
+
+> **Order of execution (VOTEBOT-45, 47):** the steps below are listed in the order their results are used, not run one after another. Retrieval and every lookup that does not need its result (bill info, legislator info, vote verification, org positions, CMS/broker verification, the bill's broker data and scorecard) are started together and awaited after retrieval, and the independent Pinecone queries inside retrieval also run together; the `phase_ms` timings in the query log therefore overlap. On the canonical-id index the org-position and verification steps read ddp-broker-py, not Webflow, and OpenStates data comes only from DDP's own replica (VOTEBOT-59); see `primitives.md` and the runbook (section 3.9).
 
 #### Step 9a: RAG Retrieval
 ```

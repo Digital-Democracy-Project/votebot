@@ -13,12 +13,13 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Context-Aware Responses**: Understands the page context (bill, legislator, organization, general) to provide relevant answers
 - **RAG-Powered**: Uses Pinecone vector database for semantic search and retrieval
 - **Multi-Phase Retrieval**: For bill queries, prioritizes legislative text over CMS summaries, with dedicated phases for organization positions, vote records, and version changelogs. Phase 5 fires on "what changed / what was added / difference" queries and surfaces `bill-changelog` documents (LLM-generated diffs produced by DDP-Sync on each version transition)
-- **Organization-Aware Retrieval**: Scoped retrieval on org pages via `webflow_id`/`slug` filters (mirrors bill/legislator pattern), plus query-based detection for org queries on non-org pages. Fetches all related chunks for complete bill position data
-- **Legislator Slug Resolution**: Automatically resolves legislator slugs from Webflow pages to OpenStates person IDs via Webflow CMS lookup, enabling correct Pinecone filtering even when only the URL slug is available
-- **Webflow CMS Runtime Lookup**: Bidirectional Webflow CMS pre-fetch — fetches authoritative org positions for bill→org queries (99.1%) and bill positions for org→bill queries (100%), bypassing Pinecone similarity thresholds
-- **Legislators live from api-v3 (canonical-id index)**: legislators are not embedded, so a legislator page, or a message about a legislator, is answered from api-v3's `/people` (party, chamber, district, contact, links). A legislator page should pass the OpenStates person id as `id` (`ocd-person/...`); without one, its `title` (the name) and `jurisdiction` are used. On a bill page a name is looked up only when it is probably a person's (two capitalised words such as "Ashley Moody", or any name after a cue like "senator"; acronyms, state names, titles and question words are ignored, so "Summarize this bill" makes no call); on other pages the message must also say "senator", "representative", "legislator" and the like. All the live lookups for one message (legislators and the broker) share one 8-second budget. Several matches are listed so the bot asks which one (with the total when api-v3 has more than it returned); if api-v3 is slow or failing the model is told the records could not be retrieved and must not state a legislator's role or contact details from memory. Votes still come from the live bill lookup.
+- **Organization-Aware Retrieval**: Scoped retrieval on org pages via `webflow_id`/`slug` filters on the legacy index, or `broker_org_id` on the canonical-id index (mirrors bill/legislator pattern), plus query-based detection for org queries on non-org pages. Fetches all related chunks for complete bill position data
+- **Legislator Slug Resolution (legacy index only)**: Automatically resolves legislator slugs from Webflow pages to OpenStates person IDs via Webflow CMS lookup, enabling correct Pinecone filtering even when only the URL slug is available
+- **Webflow CMS Runtime Lookup (legacy index only)**: Webflow is deprecated. VoteBot 3.0 (the canonical-id index, ddp-next) never consults it, and the legacy mode is removed by VOTEBOT-17. Bidirectional Webflow CMS pre-fetch — fetches authoritative org positions for bill→org queries (99.1%) and bill positions for org→bill queries (100%), bypassing Pinecone similarity thresholds
+- **Legislators live from api-v3 (canonical-id index)**: legislators are not embedded, so a legislator page, or a message about a legislator, is answered from api-v3's `/people` (party, chamber, district, contact, links). A legislator page should pass the OpenStates person id as `id` (`ocd-person/<uuid>`); without one, its `title` (the name) and `jurisdiction` are used. On a bill page a name is looked up only when it is probably a person's (two capitalised words such as "Ashley Moody", or any name after a cue like "senator"; acronyms, state names, titles and question words are ignored, so "Summarize this bill" makes no call); on other pages the message must also say "senator", "representative", "legislator" and the like. All the live lookups for one message (legislators and the broker) share one 8-second budget. Several matches are listed so the bot asks which one (with the total when api-v3 has more than it returned); if api-v3 is slow or failing the model is told the records could not be retrieved and must not state a legislator's role or contact details from memory. Votes still come from the live bill lookup.
 - **Positions from the broker (canonical-id index)**: organization positions on a bill, a bill-page organization's bills, and organization details on a dispute come from ddp-broker-py's public reads (`/api/bill-organization-positions/current/`, `/api/organizations/{id}/positions/`, `/api/organizations/{id}/`), not Webflow. Needs `DDP_BROKER_API_ROOT`; a broker problem costs the enrichment, never the answer
-- **Webflow CMS Verification on Disputes**: When users challenge information, fetches authoritative details from Webflow CMS for the current page entity (bill facts, legislator party/chamber/district, org type/website) and injects as high-priority context
+- **Webflow CMS Verification on Disputes (legacy index only)**: On the canonical-id index a dispute verifies only organizations, from the broker. When users challenge information, fetches authoritative details from Webflow CMS for the current page entity (bill facts, legislator party/chamber/district, org type/website) and injects as high-priority context
+- **DDP data on bill and legislator pages (canonical-id index)**: a bill page is answered with ddp-broker-py's LegBot analysis, its concept poll and DDP's constituent-alignment scorecard; a legislator page, with the scorecard when the page carries the person id. See [Broker data on bill and legislator pages](#broker-data-on-bill-and-legislator-pages-canonical-id-index)
 - **Bill Info Tool**: Real-time OpenStates lookups for full bill details (status, sponsors, votes) on bills not in the RAG system
   - Automatic jurisdiction detection from message text ("Virginia HB 2724" → VA)
   - Session year fallback (tries current year, then previous 2 years)
@@ -30,7 +31,7 @@ VoteBot 2.0 is a RAG-powered chatbot API that provides intelligent, context-awar
 - **Human Handoff**: Supports seamless handoff to human agents when needed via Slack
 - **Multi-Source Data**: RAG index is built from Congress.gov, OpenStates, Webflow CMS, and custom sources — ingestion itself is handled by [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync), a standalone service
 - **Data Sync**: Content ingestion (bills, legislators, orgs), sync handlers, CLI tooling, and scheduled jobs all live in [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) — VoteBot itself is chat/RAG-only and contains no ingestion code
-- **High Performance**: Designed for 1000+ concurrent conversations
+- **High Performance**: Designed for 1000+ concurrent conversations. Retrieval queries and the pre-model lookups run concurrently, and each message's per-phase timings are logged; see [Latency](#latency)
 
 ## Tech Stack
 
@@ -93,18 +94,18 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `PINECONE_INDEX_NAME` | Pinecone index name (default: `votebot-large`). **Also decides how bills are filtered in retrieval:** `votebot-large` is keyed by `webflow_id`; exactly `ddp-knowledge-base` (the name in `CANONICAL_PINECONE_INDEX_NAME`, overridable with `CANONICAL_PINECONE_INDEX_NAME`) is keyed by `ocd_bill_id`. The value is stripped and lowercased, and empty means unset. Any other name keeps `webflow_id` retrieval and logs a startup warning. The startup log shows the index and the chosen key. Switching the index, or rolling back, is this one setting. | Yes |
 | `PINECONE_NAMESPACE` | Pinecone namespace (default: default) | No |
 | `API_KEY` | API key for authentication | Yes |
-| `WEBFLOW_VOTEBOT_API_KEY` | Webflow CMS API key (read-only, used at query time by `/content/resolve` and runtime CMS lookups) | Yes |
+| `WEBFLOW_VOTEBOT_API_KEY` | Webflow CMS API key (read-only, used at query time by `/content/resolve` and runtime CMS lookups) | Legacy index only (VoteBot 3.0 never reads it) |
 | `WEBFLOW_SCHEDULER_API_KEY` | Webflow CMS API key with CMS:write scope (not currently read by any VoteBot code path — used by DDP-Sync for gov-url updates) | No |
-| `WEBFLOW_BILLS_COLLECTION_ID` | Webflow bills collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
-| `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
-| `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection (used by `/content/resolve` and runtime CMS lookups) | Yes |
+| `WEBFLOW_BILLS_COLLECTION_ID` | Webflow bills collection (used by `/content/resolve` and runtime CMS lookups) | Legacy index only (VoteBot 3.0 never reads it) |
+| `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection (used by `/content/resolve` and runtime CMS lookups) | Legacy index only (VoteBot 3.0 never reads it) |
+| `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection (used by `/content/resolve` and runtime CMS lookups) | Legacy index only (VoteBot 3.0 never reads it) |
 | `VOTEBOT_DETERMINISTIC_CITATIONS` | When the model writes no `[Source: ...]`, cite the page's own retrieved chunks (those carrying the bill's / organization's id) that the answer shares distinctive words with (VOTEBOT-21; `core/citations.py`). A general page, a greeting, a refusal or an answer that says it does not know gets none. `false` returns only the citations the model wrote | No (default `true`) |
 | `DDP_SITE_BASE_URL` | Base URL of our own site (ddp-next), e.g. `https://digitaldemocracyproject.org`. On the canonical-id index, bill sources and citations link to `{base}/explore/{JURISDICTION}/{SESSION}/{IDENTIFIER}` instead of the legislature's URL (that page links to the legislature). No default host: unset leaves links unchanged | No |
-| `DDP_BROKER_API_ROOT` | Base URL of ddp-broker-py. `/content/resolve` uses its public bill endpoints to turn a ddp-next bill URL into an OpenStates bill id. No code default; unset means ddp-next URLs return 503 (Webflow URLs are unaffected) | For ddp-next bill URLs |
+| `DDP_BROKER_API_ROOT` | Base URL of ddp-broker-py. `/content/resolve` uses its public bill endpoints to turn a ddp-next bill URL into an OpenStates bill id, and the chat reads organization positions, LegBot analysis, concept polls and scorecards from it. No code default; unset means ddp-next URLs return 503 (Webflow URLs are unaffected) and no broker data reaches an answer | For ddp-next bill URLs |
 | `CONGRESS_API_KEY` | Congress.gov API key | For federal bills |
-| `DDP_OPENSTATES_API_ROOT` | Base URL of DDP's OpenStates replica: ddp-api's proxy, or api-v3 itself. **Required**: VoteBot reads OpenStates only from the replica, never from the public API, and refuses to start without this and the credential below. No hardcoded fallback | Yes |
+| `DDP_OPENSTATES_API_ROOT` | Base URL of DDP's OpenStates replica: ddp-api's proxy, or api-v3 itself. **Required**: VoteBot reads OpenStates only from the replica, never from the public API; a root on `openstates.org` (or a subdomain) is refused, and the app refuses to start without this and the credential below. No hardcoded fallback. `/health/ready` reports the replica as `ddp_openstates_replica` | Yes |
 | `DDP_OPENSTATES_AUTH_HEADER` | How the credential below is sent: `bearer` (default, for ddp-api's proxy) or `x-api-key` (api-v3 itself accepts only `X-API-Key` and answers 403 to a Bearer token). Exactly one shape is ever sent | No |
-| `DDP_OPENSTATES_BEARER_TOKEN` | The credential for the replica: a ddp-api key for its proxy (`Authorization: Bearer ...`) or api-v3's key (`X-API-Key`), per the setting above. The two shapes must never both be sent on the same request | Yes |
+| `DDP_OPENSTATES_BEARER_TOKEN` | The credential for the replica: a ddp-api key for its proxy (`Authorization: Bearer ...`) or api-v3's key (`X-API-Key`), per the setting above. The two shapes must never both be sent on the same request. Missing or empty: the app does not start | Yes |
 | `TAVILY_API_KEY` | Tavily API key for web search fallback | For web search |
 | `REDIS_URL` | Redis connection URL (cross-worker handoff state) | For multi-worker |
 | `SLACK_BOT_TOKEN` | Slack Bot Token (xoxb-...) | For handoff |
@@ -169,6 +170,8 @@ GET /votebot/v1/health/ready # Readiness check (verifies dependencies)
 GET /votebot/v1/health/live  # Liveness check
 ```
 
+`/health/ready` reports `pinecone`, `openai`, `ddp_openstates_replica` (the replica's `/healthz`) and `redis` (`unavailable`, not a failure, when Redis is not reachable). The OpenAI check is a real completion so that readiness means chat can be served, but it makes **at most one model call a minute** (a healthy result is kept 60 s, a failure 10 s), however often the endpoint is polled.
+
 ### WebSocket
 
 ```
@@ -176,6 +179,8 @@ WS /ws/chat?session_id={session_id}
 ```
 
 Real-time streaming chat with human handoff support.
+
+The page context in the payload may carry `ocd_bill_id` (a ddp-next bill page) and, on a legislator page, `id` as `ocd-person/<uuid>`. **`ocd_bill_id` is the bare OpenStates UUID only**: a prefixed (`ocd-bill/...`) or malformed value is dropped, not repaired, and the bill is then not pinned. A new page-context key must be added to `_page_context_from_payload` in `api/routes/websocket.py`, or it is silently dropped.
 
 ### Content Resolution
 
@@ -189,8 +194,8 @@ Two kinds of bill URL are understood:
 
 - **ddp-next** (`/explore/{jurisdiction}/{session}/{gov_id}` — the new site's bill page, gov_id URL-encoded, e.g. `HB%20219` — or `/bills/{broker_id}` or `/bills/{jurisdiction}/{session}/{gov_id}`): resolved through ddp-broker-py (`DDP_BROKER_API_ROOT`) to the bill's OpenStates id. ddp-broker-py has no bill-detail endpoint, so this uses its public `/api/bills/{id}/scorecard/` (broker id to jurisdiction, session and gov_id) and `/api/bills/resolve/` (those three to the bare OpenStates UUID). The result is the page context the widget sends back with each message; retrieval filters on its `ocd_bill_id` when the index is the canonical-id one (see `PINECONE_INDEX_NAME`). Errors: 404 unknown bill (the broker said so), 502 broker problem, a non-JSON or non-object broker body, or a broker answer without a valid bare UUID, 503 `DDP_BROKER_API_ROOT` unset. A bill that exists in OpenStates but has no row in the broker is a 404 here, since `/api/bills/resolve/` only knows the broker's bills.
 
-ddp-next **legislator** (`/legislators/{numeric id}`) and **organization** URLs are not resolved yet and still take the Webflow path: the broker has no public endpoint that returns a legislator's OpenStates person id (its list and scorecard endpoints do not carry it), and ddp-next has no organization page. Revisit when the broker exposes the id. **Known open bug (VOTEBOT-31):** on the new deployment there is no Webflow collection (`WEBFLOW_*` unset by design), so such a URL ends in a 500 ("Webflow collection not configured for organization") instead of a clear 4xx; the widget builds an organization page context by hand (`{"type": "organization", "id": "<broker pk>"}`), which works.
-- **Webflow** (`/bills/{slug}`): looked up in the Webflow CMS as before, returning `webflow_id`. Kept until Webflow is retired, and it is what a rollback to `votebot-large` relies on.
+ddp-next **legislator** (`/legislators/{numeric id}`) and **organization** URLs are not resolved yet and still take the Webflow path. `/content/resolve` has no code for a legislator URL: it does not call the broker for one. The broker's `/api/legislators/{id}/scorecard/` response does carry the legislator's OpenStates id (`legislator.openstatesId`; checked on the dev broker 2026-10-27), so the id can now be had, but ddp-next does not send it as the page's `id` yet (NEXT-77); until it does, a legislator page is answered by name lookup, without the scorecard. ddp-next has no organization page. **Known open bug (VOTEBOT-31):** on the new deployment there is no Webflow collection (`WEBFLOW_*` unset by design), so such a URL ends in a 500 ("Webflow collection not configured for organization") instead of a clear 4xx; the widget builds an organization page context by hand (`{"type": "organization", "id": "<broker pk>"}`), which works.
+- **Webflow** (`/bills/{slug}`): looked up in the Webflow CMS as before, returning `webflow_id`. Webflow is deprecated and VoteBot 3.0 never consults it. This path is kept only for a rollback to `votebot-large`, and is removed with the legacy mode by VOTEBOT-17.
 
 **Example (Webflow):**
 ```bash
@@ -447,6 +452,23 @@ The bill info tool returns:
   - Party breakdown (Democratic/Republican counts)
   - Individual legislator names grouped by party and vote
 
+## Broker data on bill and legislator pages (canonical-id index)
+
+On the canonical-id index, a bill or legislator page is answered with data from ddp-broker-py (`DDP_BROKER_API_ROOT`) appended after the retrieved sources. Details and the code names are in [primitives.md](primitives.md); in short:
+
+| Page | Data | When it is fetched | Keyed by |
+|------|------|--------------------|----------|
+| Bill | LegBot analysis (summary, pros and cons, impact) of the current version | Every message on a bill page that names the bill | jurisdiction + session + identifier |
+| Bill | Concept poll with tallies | Only when the message asks about polls, surveys or what people think | jurisdiction + session + identifier |
+| Bill | DDP constituent-alignment scorecard (`GET /api/bills/{uuid}/scorecard/`) | Only when the message asks about alignment (see below) | `page_context.ocd_bill_id`, bare UUID |
+| Legislator | The same scorecard (`GET /api/legislators/{uuid}/scorecard/`) | Only when the message asks about alignment, a score, or voting with their district | `page_context.id` = `ocd-person/<uuid>` |
+
+- **The alignment question gate** (`asks_about_alignment`): "accountability", "aligned/alignment", "scorecard" and "in line with" count on their own; "constituents", "district" or "voters" count only next to a word about voting or wanting, so "which districts does this bill affect?" is not a scorecard question. On a legislator page "score" and "vote with" also count; "what district do they represent?" is a profile question.
+- **No id, no call.** The scorecard routes take only the bare, hyphenated UUID, so a bill page without a usable `ocd_bill_id`, or a legislator page whose `id` is not `ocd-person/<uuid>`, makes no scorecard request. A legislator page without the id is answered as before, by name through api-v3.
+- **Size cap.** Scorecards are large (76 KB for a bill's two motions, 400 KB for a long-serving legislator), so only counts and a short list are kept: for a bill, the first 5 legislators who went against their district in each of the first 4 motions; for a legislator, the counts, the alignment score and the 5 most recent votes against their district and 3 with it (about 1.5 KB each).
+- **What wins over the scorecard.** The scorecard lists only one motion per chamber, and a district's choice is the majority of its constituents on DDP. For what happened in a vote, the live vote record wins; for a legislator's current role, the api-v3 profile wins. The formatted block says so.
+- **Provenance and failure.** The analysis is labelled AI, staff or partly each, per part. Each broker lookup has its own time budget inside the message's shared 8-second one, so a slow or failing one costs only its own context, never the answer.
+
 ## Legislator Voting Records
 
 VoteBot maintains a reverse index of legislator voting records, enabling queries like "How did Ashley Moody vote on HR 1?" to find answers directly in the legislator's voting record document.
@@ -505,7 +527,7 @@ On the `ddp-knowledge-base` index every version of a bill is embedded, so retrie
 
 - **Current by default.** For a bill page VoteBot asks api-v3 (`/bills/ocd-bill/{uuid}?include=versions`, cached 120 s; a failed lookup is remembered 45 s and the call times out after 3 s) which version is current and filters `bill-text` to that version's `document_id`. "Current" is looked up per request, never stored on vectors. It is the latest classifiable version (stage not `unknown`); if that version has no archived text yet there is no current version, rather than an older one being called current.
 - **Named versions.** A question naming a stage ("as introduced", "the engrossed version", "the text as enrolled", "as enacted"; bare "engrossed"/"enrolled"/"chaptered" count only with "version", "text", "draft" or "as", since "is it enrolled yet?" is a status question) or a date together with the word "version" or "draft" ("the version from March 4, 2026") is answered from those versions instead; stages are api-v3's `introduced / amendment / chamber_passage / final_passage / enacted`.
-- **What changed.** Diffs are not in the index: a changelog question reads api-v3's stored `diff_from_previous_version` live (the current version's, or the named version's), labelled with both versions and cut to 12,000 characters per version with a note when cut. Every classifiable version has a stored diff (api-v3, since OPEN-118) except a bill's first version and any whose predecessor has no saved text, and for those the answer says it cannot show the change. Diffs together are capped at 12,000 characters, and what is omitted is said. If api-v3 cannot be reached the model is told so and must say it could not retrieve the change, rather than describe it from memory; a version with no stored diff is told apart from an outage. A diff is only used when the version before it (api-v3's own lineage: classifiable versions in order) has archived text, so it is never labelled with the wrong comparison. Needs `USE_DDP_OPENSTATES_REPLICA`.
+- **What changed.** Diffs are not in the index: a changelog question reads api-v3's stored `diff_from_previous_version` live (the current version's, or the named version's), labelled with both versions and cut to 12,000 characters per version with a note when cut. Every classifiable version has a stored diff (api-v3, since OPEN-118) except a bill's first version and any whose predecessor has no saved text, and for those the answer says it cannot show the change. Diffs together are capped at 12,000 characters, and what is omitted is said. If api-v3 cannot be reached the model is told so and must say it could not retrieve the change, rather than describe it from memory; a version with no stored diff is told apart from an outage. A diff is only used when the version before it (api-v3's own lineage: classifiable versions in order) has archived text, so it is never labelled with the wrong comparison. Needs the replica (`DDP_OPENSTATES_API_ROOT`).
 - **Display.** Chunks are grouped by version under a header like `HB 1 · Engrossed · 2026-03-04 · current`, and the prompt requires every claim to name its version.
 - **Needs DDP's api-v3 (the replica).** The version fields exist only there. If api-v3 cannot be reached, no version filter is applied: the bill's chunks come back from every version, each labelled with its own, and the context says no version is current so the answer must not pick one silently. A version that is asked for (or the current one) but has no text in the index returns nothing rather than other versions.
 
@@ -621,11 +643,14 @@ votebot/
 │   │   ├── web_search.py    # Tavily web search
 │   │   ├── bill_votes.py    # Bill votes lookup (OpenStates)
 │   │   ├── button_cache.py  # Redis-backed quick-action button cache
-│   │   ├── webflow_lookup.py # Runtime Webflow CMS lookup (bill→org + org→bill + verification + gov-url write)
+│   │   ├── webflow_lookup.py # Legacy index only: runtime Webflow CMS lookup (bill→org + org→bill + verification + gov-url write)
+│   │   ├── broker_lookup.py # ddp-broker-py reads: org positions, LegBot analysis, concept poll, scorecards
+│   │   ├── openstates_client.py # OpenStates request routing: DDP replica only, auth header shape
 │   │   ├── redis_store.py   # Redis client for cross-worker state (thread mapping + pub/sub + active jurisdictions + bill version cache)
 │   │   ├── query_logger.py  # Event & query logger (JSONL, date-partitioned, 3 event types)
 │   │   └── slack.py         # Slack human handoff
 │   └── utils/               # Utility modules
+│       ├── timings.py       # Per-message phase timings for the query log
 │       ├── legislative_calendar.py  # Session date lookup (live OpenStates + hardcoded fallback)
 │       ├── federal_legislator_cache.py  # Federal legislator ID cache (only sync-adjacent file VoteBot still owns)
 │       └── intent.py         # Two-level intent classification (primary + sub) with controlled enums
@@ -638,7 +663,8 @@ votebot/
 │   ├── test_rag_bills.py        # Bill-focused RAG tests
 │   ├── test_rag_legislators.py  # Legislator-focused RAG tests (with page_context)
 │   ├── test_rag_organizations.py # Organization-focused RAG tests
-│   └── evaluate_production.py    # Offline evaluation of production query logs
+│   ├── evaluate_production.py    # Offline evaluation of production query logs
+│   └── latency_report.py         # Percentiles of the query log's timing fields against the targets
 ├── tests/
 │   ├── unit/
 │   ├── integration/
@@ -819,6 +845,11 @@ Three event types, all written to the same date-partitioned JSONL files:
 | `device_type` | `desktop`, `mobile`, or `tablet` (derived from User-Agent) |
 | `entry_referrer` | Referring domain (first message per session only, null by design thereafter) |
 | `page_url` / `scroll_depth` / `time_on_page` | Page engagement data from widget |
+| `first_token_ms` | Milliseconds from the agent starting the message to its first text (VOTEBOT-44; omitted when unset) |
+| `phase_ms` | Per-phase durations in ms (for example `retrieval`, `button_cache`, `bill_broker_data`, `legislator_lookup`). Phases overlap, so they do not add up to the wait |
+| `marks_ms` | Milliseconds since the message started at `model_call_start` and `first_token` |
+
+The timing fields are written by the streaming path; the non-streaming `POST /chat` is not instrumented. Read the wait before the model from `marks_ms.model_call_start`, not by summing `phase_ms`.
 
 ### Conversation Boundaries
 
@@ -887,6 +918,19 @@ A guided opinion-elicitation system — capturing voter opinions on legislation 
 | First Token (streaming) | < 1.5 seconds |
 | Availability | 99.9% uptime |
 | Concurrency | 1,000+ simultaneous |
+
+### Latency
+
+What keeps the wait before the model short (VOTEBOT-45 to 51; the code names are in [primitives.md](primitives.md)):
+
+- Independent retrieval queries of a message run concurrently, and a message's text is embedded once (a bounded in-memory cache of 128 query embeddings, plus sharing of a request still in flight).
+- On the streaming path, the lookups that do not read retrieval's result (bill info, legislator, broker data, organization positions, dispute verification) start together with retrieval and share one 8-second budget, so the wait is the slowest, not the sum.
+- The party roster used for vote breakdowns is refreshed in the background (served stale after 1 hour, one refresh per jurisdiction), and the federal one is fetched at startup.
+- At startup, Pinecone and the embedding client are warmed in a background task that never delays or stops startup.
+- One long-lived HTTP client serves OpenStates and Congress.gov, and a bill missing from the asked session is looked up in older sessions together.
+- `/health/ready` makes at most one model call a minute.
+
+Per-phase timings are in the query log (see `query_processed` above); `scripts/latency_report.py` reads them.
 
 ### Measured (VOTEBOT-53, dev, 2026-10-27)
 

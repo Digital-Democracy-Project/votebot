@@ -39,6 +39,7 @@ This document captures common issues, diagnostic procedures, and solutions for V
 - [Nightly Bill Sync Skips Bills for Certain States](#nightly-bill-sync-skips-bills-for-certain-states)
 - [Stale Bill Status Data (HR 7147 Incident)](#stale-bill-status-data-hr-7147-incident)
 - [Missing Line Breaks in LLM Responses](#missing-line-breaks-in-llm-responses)
+- [Start-up, Slow Answers and Scorecards (new index, VOTEBOT-44 to 60)](#start-up-slow-answers-and-scorecards-new-index-votebot-44-to-60)
 
 ---
 
@@ -3006,7 +3007,7 @@ VoteBot logs all production queries and LLM responses to date-partitioned JSONL 
 
 ### Log Files Not Being Written
 
-**Symptoms:** No files appear in `logs/queries/`.
+**Symptoms:** No files appear in `logs/queries/` (in the production container the directory is `/app/logs/queries`, which is `/opt/votebot-logs/queries` on the host; startup logs an ERROR, "Query log directory is NOT writable", when the app user cannot write it).
 
 **Check:**
 1. Verify `QUERY_LOG_ENABLED` is not set to `false` in `.env`
@@ -3046,6 +3047,10 @@ To check if the server is handling load well, look for:
 - P95 latency consistently above 5 seconds (target: < 5s)
 - Increasing average latency over time (indicates resource pressure)
 - Low confidence scores clustered at specific times (indicates retrieval issues)
+
+### Where the time goes
+
+Streamed answers also log `first_token_ms`, `marks_ms` and `phase_ms` (VOTEBOT-44). `python3 scripts/latency_report.py --log-dir <dir> --days 7` summarises them against the README targets; the keys and how to read them are in the runbook, section 3.9 (and see [Start-up, Slow Answers and Scorecards](#start-up-slow-answers-and-scorecards-new-index-votebot-44-to-60) below). This is separate from `evaluate_production.py`, which scores answer quality.
 
 ### Disk Space
 
@@ -3715,6 +3720,40 @@ All of these were found on the new index (`ddp-knowledge-base`) in October 2026.
 ### Local dev copy will not start or answers look empty
 
 `curl localhost:8010/votebot/v1/health/ready` names the dependency that is down (pinecone, openai, ddp_openstates_replica, redis). Port 8000 is CAMS on the Mac Studio, so VoteBot uses 8010; its Redis is the `votebot-dev-redis` container on `127.0.0.1:6380`, never the CAMS Redis. FL HB 7089 is not in the dev broker; use FL 2026E HB 5601E. A real `.env` in the repo directory is read by any test that builds `Settings()` without `_env_file=None`: that is a test bug, not a VoteBot bug.
+
+---
+
+## Start-up, Slow Answers and Scorecards (new index, VOTEBOT-44 to 60)
+
+For the new deployment (`ddp-knowledge-base`, canonical ids). The container log is `docker logs votebot-ddp-next`; the runbook's sections 3.3, 3.5 and 3.9 hold the procedures.
+
+### VoteBot will not start: `DDP_OPENSTATES_API_ROOT` or `DDP_OPENSTATES_BEARER_TOKEN`
+
+**Symptom:** the container exits (or restarts over and over in `docker ps`) and the log ends in a `RuntimeError` such as `DDP_OPENSTATES_API_ROOT is not set`, `DDP_OPENSTATES_BEARER_TOKEN must be set` or `DDP_OPENSTATES_API_ROOT points at the public OpenStates API`; no `VoteBot started` line.
+
+**Cause:** since VOTEBOT-59 the startup (`check_openstates_config`, first thing in the lifespan) refuses to run without the DDP replica's root and its credential, and refuses a root on `openstates.org` or any of its subdomains. There is no public-API fallback and no setting for one, on purpose. A token that is only spaces counts as missing. **Fix:** set both in the `.env` (production: `render-env.sh` and `prod.env.defaults` supply them, runbook 3.3.1), and use the replica's address, e.g. api-v3 with `DDP_OPENSTATES_AUTH_HEADER=x-api-key`. Anything that runs the app's lifespan without them (a test using the real app, say) fails the same way.
+
+### First answer after a start is slow, or the log says `Warm-up incomplete`
+
+At startup VoteBot warms Pinecone and the embedding client in the background (VOTEBOT-49), so it never delays the start. `Warm-up finished` is the normal outcome; `Warm-up incomplete` or `Warm-up failed` lists `failed=[pinecone|embeddings]`, and the first chat pays for what did not warm. `pinecone_index_found=False` means the configured index does not exist (the warm-up only reads and never creates it): check `PINECONE_INDEX_NAME` (runbook 3.5).
+
+### `/health/ready` says `openai` healthy but chat fails, or shows a stale failure
+
+`/health/ready` makes a real model call, but at most one a minute (VOTEBOT-51): a success is kept for 60 s and a failure for 10 s, and simultaneous checks share one call. A key revoked a few seconds ago can still read `healthy` for up to a minute; a recovery can read `unhealthy` for up to 10 s. Pinecone, the replica and Redis are checked on every call. Container health checks use `/health/live` (answers `alive`, checks nothing), not `/ready`.
+
+### Answers are slow
+
+Read `first_token_ms` and `marks_ms.model_call_start` in the query log (or the `Streaming timings` log line), not the sum of `phase_ms`: the lookups run at the same time as retrieval, so phases overlap. The phase with the largest value names the slow dependency (`retrieval`: Pinecone or embeddings; `bill_info_prefetch`, `legislator_lookup`: api-v3; `bill_broker_data`, `org_positions`, `legislator_scorecard`: the broker). The table of keys is in runbook 3.9; `scripts/latency_report.py` gives the percentiles. Broker and legislator lookups share an 8 s budget per message and one request waits at most 5 s; a lookup that fails or times out is logged (`Broker lookup took too long`, `Broker lookup failed`, `Lookup failed; answering without it`) and the answer goes out without it.
+
+### A bill page's answer says it has no alignment or scorecard data
+
+**Symptom:** on a bill page the user asks how the legislators' votes compare with their constituents (alignment, accountability, scorecard) and the answer is generic or says it has no such data.
+
+**Causes, in the order to check:** (1) the page's `ocd_bill_id` is missing or not a **bare** UUID. The websocket accepts only `str(UUID(...))` and turns any other form (including `ocd-bill/<uuid>`) into null, and the scorecard is read only by that id; `/content/resolve` returns a valid one for ddp-next URLs, a page that sets `pageContext` by hand must send it. (2) The broker the host points at (`DDP_BROKER_API_ROOT`) does not serve `GET /api/bills/{uuid}/scorecard/` (BROKER-325: on the dev broker, not on the production broker as of 2026-10-27). The log then has `Broker lookup failed` with that `path`; the lookup returns nothing and VoteBot answers as it did before, with no error. Test the route with the curl in runbook 1.2. (3) The question did not match the gate: only `accountab*`, `align*`, `scorecard`, "in line with", or constituents/district/voters next to a word about voting fetch it ("which districts does this bill affect?" does not). (4) `DDP_BROKER_API_ROOT` is empty or the index is not the canonical one: no broker lookup is made.
+
+### A legislator page never uses the scorecard
+
+**Cause:** the scorecard of a legislator is fetched only when the page's `id` is `ocd-person/<uuid>` (a bare UUID also works) and the question asks about alignment, "score", or how often they vote with their district (`_wants_legislator_scorecard`). ddp-next sends only the name and jurisdiction today (NEXT-77), so on the site the name lookup (`_legislator_context_from_api_v3`) answers and there is no `legislator_scorecard` key in `phase_ms`. To test, send `page_context.id` as `ocd-person/<uuid>` over the websocket. The legislator route `GET /api/legislators/{uuid}/scorecard/` must also exist on the broker (same BROKER-325 caveat as above).
 
 ---
 
