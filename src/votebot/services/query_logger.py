@@ -11,6 +11,7 @@ import aiofiles
 import structlog
 
 from votebot.config import get_settings
+from votebot.utils.page_address import page_address
 
 logger = structlog.get_logger()
 
@@ -58,6 +59,12 @@ class QueryLogger:
             self._ensure_dir()
             now = datetime.now(timezone.utc)
             log_file = self._log_path(now)
+            # The page address is logged without its query string, fragment and credentials (VOTEBOT-63): the
+            # entry also holds the client's ip, user agent and visitor id, and an address can carry a token
+            if "page_url" in entry:
+                entry = {**entry, "page_url": page_address(entry["page_url"])}
+            if isinstance(entry.get("page_context"), dict) and "url" in entry["page_context"]:
+                entry = {**entry, "page_context": {**entry["page_context"], "url": page_address(entry["page_context"]["url"])}}
             # Strip None values to keep entries compact
             clean = {k: v for k, v in entry.items() if v is not None}
             line = json.dumps(clean, default=str) + "\n"

@@ -596,7 +596,7 @@
                     // Notify server so it injects a system note for the LLM
                     DDPWebSocket.send({
                         type: 'context_update',
-                        payload: { page_context: pageContext }
+                        payload: { page_context: DDPChat.contextForServer(pageContext) }
                     });
                 }
                 return;

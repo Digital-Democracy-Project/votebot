@@ -169,6 +169,10 @@ GET /votebot/v1/content/resolve?url=https://digitaldemocracyproject.org/bills/on
 - Legislators: `/legislators/{slug}`
 - Organizations: `/member-organizations/{slug}`
 
+### The page address the widget sends
+
+An address can carry a sign-in token or personal data in its query string or fragment, so the widget sends only **origin and path** (no query string, fragment or credentials), both as `page_url` on every message and as the `url` inside `page_context` (whichever mode set it: auto-detection, `?ddp_type=`, a `?ddp_url=` link resolved by `/content/resolve`, or the host page). The backend reduces what it receives the same way before logging or posting it (`utils/page_address.py`), because an embedded older bundle keeps sending the full address. Reading `?ddp_url=` and `?ddp_*` parameters to build a context is unchanged: that is input. The old server's frozen `legacy-webflow` copy (below) does not have this until the Voatz page moves to VoteBot 3.0 (VOTEBOT-54).
+
 ## Session Persistence
 
 The widget persists chat sessions across full-page navigations within the same browser tab using `sessionStorage`. This is critical for multi-page sites like Webflow where every link click triggers a full page reload.
