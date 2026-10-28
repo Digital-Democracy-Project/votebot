@@ -10,6 +10,7 @@ from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 
 from votebot.config import get_settings
+from votebot.utils.page_address import page_address
 
 logger = structlog.get_logger()
 
@@ -295,7 +296,7 @@ class SlackService:
         page_title = page_context.get("title", "N/A")
         page_id = page_context.get("id", "")
         jurisdiction = page_context.get("jurisdiction", "")
-        page_url = page_context.get("url", "")
+        page_url = page_address(page_context.get("url"))  # no query string, fragment or credentials (VOTEBOT-63)
 
         # Build page info line
         page_info_parts = [f"*Page Type:* {page_type}"]

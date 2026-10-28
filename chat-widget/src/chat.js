@@ -19,6 +19,40 @@ const DDPChat = (function() {
         }
     }
 
+    /**
+     * An address without its query string, fragment and credentials: all the server may keep (VOTEBOT-63).
+     * A page address can carry a sign-in token or personal data, and an address is logged and posted to Slack.
+     * @param {string} value - An address
+     * @returns {string|null} "origin/path", or null when it is not an http(s) address
+     */
+    function pageAddress(value) {
+        try {
+            var address = new URL(value);
+            if (address.protocol !== 'https:' && address.protocol !== 'http:') return null;
+            return address.origin + address.pathname;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * The page context as it is sent: its url (set by auto-detection, a ?ddp_url= link, the host page
+     * or /content/resolve) reduced to origin and path.
+     * @param {Object} context - A page context
+     * @returns {Object} The context, or a copy with the url reduced (or left out when it is not an address)
+     */
+    function contextForServer(context) {
+        if (!context || typeof context.url !== 'string') return context;
+        var copy = Object.assign({}, context);
+        var address = pageAddress(context.url);
+        if (address) {
+            copy.url = address;
+        } else {
+            delete copy.url;
+        }
+        return copy;
+    }
+
     function _getScrollDepth() {
         try {
             var scrollTop = window.pageYOffset || document.documentElement.scrollTop;
@@ -74,9 +108,9 @@ const DDPChat = (function() {
         // Build payload with analytics fields
         var msgPayload = {
             message: message,
-            page_context: pageContext,
+            page_context: contextForServer(pageContext),
             visitor_id: DDPWebSocket.getVisitorId(),
-            page_url: window.location.href,
+            page_url: pageAddress(window.location.href),
             scroll_depth: _getScrollDepth(),
             time_on_page: _getTimeOnPage()
         };
@@ -277,6 +311,7 @@ const DDPChat = (function() {
         setPageContext: setPageContext,
         getPageContext: getPageContext,
         getIsStreaming: getIsStreaming,
-        getHandoffActive: getHandoffActive
+        getHandoffActive: getHandoffActive,
+        contextForServer: contextForServer
     };
 })();

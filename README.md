@@ -857,7 +857,7 @@ Three event types, all written to the same date-partitioned JSONL files:
 | `error` / `error_type` | Whether processing failed and error category |
 | `device_type` | `desktop`, `mobile`, or `tablet` (derived from User-Agent) |
 | `entry_referrer` | Referring domain (first message per session only, null by design thereafter) |
-| `page_url` / `scroll_depth` / `time_on_page` | Page engagement data from widget |
+| `page_url` / `scroll_depth` / `time_on_page` | Page engagement data from widget. `page_url` (and a `url` inside `page_context`) is logged as origin and path only, with no query string, fragment or credentials, since an address can carry a token and the entry also holds the client's ip and visitor id (VOTEBOT-63) |
 | `first_token_ms` | Milliseconds from the agent starting the message to its first text (VOTEBOT-44; omitted when unset) |
 | `phase_ms` | Per-phase durations in ms (for example `retrieval`, `button_cache`, `bill_broker_data`, `legislator_lookup`). Phases overlap, so they do not add up to the wait |
 | `marks_ms` | Milliseconds since the message started at `model_call_start` and `first_token` |
