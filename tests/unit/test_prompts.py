@@ -72,13 +72,13 @@ class TestBuildSystemPrompt:
             "content": "text",
             "metadata": {
                 "source": "OpenStates archive", "document_type": "bill-text", "gov_id": "HB 5601E",
-                "url": "https://dev.digitaldemocracyproject.org/explore/FL/2026E/HB%205601E",
+                "url": "https://dev.digitaldemocracyproject.org/bill/FL/2026E/HB%205601E",
                 "source_url": "https://www.flsenate.gov/x.pdf",
             },
         }
         text = format_retrieved_chunks([chunk])
 
-        assert "**Source URL:** https://dev.digitaldemocracyproject.org/explore/FL/2026E/HB%205601E" in text
+        assert "**Source URL:** https://dev.digitaldemocracyproject.org/bill/FL/2026E/HB%205601E" in text
         assert "DDP URL" not in text
         assert "/bills/" not in text
 

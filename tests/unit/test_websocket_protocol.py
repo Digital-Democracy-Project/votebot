@@ -224,7 +224,7 @@ class TestPageContext:
             "jurisdiction": "FL",
             "session": "2026",
             "ocd_bill_id": BILL,
-            "url": "https://example.test/explore/FL/2026/HB%20219",
+            "url": "https://example.test/bill/FL/2026/HB%20219",
         }
         with client.websocket_connect("/ws/chat?session_id=s1") as conn:
             conn.receive_json()

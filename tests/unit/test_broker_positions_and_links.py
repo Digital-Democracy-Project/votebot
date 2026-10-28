@@ -32,11 +32,11 @@ BROKER = "https://broker.test"
 
 
 class TestDdpUrls:
-    def test_the_explore_page_with_an_encoded_identifier(self):
-        assert ddp_bill_url(SITE, "fl", "2026", "HB 219") == "https://site.test/explore/FL/2026/HB%20219"
+    def test_the_bill_page_with_an_encoded_identifier(self):
+        assert ddp_bill_url(SITE, "fl", "2026", "HB 219") == "https://site.test/bill/FL/2026/HB%20219"
 
     def test_a_trailing_slash_and_a_biennium_session(self):
-        assert ddp_bill_url(SITE + "/", "WA", "2025-2026", "HB 1") == "https://site.test/explore/WA/2025-2026/HB%201"
+        assert ddp_bill_url(SITE + "/", "WA", "2025-2026", "HB 1") == "https://site.test/bill/WA/2025-2026/HB%201"
 
     @pytest.mark.parametrize("missing", [("", "FL", "2026", "HB 1"), (SITE, "", "2026", "HB 1"),
                                          (SITE, "FL", None, "HB 1"), (SITE, "FL", "2026", "")])
@@ -45,7 +45,7 @@ class TestDdpUrls:
 
     def test_only_bill_documents_of_the_canonical_index_get_a_page(self):
         meta = {"document_type": "bill-text", "jurisdiction": "FL", "session_code": "2026", "gov_id": "HB 219"}
-        assert ddp_bill_url_from_metadata(SITE, meta) == "https://site.test/explore/FL/2026/HB%20219"
+        assert ddp_bill_url_from_metadata(SITE, meta) == "https://site.test/bill/FL/2026/HB%20219"
         assert ddp_bill_url_from_metadata(SITE, {**meta, "document_type": "organization"}) is None
         assert ddp_bill_url_from_metadata(SITE, {"document_type": "bill-text"}) is None
 
@@ -65,7 +65,7 @@ class TestChunksLinkToOurPages:
 
     def test_a_bill_chunk_points_at_our_page_and_keeps_the_legislature_url(self):
         (chunk,) = self._svc(SITE)._link_to_ddp_pages([_bill_chunk()])
-        assert chunk.metadata["url"] == "https://site.test/explore/FL/2026/HB%20219"
+        assert chunk.metadata["url"] == "https://site.test/bill/FL/2026/HB%20219"
         assert chunk.metadata["source_url"] == "https://flsenate.gov/hb219.pdf"
 
     def test_the_original_is_not_mutated(self):
@@ -95,7 +95,7 @@ class TestChunksLinkToOurPages:
 
         svc.vector_store.query = self._store(respond)
         result = await svc.retrieve("what does it do", PageContext(type="bill", ocd_bill_id=BILL))
-        assert result.chunks and result.chunks[0].metadata["url"].startswith(SITE + "/explore/FL/2026/")
+        assert result.chunks and result.chunks[0].metadata["url"].startswith(SITE + "/bill/FL/2026/")
 
     @staticmethod
     def _store(respond):
@@ -107,10 +107,10 @@ class TestChunksLinkToOurPages:
     def test_a_citation_of_our_page_matches_the_chunk_and_links_to_it(self):
         (chunk,) = self._svc(SITE)._link_to_ddp_pages([_bill_chunk()])
         agent = VoteBotAgent.__new__(VoteBotAgent)
-        answer = "It limits fees. [Source: OpenStates archive](https://site.test/explore/FL/2026/HB%20219)"
+        answer = "It limits fees. [Source: OpenStates archive](https://site.test/bill/FL/2026/HB%20219)"
         (citation,) = agent._extract_citations(answer, [chunk])
         assert citation.document_id == chunk.id  # matched to the chunk, so the bill id is still in it
-        assert citation.url == "https://site.test/explore/FL/2026/HB%20219"
+        assert citation.url == "https://site.test/bill/FL/2026/HB%20219"
 
 
 REAL_CLIENT = httpx.AsyncClient  # captured before any patching, so a test may patch more than once
@@ -226,7 +226,7 @@ class TestFormatting:
     def test_org_positions_link_to_our_pages_only_with_a_base_url(self):
         rows = [BillPositionOfOrg(1, "HB 219", "Fees", "FL", "2026", "support"), BillPositionOfOrg(2, "SB 2", "Tax", "FL", "2026", "oppose")]
         linked = format_org_bill_positions(OrgDetails("AARP"), OrgBillPositions(rows), SITE)
-        assert "- [HB 219 Fees](https://site.test/explore/FL/2026/HB%20219)" in linked and "### Bills Opposed" in linked
+        assert "- [HB 219 Fees](https://site.test/bill/FL/2026/HB%20219)" in linked and "### Bills Opposed" in linked
         plain = format_org_bill_positions(OrgDetails("AARP"), OrgBillPositions(rows), "")
         assert "- HB 219 Fees" in plain and "](" not in plain
         assert "may be incomplete" not in plain
@@ -273,7 +273,7 @@ class TestAgentEnrichments:
     async def test_org_page_bills_come_from_the_broker_and_link_to_our_pages(self):
         agent = _agent()
         text = await agent._prefetch_org_bill_positions(PageContext(type="organization", id="42"))
-        assert "[HB 1 T](https://site.test/explore/FL/2026/HB%201)" in text and "AARP" in text
+        assert "[HB 1 T](https://site.test/bill/FL/2026/HB%201)" in text and "AARP" in text
         assert agent.broker_lookup.get_org_bill_positions.await_args.args[0] == "42"
         agent.webflow_lookup.get_org_bill_positions.assert_not_called()
 

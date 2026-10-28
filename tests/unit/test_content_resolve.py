@@ -254,10 +254,117 @@ class TestExploreUrls:
         assert err.value.status_code == 503
 
 
+class TestNewSiteBillUrls:
+    """VOTEBOT-64: the site moved its bill page (NEXT-69). `/bill/{J}/{S}/{ID}[/slug]` and `/legacy/bills/{id}` resolve
+    like the forms before them, and every older form still does (links already sent, VOTEBOT-54)."""
+
+    def test_the_bill_path_is_the_natural_key_with_a_decoded_space(self):
+        assert content._match_ddp_next_bill("/bill/FL/2026/HB%20219") == {
+            "jurisdiction": "FL",
+            "session": "2026",
+            "gov_id": "HB 219",
+        }
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/bill/FL/2026/HB%20219/",
+            "/bill/FL/2026/HB%20219/an-act-relating-to-x",
+            "/bill/FL/2026/HB%20219/an-act/with/more/segments",
+            "/bill/fl/2026/HB%20219",
+        ],
+    )
+    def test_a_trailing_slash_or_a_slug_of_any_length_is_still_that_bill(self, path):
+        assert content._match_ddp_next_bill(path) == {
+            "jurisdiction": path.split("/")[2],
+            "session": "2026",
+            "gov_id": "HB 219",
+        }
+
+    def test_a_biennium_session_code_is_kept(self):
+        assert content._match_ddp_next_bill("/bill/WA/2023-2024/HB%201234/x")["session"] == "2023-2024"
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/bill", "/bill/", "/bill/FL", "/bill/FL/2026", "/bill/Florida/2026/HB%201", "/bills/FL/2026"],
+    )
+    def test_other_bill_paths_are_not_bills(self, path):
+        assert content._match_ddp_next_bill(path) is None
+
+    @pytest.mark.parametrize(
+        "path",
+        ["/legacy/bills/580", "/legacy/bills/580/", "/legacy/bills/580-ranked-choice-voting-act-hr6589-2026"],
+    )
+    def test_the_legacy_page_is_a_broker_id_with_or_without_its_slug(self, path):
+        assert content._match_ddp_next_bill(path) == {"broker_id": 580}
+
+    @pytest.mark.parametrize("path", ["/legacy/bills", "/legacy/bills/", "/legacy/bills/abc", "/legacy/bills/580/votes"])
+    def test_other_legacy_paths_are_not_bills(self, path):
+        assert content._match_ddp_next_bill(path) is None
+
+    def test_every_older_form_still_resolves(self):
+        assert content._match_ddp_next_bill("/explore/FL/2026/HB%20219") == {
+            "jurisdiction": "FL", "session": "2026", "gov_id": "HB 219",
+        }
+        assert content._match_ddp_next_bill("/bills/580") == {"broker_id": 580}
+        assert content._match_ddp_next_bill("/bills/fl/2026/HB%20219") == {
+            "jurisdiction": "fl", "session": "2026", "gov_id": "HB 219",
+        }
+
+    def test_a_webflow_slug_is_still_not_a_ddp_next_url(self):
+        # the links already sent to Voatz (VOTEBOT-54) are this form: they take the Webflow path, untouched here
+        assert content._match_ddp_next_bill("/bills/ranked-choice-voting-act-hr6589-2026") is None
+
+    async def test_a_bill_url_resolves_through_the_broker_like_the_explore_form(self, monkeypatch):
+        broker = AsyncMock(return_value={"bill_openstates_id": BILL})
+        monkeypatch.setattr(content, "_broker_get", broker)
+        url = "https://digitaldemocracyproject.org/bill/FL/2026/HB%20219/an-act-relating-to-x"
+
+        result = await content.resolve_content(url=url)
+
+        assert result == {
+            "type": "bill",
+            "id": "HB 219",
+            "ocd_bill_id": BILL,
+            "gov_id": "HB 219",
+            "jurisdiction": "FL",
+            "session": "2026",
+            "url": url,
+            "ddp_url": url,
+        }
+        assert broker.call_args.args[1] == f"{BROKER}/api/bills/resolve/"
+        assert broker.call_args.kwargs["params"] == {"jurisdiction": "FL", "session": "2026", "gov_id": "HB 219"}
+
+    async def test_a_legacy_bill_url_resolves_through_the_scorecard_then_the_broker(self, monkeypatch):
+        scorecard = {"bill": {"jurisdictionIso2": "FL", "session": {"code": "2026"}, "govId": "HB 219", "title": "Fees"}}
+        broker = AsyncMock(side_effect=[scorecard, {"bill_openstates_id": BILL}])
+        monkeypatch.setattr(content, "_broker_get", broker)
+
+        result = await content.resolve_content(url="https://digitaldemocracyproject.org/legacy/bills/580-fees-hb219")
+
+        assert broker.call_args_list[0].args[1] == f"{BROKER}/api/bills/580/scorecard/"
+        assert result["ocd_bill_id"] == BILL and result["gov_id"] == "HB 219" and result["title"] == "Fees"
+
+    async def test_an_unknown_bill_is_404(self, monkeypatch):
+        monkeypatch.setattr(content, "_broker_get", AsyncMock(side_effect=_status_error(404)))
+        with pytest.raises(HTTPException) as err:
+            await content.resolve_content(url="https://digitaldemocracyproject.org/bill/FL/1999/HB%20219")
+        assert err.value.status_code == 404
+
+    async def test_unconfigured_broker_is_503(self, monkeypatch):
+        monkeypatch.setattr(content, "get_settings", lambda: _settings(broker=""))
+        with pytest.raises(HTTPException) as err:
+            await content.resolve_content(url="https://digitaldemocracyproject.org/bill/FL/2026/HB%20219")
+        assert err.value.status_code == 503
+
+
 class TestDeferredDdpNextUrls:
     """Legislator and organization URLs of ddp-next are deliberately not recognised yet (VOTEBOT-13)."""
 
-    @pytest.mark.parametrize("path", ["/legislators/123", "/legislators/123/", "/organizations/7", "/explore/FL"])
+    @pytest.mark.parametrize(
+        "path",
+        ["/legislators/123", "/legislators/123/", "/legislators/123/jane-doe", "/organizations/7", "/explore/FL"],
+    )
     def test_not_matched_as_ddp_next_bills(self, path):
         assert content._match_ddp_next_bill(path) is None
 

@@ -24,7 +24,7 @@ PAGE = PageContext(
     type="bill", id="HB 7089", title="Transparency in Health and Human Services", jurisdiction="FL",
     session="2024", ocd_bill_id=BILL,
 )
-URL = "https://site.test/explore/FL/2024/HB%207089"
+URL = "https://site.test/bill/FL/2024/HB%207089"
 
 BILL_TEXT = (
     "A health care provider or facility may not commence an action to collect medical debt after "

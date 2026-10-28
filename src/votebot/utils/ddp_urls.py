@@ -1,7 +1,8 @@
 """Links to our own pages on the new website (ddp-next).
 
-The bill page is `/explore/{JURISDICTION}/{SESSION}/{IDENTIFIER}` (the identifier URL-encoded, e.g.
-`HB%20219`), the same shape `/content/resolve` accepts. Nothing is built unless `DDP_SITE_BASE_URL`
+The bill page is `/bill/{JURISDICTION}/{SESSION}/{IDENTIFIER}` (the identifier URL-encoded, e.g.
+`HB%20219`; NEXT-69 moved it from `/explore/...`, which the site still redirects), the same shape
+`/content/resolve` accepts. Nothing is built unless `DDP_SITE_BASE_URL`
 is set: there is no default host, so an unset value leaves every link as it was.
 """
 
@@ -15,7 +16,7 @@ def ddp_bill_url(base_url: str, jurisdiction: str | None, session: str | None, g
     if not (base_url and jurisdiction and session and gov_id):
         return None
     return (
-        f"{base_url.rstrip('/')}/explore/{quote(jurisdiction.upper(), safe='')}"
+        f"{base_url.rstrip('/')}/bill/{quote(jurisdiction.upper(), safe='')}"
         f"/{quote(session, safe='')}/{quote(gov_id, safe='')}"
     )
 

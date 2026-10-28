@@ -17,7 +17,7 @@ from votebot.services.bill_votes import BillInfoResult, BillVotesService
 
 SITE = "https://site.test"
 OPENSTATES = "https://openstates.org/fl/bills/2024/HB7089/"
-PAGE_URL = f"{SITE}/explore/FL/2024/HB%207089"
+PAGE_URL = f"{SITE}/bill/FL/2024/HB%207089"
 PAGE = PageContext(type="bill", id="HB 7089", jurisdiction="FL", session="2024")
 
 
@@ -72,7 +72,7 @@ class TestOurPageForTheBillTheVisitorIsOn:
         us_page = PageContext(type="bill", id="HR 6855", jurisdiction="US", session="118")
         us = _result(identifier="hr6855", jurisdiction="us")
         us.session = "118"
-        assert _agent()._own_page_url(us_page, us) == f"{SITE}/explore/US/118/HR%206855"
+        assert _agent()._own_page_url(us_page, us) == f"{SITE}/bill/US/118/HR%206855"
 
     def test_another_bill_gets_no_link_rather_than_a_guessed_one(self):
         assert _agent()._own_page_url(PAGE, _result(identifier="HB 100")) is None

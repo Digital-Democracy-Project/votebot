@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     ddp_broker_api_root: str = ""
 
     # Our own site (ddp-next), e.g. https://digitaldemocracyproject.org. When set, answers cite and
-    # link bills to their /explore/... pages instead of the legislature's URL (those pages point to
+    # link bills to their /bill/... pages instead of the legislature's URL (those pages point to
     # the legislature themselves). No default host: unset leaves every link as it was.
     ddp_site_base_url: str = ""
 
