@@ -61,8 +61,12 @@ route, 6 the answer).
 
 **Status after 2026-10-12.** The status paragraph at the top is as of 2026-10-12. `main` has since gained VOTEBOT-44 to 53 (timing
 fields, concurrent lookups, background warm-up, cheaper `/health/ready`), 58 and 59 (OpenStates only from the DDP replica) and 60 (scorecards).
-Which SHA is running now is not recorded in this runbook: read it from the ticket and `docker image ls votebot-ddp-next`. Sections 3.3, 3.5,
-3.9, 5 and 6 describe that code.
+**Deployed 2026-10-28 01:21 UTC: `740fc1d8b40a66b627b2af2e1907cb6afaf2f434`** (image `2878c1dff616`, tags `:740fc1d` and `:local`; healthy 32 s
+after `up -d`, `WEB_CONCURRENCY=1`). Rollback images on the host: `:4472180` (`2a0f548f3ab2`) and `:d3742ae` (`4b6ffceb9a4c`). The check results are in the
+`ops-handoff` reply of that date. Two things to know: the production broker does not have the scorecard routes yet (BROKER-325; the route answers 404, so
+VoteBot answers as before), and the log shows one traceback after `Finished server process` at shutdown (`aclose(): asynchronous generator is already
+running`, from an HTTP stream closing at interpreter exit; `docker stop` took 1 s and exited 0). Later deploys are not recorded here: read the running SHA
+from the ticket and `docker image ls votebot-ddp-next`. Sections 3.3, 3.5, 3.9, 5 and 6 describe this code.
 
 Order of work: section 1 (read-only), section 2 (freeze the old copy), section 3 (install the new one),
 section 4 (the website and its origins), then 5 (bot protection and monitoring), 6 (verify), 7 (cutover and rollback).
