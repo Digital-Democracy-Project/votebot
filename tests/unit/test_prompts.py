@@ -252,8 +252,8 @@ class TestOrganizationPagePromptKeepsOnlyHostAndPath:
     def test_the_page_url_line_has_no_credentials_query_string_or_fragment(self):
         prompt = self._prompt(self.ORG_PAGE)
         assert "- Page URL: example.test/organizations/5155\n" in prompt + "\n"
-        for leaked in ("secret", "abc123", "access_token", "utm_source", "?"):
-            assert leaked not in prompt.split("Organization Details:")[1].split("\n\n")[0], leaked
+        for leaked in ("secret", "abc123", "access_token", "utm_source", "8443"):
+            assert leaked not in prompt, leaked  # nowhere in the whole assembled system prompt, not only in the details
 
     def test_the_rest_of_the_organization_details_are_unchanged(self):
         details = self._prompt(self.ORG_PAGE).split("Organization Details:")[1].split("\n\n")[0]
