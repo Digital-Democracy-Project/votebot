@@ -37,7 +37,7 @@ Not checked: how the Voatz in-app browser treats a page (domain restrictions, Ja
 
 **How much of the design system the chat can use.** Tokens (colours, spacing, type), `Button`, `IconButton`, `TextInput`. Everything chat-specific has no design-system equivalent. Put those pieces in ddp-next first; promote them into the design system only if another product needs them.
 
-**Where the code lives.** In ddp-next, because it is the only consumer once Voatz is a route there, and a component edited next to the pages that feed it needs no committed bundle, no `git add -f`, no copy step, no hash comparison. The votebot repo keeps the server and the protocol (documented and covered by `tests/unit/test_websocket_protocol.py`). The cost: the chat's tests move with it, and a change to the protocol touches two repos.
+**Where the code lives.** In ddp-next, because it would be the only consumer of the component once Voatz is a route there (today that is a plan, not a fact: see the deletion gate below), and a component edited next to the pages that feed it needs no committed bundle, no `git add -f`, no copy step, no hash comparison. The votebot repo keeps the server and the protocol (documented and covered by `tests/unit/test_websocket_protocol.py`). The cost: the chat's tests move with it, and a change to the protocol touches two repos.
 
 ## The Voatz page
 
@@ -45,6 +45,9 @@ Not checked: how the Voatz in-app browser treats a page (domain restrictions, Ja
 - Today: the old server serves `index.html` + the bundle and runs VoteBot 2.0. **VOTEBOT-54** points that name at 3.0 serving the current page and bundle (change `wsUrl`, add the origin to `ALLOWED_ORIGINS`, test in the Voatz WebView). That is small and does not depend on this plan.
 - Later: a route in ddp-next renders the component full screen and resolves `?ddp_url=` through `/content/resolve`; the hostname points at ddp-next (or redirects to the route, if Voatz allows it). Then `index.html`, the bundle and `chat-widget/` are removed.
 - `/content/resolve` must keep resolving the Webflow-slug form for the links already sent (VOTEBOT-54 step 2, which blocks VOTEBOT-17).
+- **The route's contract is today's page's contract:** served from `votebot.digitaldemocracyproject.org` itself (that stays the browser-visible origin, so the visitor-id and session storage keep working; a redirect to another hostname only if Voatz allows it); `?ddp_url=` read in the browser and resolved through `/content/resolve` exactly as now, with a missing, malformed or unresolvable value falling back to the general chat; the chat opens by itself when it is present; its WebSocket address and origin allowed on the VoteBot side.
+- **Gate before the hostname moves (hard):** the actual React route is loaded in the **real Voatz app** (a test event, or the in-app browser) and a question is asked and answered on it: JavaScript chunks, storage, the WebSocket, the phone layout. Testing today's bundle in VOTEBOT-54 proves the move of the *endpoint*, not that a Next 16 / React 19 page runs in that WebView.
+- **Rollback:** the old page stays deployable until the new one has been accepted (VOTEBOT-54: "the old copy stays up until the cutover is accepted"); rolling back is pointing the name back, since the links in Voatz events cannot be changed.
 
 ## What the component must keep doing (the acceptance list)
 
@@ -57,9 +60,13 @@ From VOTEBOT-62, with the test that already covers it where there is one:
 | Page context at start and by update, decoded title, welcome message, "You're now viewing ..." notice, page change detected by `ocd_bill_id` | `page-context.test.js` |
 | Quick-action buttons on bill pages, wired once, also when the bill context arrives late | `quick-actions.test.js` |
 | Origin and path only for the page address | `page-address.test.js` (VOTEBOT-63) |
-| Session, history and popup state across navigation (`sessionStorage`, 30 minutes); **same storage keys**, so visitor ids and open sessions survive the switch | none |
+| Session, history and popup state across navigation (`sessionStorage`, 30 minutes); **same storage keys on the same origin**, so visitor ids and open sessions survive the switch; a stored session the new code cannot read starts a fresh one | none |
 | Human handoff through Slack (`agent_joined`, `agent_message`, `agent_left`, the confirm prompt) | none |
 | Full-screen layout on small screens, safe areas, typing indicator, partial auto-scroll | none (manual) |
+| Context timing, both ways: set before the chat mounts, set after, route changes, repeated updates, the 5-second give-up (what the `votebot-context.ts` bridge handles today) | `page-context.test.js` (the pure parts) |
+| Styles hold on representative ddp-next pages (overlay position and stacking, typography, long streamed answers, links), now that the Shadow DOM is gone, and the chat's styles do not leak into the page | none (manual, side by side on the dev site) |
+| Keyboard use, focus and accessible names (the widget describes its quick actions as WCAG 2.1 AA: keyboard navigation, aria-labels, focus indicators) | none |
+| Two layouts of one chat: launcher plus overlay on the website, full screen and auto-open on the Voatz page (a `layout` prop on one component, not two components) | none |
 
 The "none" rows are where a rewrite is most likely to regress without anyone noticing: write those tests against the **current** widget first, so they can be run against the rewrite.
 
@@ -68,11 +75,11 @@ The "none" rows are where a rewrite is most likely to regress without anyone not
 ## Suggested order
 
 1. **VOTEBOT-63** (PR #81): page address, in the current widget. Done first, so the rebuild does not carry it.
-2. **VOTEBOT-54**: the Voatz page on 3.0 with the current bundle (and VOTEBOT-64's new addresses, PR #82, for the website's links).
+2. **VOTEBOT-54**: the Voatz page on 3.0 with the current bundle. **It must serve a bundle built from `main` after VOTEBOT-63 (PR #81) is merged**, checked by comparing the served file's sha256 with the repo's (the runbook's procedure), or the Voatz page keeps sending full addresses; VOTEBOT-64 (PR #82) is server-side only and ships no bundle.
 3. Write the missing tests above against the current widget.
 4. Build the component in ddp-next behind a flag, to parity with the table above, and compare side by side on the dev site.
-5. Switch ddp-next from the script tags to the component; delete `public/widget/` and `votebot-context.ts`'s bridge.
-6. Voatz route in ddp-next; repoint the hostname (Ramon's call, see VOTEBOT-54); remove `chat-widget/` from this repo once nothing loads it. `legacy-webflow` stays frozen.
+5. Switch ddp-next from the script tags to the component; delete `public/widget/`. Keep from the bridge what the component still needs (see the context-timing row above); the script-load timing is what goes.
+6. Voatz route in ddp-next; pass the gate above; repoint the hostname (Ramon's call, see VOTEBOT-54). **Delete `chat-widget/` from this repo only after the host that served `/dist/ddp-chat.min.js` shows no requests for it** (a grep of its nginx access log over a few weeks is enough), and after the Webflow site is retired (VOTEBOT-17). The Webflow pages load their bundle from the old server's own checkout, not from ddp-next, so deleting ddp-next's `public/widget/` cannot affect them. `legacy-webflow` stays frozen.
 
 Steps 4 to 6 are each a ticket's worth of work and should be split off VOTEBOT-62 when it is agreed.
 
