@@ -102,7 +102,7 @@ pageContext: {
     jurisdiction: 'FL',
     session: '2026',            // or 'session-code' (Webflow's name); both are accepted
     ocd_bill_id: '<bare OpenStates bill UUID>',
-    url: 'https://digitaldemocracyproject.org/explore/FL/2026/HB%20219'
+    url: 'https://digitaldemocracyproject.org/bill/FL/2026/HB%20219'
 }
 ```
 

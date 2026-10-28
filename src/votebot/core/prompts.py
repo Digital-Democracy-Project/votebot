@@ -3,7 +3,7 @@
 from urllib.parse import urlparse
 
 # The link examples in the base prompt show the OLD website (slug URLs). They are right for the legacy index and wrong
-# on the new site, whose bill pages are /explore/{jurisdiction}/{session}/{identifier} and whose /bills and /legislators
+# on the new site, whose bill pages are /bill/{jurisdiction}/{session}/{identifier} and whose /legacy/bills and /legislators
 # routes take numeric ids: a model copying them writes links that do not open (VOTEBOT-23, seen live on FL HB 5601E).
 LEGACY_LINK_EXAMPLES = """Examples:
 - "The [Education Funding Act (HB 1234)](https://digitaldemocracyproject.org/bills/education-funding-act) would increase school budgets..."
@@ -514,6 +514,11 @@ def _build_ddp_url(metadata: dict, doc_type: str) -> str | None:
         DDP URL string or None if not available
     """
     base_url = "https://digitaldemocracyproject.org"
+
+    # Legacy index only (VOTEBOT-17 removes it): these are the old website's slug links, which 404 on the new site
+    # (`/bills/{slug}` redirects to `/legacy/bills/{slug}`, which reads a numeric id; `/legislators/{name}` has no id).
+    # The canonical-id index's vectors carry no `slug`, so nothing reaches them there; a link to a bill on the new
+    # site comes from `utils/ddp_urls.ddp_bill_url`.
 
     # Check for slug in metadata or extra
     slug = metadata.get("slug") or metadata.get("extra", {}).get("slug")

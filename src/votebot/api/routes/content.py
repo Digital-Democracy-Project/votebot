@@ -17,8 +17,15 @@ router = APIRouter(prefix="/content", tags=["content"])
 # segment is a ddp-broker-py bill id; the three-segment form is the bill's natural key.
 DDP_NEXT_BILL_BY_ID = re.compile(r"^/bills/(\d+)/?$")
 DDP_NEXT_BILL_BY_KEY = re.compile(r"^/bills/([A-Za-z]{2})/([^/]+)/([^/]+)/?$")
-# The new site's bill page: /explore/{JURISDICTION}/{SESSION}/{IDENTIFIER}, identifier URL-encoded
-# ("HB%20219"). Same natural key as above, resolved the same way.
+# The new site's bill page (NEXT-69): /bill/{JURISDICTION}/{SESSION}/{IDENTIFIER}, identifier URL-encoded
+# ("HB%20219"), then an optional slug of any number of segments (`[[...slug]]` on the site). Same natural key
+# as above, resolved the same way.
+DDP_NEXT_BILL_PAGE = re.compile(r"^/bill/([A-Za-z]{2})/([^/]+)/([^/]+)(?:/.*)?$")
+# The curated bill page, /legacy/bills/{broker_id}: the page reads the id before the first dash, so
+# "/legacy/bills/580-some-slug" is bill 580 too (the pre-NEXT-69 form was /bills/{id}-{slug}).
+DDP_NEXT_LEGACY_BILL = re.compile(r"^/legacy/bills/(\d+)(?:-[^/]*)?/?$")
+# The new site's former bill page, /explore/{JURISDICTION}/{SESSION}/{IDENTIFIER}. The site redirects it to
+# /bill/... (307), but a server does not follow that, and links with it are already out there.
 DDP_NEXT_EXPLORE_BILL = re.compile(r"^/explore/([A-Za-z]{2})/([^/]+)/([^/]+)/?$")
 
 # URL patterns for DDP content (Webflow-hosted pages; kept until Webflow is retired)
@@ -36,7 +43,8 @@ async def resolve_content(
     """
     Resolve a DDP URL to content metadata for the chat widget.
 
-    ddp-next bill URLs (`/explore/{jurisdiction}/{session}/{gov_id}`, `/bills/{broker_id}` or
+    ddp-next bill URLs (`/bill/{jurisdiction}/{session}/{gov_id}[/slug]`, `/legacy/bills/{broker_id}`, and the
+    older `/explore/{jurisdiction}/{session}/{gov_id}`, `/bills/{broker_id}` and
     `/bills/{jurisdiction}/{session}/{gov_id}`) are resolved through ddp-broker-py to the bill's
     OpenStates id, which is what retrieval filters on once VoteBot reads the canonical-id index.
     Every other URL is parsed for content type and slug and looked up in the Webflow CMS, exactly
@@ -73,7 +81,7 @@ async def resolve_content(
     if not content_type or not slug:
         raise HTTPException(
             status_code=400,
-            detail=f"Unable to parse DDP URL: {url}. Expected format: /bills/{{slug}}, /legislators/{{slug}}, or /member-organizations/{{slug}}",
+            detail=f"Unable to parse DDP URL: {url}. Expected format: /bill/{{jurisdiction}}/{{session}}/{{gov_id}}, /legacy/bills/{{broker_id}}, /bills/{{slug}}, /legislators/{{slug}}, or /member-organizations/{{slug}}",
         )
 
     logger.info(
@@ -170,14 +178,14 @@ def _match_ddp_next_bill(path: str) -> dict | None:
     """Recognise a ddp-next bill URL path; None for anything else (including Webflow slugs).
 
     Deliberately not recognised yet, so they fall through to the Webflow path: ddp-next
-    `/legislators/{numeric id}` (the broker has no public endpoint that returns a legislator's
-    OpenStates person id; its list and scorecard endpoints do not carry it) and organization
-    URLs (ddp-next has no organization page). Add them here once the broker exposes the id.
+    `/legislators/{id}[/name]` (a person's OpenStates id is on the broker's legislator scorecard,
+    `legislator.openstatesId`, but ddp-next does not send it as the page's `id` yet: NEXT-77) and
+    organization URLs (ddp-next has no organization page).
     """
-    match = DDP_NEXT_BILL_BY_ID.match(path)
+    match = DDP_NEXT_BILL_BY_ID.match(path) or DDP_NEXT_LEGACY_BILL.match(path)
     if match:
         return {"broker_id": int(match.group(1))}
-    match = DDP_NEXT_BILL_BY_KEY.match(path) or DDP_NEXT_EXPLORE_BILL.match(path)
+    match = DDP_NEXT_BILL_PAGE.match(path) or DDP_NEXT_BILL_BY_KEY.match(path) or DDP_NEXT_EXPLORE_BILL.match(path)
     if match:
         return {
             "jurisdiction": match.group(1),

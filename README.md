@@ -100,7 +100,7 @@ docker-compose -f infrastructure/docker/docker-compose.yml up
 | `WEBFLOW_LEGISLATORS_COLLECTION_ID` | Webflow legislators collection (used by `/content/resolve` and runtime CMS lookups) | Legacy index only (VoteBot 3.0 never reads it) |
 | `WEBFLOW_ORGANIZATIONS_COLLECTION_ID` | Webflow organizations collection (used by `/content/resolve` and runtime CMS lookups) | Legacy index only (VoteBot 3.0 never reads it) |
 | `VOTEBOT_DETERMINISTIC_CITATIONS` | When the model writes no `[Source: ...]`, cite the page's own retrieved chunks (those carrying the bill's / organization's id) that the answer shares distinctive words with (VOTEBOT-21; `core/citations.py`). A general page, a greeting, a refusal or an answer that says it does not know gets none. `false` returns only the citations the model wrote | No (default `true`) |
-| `DDP_SITE_BASE_URL` | Base URL of our own site (ddp-next), e.g. `https://digitaldemocracyproject.org`. On the canonical-id index, bill sources and citations link to `{base}/explore/{JURISDICTION}/{SESSION}/{IDENTIFIER}` instead of the legislature's URL (that page links to the legislature). No default host: unset leaves links unchanged | No |
+| `DDP_SITE_BASE_URL` | Base URL of our own site (ddp-next), e.g. `https://digitaldemocracyproject.org`. On the canonical-id index, bill sources and citations link to `{base}/bill/{JURISDICTION}/{SESSION}/{IDENTIFIER}` instead of the legislature's URL (that page links to the legislature). No default host: unset leaves links unchanged | No |
 | `DDP_BROKER_API_ROOT` | Base URL of ddp-broker-py. `/content/resolve` uses its public bill endpoints to turn a ddp-next bill URL into an OpenStates bill id, and the chat reads organization positions, LegBot analysis, concept polls and scorecards from it. No code default; unset means ddp-next URLs return 503 (Webflow URLs are unaffected) and no broker data reaches an answer | For ddp-next bill URLs |
 | `CONGRESS_API_KEY` | Congress.gov API key | For federal bills |
 | `DDP_OPENSTATES_API_ROOT` | Base URL of DDP's OpenStates replica: ddp-api's proxy, or api-v3 itself. **Required**: VoteBot reads OpenStates only from the replica, never from the public API; a root on `openstates.org` (or a subdomain) is refused, and the app refuses to start without this and the credential below. No hardcoded fallback. `/health/ready` reports the replica as `ddp_openstates_replica` | Yes |
@@ -192,9 +192,9 @@ Resolve a DDP URL to content metadata for the chat widget.
 
 Two kinds of bill URL are understood:
 
-- **ddp-next** (`/explore/{jurisdiction}/{session}/{gov_id}` — the new site's bill page, gov_id URL-encoded, e.g. `HB%20219` — or `/bills/{broker_id}` or `/bills/{jurisdiction}/{session}/{gov_id}`): resolved through ddp-broker-py (`DDP_BROKER_API_ROOT`) to the bill's OpenStates id. ddp-broker-py has no bill-detail endpoint, so this uses its public `/api/bills/{id}/scorecard/` (broker id to jurisdiction, session and gov_id) and `/api/bills/resolve/` (those three to the bare OpenStates UUID). The result is the page context the widget sends back with each message; retrieval filters on its `ocd_bill_id` when the index is the canonical-id one (see `PINECONE_INDEX_NAME`). Errors: 404 unknown bill (the broker said so), 502 broker problem, a non-JSON or non-object broker body, or a broker answer without a valid bare UUID, 503 `DDP_BROKER_API_ROOT` unset. A bill that exists in OpenStates but has no row in the broker is a 404 here, since `/api/bills/resolve/` only knows the broker's bills.
+- **ddp-next** (`/bill/{jurisdiction}/{session}/{gov_id}[/slug]` — the new site's bill page, gov_id URL-encoded, e.g. `HB%20219`, with an optional slug of any length — or `/legacy/bills/{broker_id}` (also `/legacy/bills/{broker_id}-{slug}`); the older `/explore/{jurisdiction}/{session}/{gov_id}`, `/bills/{broker_id}` and `/bills/{jurisdiction}/{session}/{gov_id}` still resolve, because the site redirects them (307, NEXT-69) but a server does not follow a redirect, and links with them are already out there): resolved through ddp-broker-py (`DDP_BROKER_API_ROOT`) to the bill's OpenStates id. ddp-broker-py has no bill-detail endpoint, so this uses its public `/api/bills/{id}/scorecard/` (broker id to jurisdiction, session and gov_id) and `/api/bills/resolve/` (those three to the bare OpenStates UUID). The result is the page context the widget sends back with each message; retrieval filters on its `ocd_bill_id` when the index is the canonical-id one (see `PINECONE_INDEX_NAME`). Errors: 404 unknown bill (the broker said so), 502 broker problem, a non-JSON or non-object broker body, or a broker answer without a valid bare UUID, 503 `DDP_BROKER_API_ROOT` unset. A bill that exists in OpenStates but has no row in the broker is a 404 here, since `/api/bills/resolve/` only knows the broker's bills.
 
-ddp-next **legislator** (`/legislators/{numeric id}`) and **organization** URLs are not resolved yet and still take the Webflow path. `/content/resolve` has no code for a legislator URL: it does not call the broker for one. The broker's `/api/legislators/{id}/scorecard/` response does carry the legislator's OpenStates id (`legislator.openstatesId`; checked on the dev broker 2026-10-27), so the id can now be had, but ddp-next does not send it as the page's `id` yet (NEXT-77); until it does, a legislator page is answered by name lookup, without the scorecard. ddp-next has no organization page. **Known open bug (VOTEBOT-31):** on the new deployment there is no Webflow collection (`WEBFLOW_*` unset by design), so such a URL ends in a 500 ("Webflow collection not configured for organization") instead of a clear 4xx; the widget builds an organization page context by hand (`{"type": "organization", "id": "<broker pk>"}`), which works.
+ddp-next **legislator** (`/legislators/{id}[/name]`) and **organization** URLs are not resolved yet and still take the Webflow path. `/content/resolve` has no code for a legislator URL: it does not call the broker for one. The broker's `/api/legislators/{id}/scorecard/` response does carry the legislator's OpenStates id (`legislator.openstatesId`; checked on the dev broker 2026-10-27), so the id can now be had, but ddp-next does not send it as the page's `id` yet (NEXT-77); until it does, a legislator page is answered by name lookup, without the scorecard. ddp-next has no organization page. **Known open bug (VOTEBOT-31):** on the new deployment there is no Webflow collection (`WEBFLOW_*` unset by design), so such a URL ends in a 500 ("Webflow collection not configured for organization") instead of a clear 4xx; the widget builds an organization page context by hand (`{"type": "organization", "id": "<broker pk>"}`), which works.
 - **Webflow** (`/bills/{slug}`): looked up in the Webflow CMS as before, returning `webflow_id`. Webflow is deprecated and VoteBot 3.0 never consults it. This path is kept only for a rollback to `votebot-large`, and is removed with the legacy mode by VOTEBOT-17.
 
 **Example (Webflow):**
@@ -220,7 +220,7 @@ curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=htt
 
 **Example (ddp-next) and response:**
 ```bash
-curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=https://digitaldemocracyproject.org/bills/fl/2026/HB%20123"
+curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=https://digitaldemocracyproject.org/bill/FL/2026/HB%20123"
 ```
 ```json
 {
@@ -230,8 +230,8 @@ curl "https://api.digitaldemocracyproject.org/votebot/v1/content/resolve?url=htt
   "gov_id": "HB 123",
   "jurisdiction": "FL",
   "session": "2026",
-  "url": "https://digitaldemocracyproject.org/bills/fl/2026/HB%20123",
-  "ddp_url": "https://digitaldemocracyproject.org/bills/fl/2026/HB%20123"
+  "url": "https://digitaldemocracyproject.org/bill/FL/2026/HB%20123",
+  "ddp_url": "https://digitaldemocracyproject.org/bill/FL/2026/HB%20123"
 }
 ```
 `title` is included when the URL used a broker id (the scorecard carries it). `source_url` is not returned: neither broker endpoint has it, and the citation URL comes from the vectors' own metadata.

@@ -578,7 +578,7 @@ it alone, and find out whether reaching the limit only alerts or actually blocks
 
 ## 6. Verify
 
-**What this section needs from code.** `scripts/smoke_ws.py` (VOTEBOT-16, in `main`). Links to our own `/explore/...` pages need `DDP_SITE_BASE_URL` and organization positions from the broker need `DDP_BROKER_API_ROOT`; both are VOTEBOT-15 part 2 (PR #16, merged). Legislator answers and "what changed" read api-v3 live (VOTEBOT-15 part 3, PR #17) and need the DDP replica (`DDP_OPENSTATES_API_ROOT`, which VoteBot now requires). Deploy a version of `main` that contains all of them before running this section, or the checks below will fail for the right reason. The startup line to check (`docker logs votebot-ddp-next | grep 'VoteBot started'`) is a structured log that includes `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id` (`src/votebot/main.py`).
+**What this section needs from code.** `scripts/smoke_ws.py` (VOTEBOT-16, in `main`). Links to our own `/bill/...` pages need `DDP_SITE_BASE_URL` and organization positions from the broker need `DDP_BROKER_API_ROOT`; both are VOTEBOT-15 part 2 (PR #16, merged). Legislator answers and "what changed" read api-v3 live (VOTEBOT-15 part 3, PR #17) and need the DDP replica (`DDP_OPENSTATES_API_ROOT`, which VoteBot now requires). Deploy a version of `main` that contains all of them before running this section, or the checks below will fail for the right reason. The startup line to check (`docker logs votebot-ddp-next | grep 'VoteBot started'`) is a structured log that includes `pinecone_index_name=ddp-knowledge-base` and `bill_filter_key=ocd_bill_id` (`src/votebot/main.py`).
 
 ```bash
 # first INSIDE the Docker network (before the nginx change), then through nginx
@@ -606,7 +606,7 @@ the middle of a chat and confirm the widget reconnects; reconnect with the **sam
 not allowed and confirm it is refused; confirm `docker logs votebot-ddp-next` shows no Slack or Webflow activity. A small load check:
 run the smoke script from a few terminals at once and watch memory, CPU, `df` and the broker's response time; abort
 if the broker slows noticeably. Then, in a browser on the dev origin: open a bill page with the chat,
-ask a question, and confirm the answer links to our own `/explore/...` page, the "who supports" question lists
+ask a question, and confirm the answer links to our own `/bill/...` page, the "who supports" question lists
 organizations from the broker, and the console shows no CORS error. In `docker logs votebot-ddp-next`, check there is **no**
 "Slack service started" line and that the request was logged by this copy.
 
