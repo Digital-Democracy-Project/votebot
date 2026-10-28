@@ -28,6 +28,7 @@ from votebot.services.broker_lookup import (
     format_bill_org_positions,
     format_bill_scorecard,
     format_concept_poll,
+    format_legislator_scorecard,
     format_org_bill_positions,
     format_org_details,
 )
@@ -150,9 +151,13 @@ _ALIGNMENT_ALONE = re.compile(r"\b(accountab\w*|align(?:ed|ment)?|scorecards?)\b
 _ALIGNMENT_SUBJECT = re.compile(r"\b(constituents?|districts?|voters?)\b", re.IGNORECASE)
 _ALIGNMENT_ABOUT_VOTING = re.compile(
     r"\b(vote[sd]?|voting|support\w*|oppos\w*|want(?:ed|s)?|prefer\w*|fe(?:el|lt)|match(?:ed|es|ing)?|against|agree\w*|"
-    r"disagree\w*|represent\w*)\b",
+    r"disagree\w*)\b",
     re.IGNORECASE,
 )
+
+
+# On a legislator's page a question about their score or how often they vote with their voters is the same question
+LEGISLATOR_ALIGNMENT_ALSO = re.compile(r"\bscores?(?:card)?\b|\bhow often\b[^.?!]*\bvot\w*\b[^.?!]*\bwith\b|\bvot(?:e|es|ed|ing) with\b", re.IGNORECASE)
 
 
 def asks_about_alignment(message: str, also: re.Pattern[str] | None = None) -> bool:
@@ -285,6 +290,7 @@ class PreModelContext:
     org_bill_positions_context: str = ""
     webflow_verification_context: str = ""
     bill_broker_context: str = ""
+    legislator_scorecard_context: str = ""
 
 
 @dataclass
@@ -852,6 +858,11 @@ class VoteBotAgent:
         if self._wants_bill_broker_data(page_context):
             bill_broker_context = await self._prefetch_bill_broker_data(message, page_context)
 
+        # Step 3f: DDP's constituent-alignment scorecard of the page's legislator
+        legislator_scorecard_context = ""
+        if self._wants_legislator_scorecard(page_context):
+            legislator_scorecard_context = await self._prefetch_legislator_scorecard(message, page_context)
+
         # Step 4: Build page info for prompt
         page_info = self._extract_page_info(page_context)
 
@@ -865,6 +876,8 @@ class VoteBotAgent:
         full_context = retrieved_context
         if bill_broker_context:
             full_context = f"{full_context}\n\n{bill_broker_context}"  # analysis, after the sources of record
+        if legislator_scorecard_context:
+            full_context = f"{full_context}\n\n{legislator_scorecard_context}"  # scorecard, likewise
         if self.settings.bill_filter_key == "ocd_bill_id":
             # Legislators are not in the canonical-id index: their facts come live from api-v3
             legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
@@ -1170,6 +1183,7 @@ class VoteBotAgent:
         org_bill_positions_context = pre.org_bill_positions_context
         webflow_verification_context = pre.webflow_verification_context
         bill_broker_context = pre.bill_broker_context
+        legislator_scorecard_context = pre.legislator_scorecard_context
 
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
@@ -1189,6 +1203,8 @@ class VoteBotAgent:
             full_context = f"{full_context}\n\n{legislator_info_context}"
         if bill_broker_context:
             full_context = f"{full_context}\n\n{bill_broker_context}"  # analysis, after the sources of record
+        if legislator_scorecard_context:
+            full_context = f"{full_context}\n\n{legislator_scorecard_context}"  # scorecard, likewise
         if vote_verification_context:
             # Put verification context first - it's the authoritative source
             full_context = f"{vote_verification_context}\n\n{full_context}"
@@ -1433,6 +1449,12 @@ class VoteBotAgent:
                 broker_task = start(
                     "bill_broker_data", lambda: self._prefetch_bill_broker_data(message, page_context)
                 )
+            # Step 2i: DDP's constituent-alignment scorecard of the page's legislator, started with the others (VOTEBOT-60)
+            scorecard_task = None
+            if self._wants_legislator_scorecard(page_context):
+                scorecard_task = start(
+                    "legislator_scorecard", lambda: self._prefetch_legislator_scorecard(message, page_context)
+                )
 
             # Step 1: Retrieve relevant context (the lookups above run meanwhile)
             with timings.phase("retrieval"):
@@ -1493,6 +1515,8 @@ class VoteBotAgent:
                 pre.webflow_verification_context = await webflow_task
             if broker_task is not None:
                 pre.bill_broker_context = await broker_task
+            if scorecard_task is not None:
+                pre.legislator_scorecard_context = await scorecard_task
             return pre
         finally:
             await cancel_and_wait(lookups)
@@ -2399,6 +2423,41 @@ class VoteBotAgent:
             and ((page_context.jurisdiction and page_context.session and page_context.id) or page_context.ocd_bill_id)
         )
 
+    @staticmethod
+    async def _settled_broker(name: str, call):
+        """One broker lookup's result, or None: a slow or failing one costs only its own context, not the other
+        lookups' and never the answer. It has the message's remaining enrichment budget."""
+        try:
+            return await asyncio.wait_for(call, _enrichment_budget_left())
+        except asyncio.TimeoutError:
+            logger.warning("Broker lookup took too long; answering without it", lookup=name)
+        except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
+            logger.error("Broker lookup failed; answering without it", lookup=name, error=str(e))
+        return None
+
+    def _wants_legislator_scorecard(self, page_context: PageContext | None) -> bool:
+        """A legislator page on the canonical-id index whose `id` is the OpenStates person id (`ocd-person/<uuid>`,
+        which ddp-next will send once the broker exposes it) and a broker to ask. Without that id there is no
+        scorecard lookup: the name lookup of `_legislator_context_from_api_v3` is what answers."""
+        return bool(
+            page_context
+            and page_context.type == "legislator"
+            and self.settings.bill_filter_key == "ocd_bill_id"
+            and self.settings.ddp_broker_api_root
+            and bare_uuid(page_context.id, "ocd-person/")
+        )
+
+    async def _prefetch_legislator_scorecard(self, message: str, page_context: PageContext) -> str:
+        """DDP's constituent-alignment scorecard of the page's legislator, when the message asks how their votes
+        compare with their voters. Same time budget and fallbacks as the other broker lookups."""
+        if not asks_about_alignment(message, LEGISLATOR_ALIGNMENT_ALSO):
+            return ""
+        card = await self._settled_broker(
+            "legislator scorecard",
+            self.broker_lookup.get_legislator_scorecard(page_context.id, _enrichment_deadline.get()),
+        )
+        return format_legislator_scorecard(card)
+
     async def _prefetch_bill_broker_data(self, message: str, page_context: PageContext) -> str:
         """DDP's LegBot analysis of the page's bill, its concept poll when the message asks about it and its
         constituent-alignment scorecard when the message asks about that, from ddp-broker-py. One time budget with
@@ -2406,18 +2465,9 @@ class VoteBotAgent:
         deadline = _enrichment_deadline.get()
         args = (page_context.jurisdiction, page_context.session, page_context.id, deadline)
         asks_about_poll = bool(POLL_QUERY.search(message))
-        asks_about_scorecard = asks_about_alignment(message) and bool(bare_uuid(page_context.ocd_bill_id))
+        asks_about_scorecard = asks_about_alignment(message) and bool(bare_uuid(page_context.ocd_bill_id, "ocd-bill/"))
 
-        async def settled(name: str, call):
-            """One lookup's result, or None: a slow or failing one costs only its own context, not its siblings'."""
-            try:
-                return await asyncio.wait_for(call, _enrichment_budget_left())
-            except asyncio.TimeoutError:
-                logger.warning("Broker lookup took too long; answering without it", lookup=name)
-            except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
-                logger.error("Broker lookup failed; answering without it", lookup=name, error=str(e))
-            return None
-
+        settled = self._settled_broker
         analysis, poll, scorecard = await asyncio.gather(
             settled("bill analysis", self.broker_lookup.get_bill_analysis(*args)),
             settled("concept poll", self.broker_lookup.get_concept_poll(*args)) if asks_about_poll else asyncio.sleep(0),
