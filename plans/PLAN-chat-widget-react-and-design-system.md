@@ -88,5 +88,5 @@ Steps 4 to 6 are each a ticket's worth of work and should be split off VOTEBOT-6
 ## What I would not do
 
 - A shared embeddable build of the React component "just in case": it brings the Shadow DOM and style-adoption work back for a consumer nobody has named.
-- A fresh Markdown library, a state library or a WebSocket library for the rebuild. The protocol is a dozen message types and the reconnect logic is about 100 lines.
+- A fresh Markdown library, a state library or a WebSocket library for the rebuild. The protocol is 14 message types (4 the widget sends, 10 it handles from the server), and the whole WebSocket client, reconnection included, is 235 lines.
 - Redesigning the chat (new features, new flows): out of scope for the ticket.
