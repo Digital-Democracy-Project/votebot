@@ -130,7 +130,7 @@ Bidirectional CMS fetch used at query time for RAG augmentation/verification. Al
 
 **Not fully read-only**: `update_bill_fields()` / `update_bill_gov_url()` DO write to Webflow CMS (PATCH `.../items/{id}/live`), used by scheduler/sync scripts (`scripts/sync_bills.py` etc., outside `src/votebot/`) with the write-scoped `webflow_scheduler_api_key`. The runtime *retrieval/agent* path only ever calls the read methods below.
 
-- **`WebflowLookupService`** — methods:
+- **`WebflowLookupService`** (the **legacy index's** CMS path, removed by VOTEBOT-17) — **built per message on purpose** (`VoteBotAgent.__init__`; `_services_for` leaves it out because its `_org_cache` / `_bill_cache` never expire), and **no TTL cache or shared instance is planned** (VOTEBOT-52, decided won't-do: the code is scheduled for removal). **VoteBot 3.0 (the canonical-id index) never consults it**: `_prefetch_bill_org_positions`, `_prefetch_org_bill_positions` and `_verify_from_webflow` are routed to the broker there, and `_prefetch_bill_info`'s slug resolution ("Method 5") now runs only on the legacy index, because on the canonical index the page already names the bill (identifier, jurisdiction, session from ddp-next or `/content/resolve`). New 3.0 code must not call this service. Methods:
   - `get_bill_org_positions(webflow_id=None, slug=None) -> BillOrgPositionsResult` — org positions for a bill
   - `get_org_bill_positions(webflow_id=None, slug=None) -> OrgBillPositionsResult` — bills for an org
   - `get_bill_details(webflow_id=None, slug=None) -> BillDetailsResult` — bill metadata for dispute verification
