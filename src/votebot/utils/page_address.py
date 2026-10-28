@@ -16,7 +16,10 @@ def page_address(value: object) -> str | None:
     """
     if not isinstance(value, str):
         return None
-    parsed = urlparse(value.strip())
+    try:
+        parsed = urlparse(value.strip())
+    except ValueError:  # e.g. an unclosed "[" in the host: the value comes from a browser, so it can be anything
+        return None
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return None
     host = parsed.netloc.rpartition("@")[2]  # credentials come before the last "@"
