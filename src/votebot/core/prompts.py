@@ -381,7 +381,8 @@ def _format_org_info(info: dict) -> str:
     if info.get("jurisdiction"):
         parts.append(f"- Jurisdiction: {info['jurisdiction']}")
     if info.get("url"):
-        parts.append(f"- Page URL: {info['url']}")
+        # host and path only, as on a general page: the address comes from the browser and can carry a token (VOTEBOT-66)
+        parts.append(f"- Page URL: {_page_url(info['url'])}")
 
     return "\n".join(parts) if parts else "No organization details available."
 
