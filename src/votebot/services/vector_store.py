@@ -80,6 +80,27 @@ class VectorStoreService:
                 self._index = self.pc.Index(self.index_name)
             return self._index
 
+    def _open_existing_index(self) -> bool:
+        """Open the configured index if it exists; never create it. Blocking: call it from a worker thread."""
+        with self._index_lock:
+            if self._index is not None:
+                return True
+            if self.index_name not in [idx.name for idx in self.pc.list_indexes()]:
+                return False
+            self._index = self.pc.Index(self.index_name)
+            return True
+
+    async def warm(self) -> bool:
+        """Open the index and make one cheap request to it, so the first chat after a start pays for neither the
+        index lookup nor the first connection (VOTEBOT-49). It only READS: an index that is missing is reported, not
+        created (`index` would create it, which is the wrong thing to do from a warm-up). False when it is missing.
+        Cancelling it stops the wait, not a request already running on its worker thread."""
+        if not await asyncio.to_thread(self._open_existing_index):
+            logger.warning("Pinecone index not found; the warm-up does not create it", index_name=self.index_name)
+            return False
+        await asyncio.to_thread(lambda: self._index.describe_index_stats())
+        return True
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),

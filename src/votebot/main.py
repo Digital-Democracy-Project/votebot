@@ -3,8 +3,9 @@
 VoteBot is a chat/RAG service. Sync/ingestion is handled by ddp-sync.
 """
 
+import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import structlog
@@ -89,6 +90,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Button cache subscriber startup failed", exc_info=True)
 
+    # The federal party roster is most of the roster downloads (123 of 125 on 2.0): fetch it now, in the background,
+    # so no chat waits for it, and never let a failure here stop startup (VOTEBOT-48)
+    try:
+        from votebot.core.agent import _services_for
+
+        _services_for(settings).bill_votes.warm_parties("us")
+    except Exception:
+        logger.warning("Party roster warm-up could not start", exc_info=True)
+
     if not settings.index_is_recognized:
         logger.warning(
             "PINECONE_INDEX_NAME is neither the legacy nor the canonical index; "
@@ -99,6 +109,12 @@ async def lifespan(app: FastAPI):
 
     check_query_log_dir()
 
+    # Warm Pinecone and the embedding client in the background: the first chat after a deploy should not pay for the
+    # index lookup and the first connections. Not awaited, so an unreachable service cannot delay or stop startup.
+    from votebot.core.agent import warm_up_services
+
+    warmup = asyncio.create_task(warm_up_services(settings))
+
     logger.info(
         "VoteBot started (chat-only mode)",
         version=settings.app_version,
@@ -108,13 +124,26 @@ async def lifespan(app: FastAPI):
         quick_action_buttons_enabled=settings.quick_action_buttons_enabled,
     )
 
-    yield
+    try:
+        yield
+    finally:
+        # however the app stops: cancel the warm-up if it is still running and wait for it, which also consumes
+        # an exception it may have ended with (it should not have one: it never raises)
+        warmup.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await warmup
 
     from votebot.services.button_cache import stop_invalidate_subscriber
     try:
         await stop_invalidate_subscriber()
     except Exception:
         pass
+    try:
+        from votebot.core.agent import close_services
+
+        await close_services(settings)
+    except Exception:
+        logger.warning("Closing the shared HTTP client failed", exc_info=True)
     await redis_store.disconnect()
     logger.info("VoteBot shutdown complete")
 

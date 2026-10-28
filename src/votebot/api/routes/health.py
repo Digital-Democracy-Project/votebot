@@ -51,10 +51,10 @@ async def readiness_check(settings: Settings = Depends(get_settings)) -> HealthR
 
     # Check OpenAI connectivity
     try:
-        from votebot.services.llm import LLMService
+        from votebot.core.agent import _services_for
 
-        llm = LLMService()
-        await llm.health_check()
+        # the shared service, so the check's result is kept between requests (a new one each time would keep nothing)
+        await _services_for(settings).llm.health_check()
         dependencies["openai"] = "healthy"
     except Exception as e:
         logger.warning("OpenAI health check failed", error=str(e))

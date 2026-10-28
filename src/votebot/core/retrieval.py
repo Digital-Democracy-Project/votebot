@@ -1,5 +1,6 @@
 """RAG retrieval orchestration service."""
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 
@@ -65,6 +66,16 @@ DIFF_NONE_NOTE = (
     "No stored comparison exists for the requested version in the live records (it may be the bill's first "
     "version, or the version before it has no saved text). Say so; do not infer what changed."
 )
+
+
+async def _release(tasks: list) -> None:
+    """Cancel the queries a retrieval started and did not wait for (it failed or was given up on) and wait until
+    they have ended, so none outlives the retrieval and no failure goes unretrieved. Cancelling stops the wait for
+    a query, not a Pinecone call already running on its thread: that finishes by itself."""
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def diff_scope_note(shown) -> str:
@@ -354,18 +365,13 @@ class RetrievalService:
             bill_types = ["bill-text", "bill-votes"]  # kept out of the unscoped query either way
             scoped_types = ["bill-text"] if self._ocd_mode else bill_types  # votes are not embedded there: do not ask
             base_filter = {**filters, "document_type": {"$nin": bill_types}} if scope else filters
-            results = await self.vector_store.query(
-                query=query,
-                top_k=max_chunks * 2,
-                filter=base_filter if base_filter else None,
-            )
+            calls = [{"query": query, "top_k": max_chunks * 2, "filter": base_filter if base_filter else None}]
             if scope:
-                scoped = await self.vector_store.query(
-                    query=query,
-                    top_k=max_chunks,
-                    filter={**scope, "document_type": {"$in": scoped_types}},
+                calls.append(
+                    {"query": query, "top_k": max_chunks, "filter": {**scope, "document_type": {"$in": scoped_types}}}
                 )
-                results = scoped + results
+            found = await self._query_together(calls)
+            results = found[1] + found[0] if scope else found[0]
 
             # Filter by similarity threshold
             filtered_results = [
@@ -393,6 +399,15 @@ class RetrievalService:
             notes=notes,
         )
 
+    async def _query_together(self, calls: list[dict]) -> list[list[SearchResult]]:
+        """Run independent queries at the same time and return their results in the order given. The first
+        failure is raised at once and the queries still running are cancelled and waited for."""
+        tasks = [asyncio.ensure_future(self.vector_store.query(**c)) for c in calls]
+        try:
+            return list(await asyncio.gather(*tasks))
+        finally:
+            await _release(tasks)
+
     async def _retrieve_bill_with_text_priority(
         self,
         query: str,
@@ -402,8 +417,32 @@ class RetrievalService:
         version_filter: dict | None = None,
         notes: list[str] | None = None,
     ) -> list[SearchResult]:
+        """The phases below, with the queries that do not depend on another's result running at the same time
+        (VOTEBOT-45). If a phase fails, or the caller gives up, whatever is still running is cancelled."""
+        started: list[asyncio.Future] = []
+        try:
+            return await self._bill_phases(query, filters, max_chunks, page_context, version_filter, notes, started)
+        finally:
+            await _release(started)
+
+    async def _bill_phases(
+        self,
+        query: str,
+        filters: dict,
+        max_chunks: int,
+        page_context: PageContext | None,
+        version_filter: dict | None,
+        notes: list[str] | None,
+        started: list[asyncio.Future],
+    ) -> list[SearchResult]:
         """
         Retrieve bill content with priority for actual legislative text.
+
+        Every query whose inputs are known up front is started first (`start`) and awaited where its result is
+        first used, so the phases below read as they always did and the results are merged in the same order.
+        A query that used to size itself from an earlier result (`remaining_slots`) now asks for the most it
+        could have needed and the phase cuts the (score-sorted) answer back to what it used to ask for: the
+        same chunks, up to how Pinecone orders results that tie at the cut.
 
         Phase 1: Get bill-text (PDF/legislative text) with the bill identity filter
         Phase 2: Get bill summaries with the bill identity filter
@@ -423,49 +462,12 @@ class RetrievalService:
         Returns:
             List of SearchResult prioritizing legislative text
         """
-        # Phase 1: Get legislative text chunks (document_type="bill-text")
-        text_filters = {**filters, **(version_filter or {}), "document_type": "bill-text"}
-        text_results = await self.vector_store.query(
-            query=query,
-            top_k=max_chunks,
-            filter=text_filters,
-        )
-        text_results = [
-            r for r in text_results if r.score >= self.config.similarity_threshold
-        ]
+        def start(coro):
+            task = asyncio.ensure_future(coro)
+            started.append(task)
+            return task
 
-        logger.info(
-            "Bill text retrieval phase 1",
-            text_chunks_found=len(text_results),
-        )
-
-        # Phase 2: If we don't have enough, get summary content
-        remaining_slots = max_chunks - len(text_results)
-        summary_results = []
-
-        if remaining_slots > 0:
-            # Get bill summaries (document_type="bill")
-            summary_filters = {**filters, "document_type": "bill"}
-            summary_results = await self.vector_store.query(
-                query=query,
-                top_k=remaining_slots * 2,
-                filter=summary_filters,
-            )
-            summary_results = [
-                r for r in summary_results if r.score >= self.config.similarity_threshold
-            ]
-
-            logger.info(
-                "Bill text retrieval phase 2",
-                summary_chunks_found=len(summary_results),
-            )
-
-        # Phase 3: Legislative history — REMOVED
-        # Bill status and action history now comes exclusively from live OpenStates
-        # API via the bill_votes tool. Stale bill-history chunks from Pinecone were
-        # causing the LLM to report outdated status information (e.g., HR 7147 incident).
-        history_results = []
-
+        # What the question asks decides which queries run, and none of it needs a result.
         # Phase 4a: Get organization positions if query is about org support/opposition
         org_keywords = [
             "organization", "organizations", "org ", "orgs ",
@@ -483,18 +485,87 @@ class RetrievalService:
         _changelog_retrieval_keywords = CHANGELOG_KEYWORDS + ["amendment", "amended"]
         is_changelog_query = any(kw in query_lower for kw in _changelog_retrieval_keywords)
 
+        # Start now every query that does not need another's result.
+        text_filters = {**filters, **(version_filter or {}), "document_type": "bill-text"}
+        text_task = start(self.vector_store.query(query=query, top_k=max_chunks, filter=text_filters))
+        # phase 2 used top_k = remaining_slots * 2 with remaining_slots <= max_chunks
+        summary_task = start(
+            self.vector_store.query(query=query, top_k=max_chunks * 2, filter={**filters, "document_type": "bill"})
+        )
+        bill_org_task = org_task = diffs_task = changelog_task = None
+        if is_org_query:
+            bill_org_task = start(
+                self.vector_store.query(
+                    query="organization positions supporting opposing this bill",
+                    top_k=3,
+                    filter={**filters, "document_type": "bill"},
+                )
+            )
+            # Build query combining bill info with org-related terms
+            # Use the bill slug/title to find org chunks that reference this bill
+            org_query = query
+            if page_context:
+                bill_title = page_context.title or ""
+                bill_slug = page_context.slug or ""
+                # Use slug keywords for better matching (org chunks contain bill DDP URLs with slug)
+                slug_words = bill_slug.replace("-", " ") if bill_slug else ""
+                if bill_title or slug_words:
+                    org_query = f"{bill_title} {slug_words} support oppose bill positions"
+
+            # phase 4a used top_k = remaining_org_slots * 2 with remaining_org_slots <= max(2, max_chunks)
+            org_task = start(
+                self.vector_store.query(
+                    query=org_query, top_k=max(2, max_chunks) * 2, filter={"document_type": "organization"}
+                )
+            )
+        if is_changelog_query and self._ocd_mode:
+            diffs_task = start(self._live_version_diffs(filters.get("ocd_bill_id"), query, notes))
+        elif is_changelog_query and filters.get("webflow_id"):
+            changelog_task = start(
+                self.vector_store.query(
+                    query=query, top_k=3, filter={"document_type": "bill-changelog", "webflow_id": filters["webflow_id"]}
+                )
+            )
+
+        # Phase 1: Get legislative text chunks (document_type="bill-text")
+        text_results = await text_task
+        text_results = [
+            r for r in text_results if r.score >= self.config.similarity_threshold
+        ]
+
+        logger.info(
+            "Bill text retrieval phase 1",
+            text_chunks_found=len(text_results),
+        )
+
+        # Phase 2: If we don't have enough, get summary content
+        remaining_slots = max_chunks - len(text_results)
+        summary_results = []
+
+        if remaining_slots > 0:
+            # Get bill summaries (document_type="bill")
+            summary_results = (await summary_task)[: remaining_slots * 2]
+            summary_results = [
+                r for r in summary_results if r.score >= self.config.similarity_threshold
+            ]
+
+            logger.info(
+                "Bill text retrieval phase 2",
+                summary_chunks_found=len(summary_results),
+            )
+
+        # Phase 3: Legislative history — REMOVED
+        # Bill status and action history now comes exclusively from live OpenStates
+        # API via the bill_votes tool. Stale bill-history chunks from Pinecone were
+        # causing the LLM to report outdated status information (e.g., HR 7147 incident).
+        history_results = []
+
         org_results = []
         bill_org_results = []
 
         if is_org_query:
             # Phase 4a-i: Search the bill's OWN chunks for org position content
-            org_position_query = "organization positions supporting opposing this bill"
-            bill_org_filters = {**filters, "document_type": "bill"}
-            bill_org_results = await self.vector_store.query(
-                query=org_position_query,
-                top_k=3,
-                filter=bill_org_filters,
-            )
+            bill_org_results = await bill_org_task
             bill_org_results = [
                 r for r in bill_org_results
                 if r.score >= self.config.similarity_threshold
@@ -511,22 +582,7 @@ class RetrievalService:
 
             remaining_org_slots = max(2, max_chunks - len(text_results) - len(summary_results) - len(history_results) - len(bill_org_results))
 
-            # Build query combining bill info with org-related terms
-            # Use the bill slug/title to find org chunks that reference this bill
-            org_query = query
-            if page_context:
-                bill_title = page_context.title or ""
-                bill_slug = page_context.slug or ""
-                # Use slug keywords for better matching (org chunks contain bill DDP URLs with slug)
-                slug_words = bill_slug.replace("-", " ") if bill_slug else ""
-                if bill_title or slug_words:
-                    org_query = f"{bill_title} {slug_words} support oppose bill positions"
-
-            org_results = await self.vector_store.query(
-                query=org_query,
-                top_k=remaining_org_slots * 2,
-                filter={"document_type": "organization"},
-            )
+            org_results = (await org_task)[: remaining_org_slots * 2]
             org_results = [
                 r for r in org_results if r.score >= self.config.similarity_threshold
             ]
@@ -726,20 +782,13 @@ class RetrievalService:
 
         # Phase 5: what changed between versions (changelog intent only)
         changelog_results = []
-        changelog_filter = None
-        if is_changelog_query and self._ocd_mode:
+        if diffs_task is not None:
             # Canonical-id index: diffs are not embedded; the change is api-v3's stored diff, read
             # live under the same version scope as the text (the current version's diff unless a
-            # version is named) and labelled with both versions.
-            changelog_results = await self._live_version_diffs(filters.get("ocd_bill_id"), query, notes)
-        elif is_changelog_query and filters.get("webflow_id"):
-            changelog_filter = {"document_type": "bill-changelog", "webflow_id": filters["webflow_id"]}
-        if changelog_filter:
-            changelog_results = await self.vector_store.query(
-                query=query,
-                top_k=3,
-                filter=changelog_filter,
-            )
+            # version is named) and labelled with both versions. Started with the text queries above.
+            changelog_results = await diffs_task
+        elif changelog_task is not None:
+            changelog_results = await changelog_task
             changelog_results = [
                 r for r in changelog_results if r.score >= self.config.similarity_threshold
             ]
@@ -1117,64 +1166,68 @@ class RetrievalService:
                 org_filter[key] = filters[key]
                 break
 
-        org_results = await self.vector_store.query(
-            query=query,
-            top_k=max_chunks,
-            filter=org_filter,
-        )
-        org_results = [
-            r for r in org_results if r.score >= self.config.similarity_threshold
-        ]
-
-        logger.info(
-            "Organization retrieval phase 1",
-            org_chunks_found=len(org_results),
-        )
-
-        # Phase 2: If top result is a specific org, fetch ALL chunks for that org
-        # This ensures bill positions (which may be in a different chunk) are included
-        if org_results:
-            top_doc_id = org_results[0].metadata.get("document_id", "")
-            if top_doc_id:
-                # Search for more chunks with a query focused on bill positions
-                bill_position_results = await self.vector_store.query(
-                    query=f"bill positions supported opposed bills",
-                    top_k=5,
-                    filter={"document_type": "organization", "document_id": top_doc_id},
-                )
-                # Add any new chunks not already in results
-                existing_ids = {r.id for r in org_results}
-                for r in bill_position_results:
-                    if r.id not in existing_ids:
-                        org_results.append(r)
-                        existing_ids.add(r.id)
-
-                logger.info(
-                    "Organization retrieval phase 2 (all chunks)",
-                    org_doc_id=top_doc_id,
-                    total_org_chunks=len(org_results),
-                )
-
-        # Phase 3: Fill remaining slots with general results
-        remaining_slots = max_chunks - len(org_results)
-        general_results = []
-
-        if remaining_slots > 0:
-            general_results = await self.vector_store.query(
-                query=query,
-                top_k=remaining_slots * 2,
-                filter=filters if filters else None,
+        # Phase 3's query does not need phase 1's or 2's result, only its size does: it is started with phase 1
+        # and asked for the most it could need (max_chunks slots, two per slot), then cut back below.
+        started: list[asyncio.Future] = []
+        try:
+            org_task = asyncio.ensure_future(self.vector_store.query(query=query, top_k=max_chunks, filter=org_filter))
+            general_task = asyncio.ensure_future(
+                self.vector_store.query(query=query, top_k=max_chunks * 2, filter=filters if filters else None)
             )
-            general_results = [
-                r for r in general_results if r.score >= self.config.similarity_threshold
+            started += [org_task, general_task]
+
+            org_results = await org_task
+            org_results = [
+                r for r in org_results if r.score >= self.config.similarity_threshold
             ]
 
-        combined = org_results + general_results
+            logger.info(
+                "Organization retrieval phase 1",
+                org_chunks_found=len(org_results),
+            )
 
-        if self.config.deduplicate:
-            combined = self._deduplicate(combined)
+            # Phase 2: If top result is a specific org, fetch ALL chunks for that org
+            # This ensures bill positions (which may be in a different chunk) are included
+            if org_results:
+                top_doc_id = org_results[0].metadata.get("document_id", "")
+                if top_doc_id:
+                    # Search for more chunks with a query focused on bill positions
+                    bill_position_results = await self.vector_store.query(
+                        query=f"bill positions supported opposed bills",
+                        top_k=5,
+                        filter={"document_type": "organization", "document_id": top_doc_id},
+                    )
+                    # Add any new chunks not already in results
+                    existing_ids = {r.id for r in org_results}
+                    for r in bill_position_results:
+                        if r.id not in existing_ids:
+                            org_results.append(r)
+                            existing_ids.add(r.id)
 
-        return combined[:max_chunks]
+                    logger.info(
+                        "Organization retrieval phase 2 (all chunks)",
+                        org_doc_id=top_doc_id,
+                        total_org_chunks=len(org_results),
+                    )
+
+            # Phase 3: Fill remaining slots with general results
+            remaining_slots = max_chunks - len(org_results)
+            general_results = []
+
+            if remaining_slots > 0:
+                general_results = (await general_task)[: remaining_slots * 2]
+                general_results = [
+                    r for r in general_results if r.score >= self.config.similarity_threshold
+                ]
+
+            combined = org_results + general_results
+
+            if self.config.deduplicate:
+                combined = self._deduplicate(combined)
+
+            return combined[:max_chunks]
+        finally:
+            await _release(started)
 
     def _build_filters(self, page_context: PageContext, query: str | None = None) -> dict:
         """

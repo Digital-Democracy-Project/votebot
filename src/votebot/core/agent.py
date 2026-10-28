@@ -23,8 +23,10 @@ from votebot.services.bill_versions import current_version
 from votebot.services.broker_lookup import (
     BUDGET_SECONDS,
     BrokerLookupService,
+    bare_uuid,
     format_bill_analysis,
     format_bill_org_positions,
+    format_bill_scorecard,
     format_concept_poll,
     format_org_bill_positions,
     format_org_details,
@@ -48,6 +50,7 @@ from votebot.utils.intent import (
     classify_sub_intent,
     normalize_retrieval_sources,
 )
+from votebot.utils.tasks import cancel_and_wait
 from votebot.utils.timings import PhaseTimings
 
 logger = structlog.get_logger()
@@ -140,6 +143,27 @@ POLL_QUERY = re.compile(
     re.IGNORECASE,
 )
 
+# A question about how votes compare with the voters (VOTEBOT-60): the scorecard is only fetched when asked about.
+# Some words say it on their own; "constituents", "district" and "voters" do only next to a word about voting or
+# wanting, so "which districts does this bill affect?" or "what services help constituents?" are not scorecard questions.
+_ALIGNMENT_ALONE = re.compile(r"\b(accountab\w*|align(?:ed|ment)?|scorecards?)\b|\bin line with\b", re.IGNORECASE)
+_ALIGNMENT_SUBJECT = re.compile(r"\b(constituents?|districts?|voters?)\b", re.IGNORECASE)
+_ALIGNMENT_ABOUT_VOTING = re.compile(
+    r"\b(vote[sd]?|voting|support\w*|oppos\w*|want(?:ed|s)?|prefer\w*|fe(?:el|lt)|match(?:ed|es|ing)?|against|agree\w*|"
+    r"disagree\w*|represent\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def asks_about_alignment(message: str, also: re.Pattern[str] | None = None) -> bool:
+    """True when the message asks how votes compare with the voters (the scorecard's subject)."""
+    return bool(
+        _ALIGNMENT_ALONE.search(message)
+        or (also is not None and also.search(message))
+        or (_ALIGNMENT_SUBJECT.search(message) and _ALIGNMENT_ABOUT_VOTING.search(message))
+    )
+
+
 LEGISLATOR_CUES = re.compile(
     r"(?<!\w)(senators?|sen\.|representatives?|reps?\.|congress(?:man|men|woman|women|person|people)|legislators?|"
     r"assembly(?:man|woman|member)s?|delegates?|lawmakers?|speaker)(?!\w)",
@@ -187,6 +211,45 @@ def _services_for(settings: Settings) -> _Services:
     return _shared_services[1]
 
 
+async def warm_up_services(settings: Settings) -> None:
+    """Warm the clients chat uses, so the first message after a deploy or restart is not the slow one (VOTEBOT-49).
+
+    Opens the Pinecone index (read only: it never creates one) and makes one request to it, and makes one tiny
+    embedding call, on the shared services (`_services_for`), so what is warm is what chat uses. Meant to run in the
+    background at startup: it never raises, and says in the log whether it ran or failed.
+    """
+    began = time.perf_counter()
+    try:
+        vector_store = _services_for(settings).retrieval.vector_store
+        outcomes = await asyncio.gather(
+            vector_store.warm(),
+            vector_store.embedding_service.embed("warm up"),  # `embed`, not `embed_query`: no entry in the query cache
+            return_exceptions=True,
+        )
+    except Exception as e:  # noqa: BLE001 -- a warm-up must never stop startup
+        logger.warning("Warm-up failed", error=str(e))
+        return
+    failed = []
+    for name, outcome in zip(("pinecone", "embeddings"), outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            failed.append(name)
+            logger.warning("Warm-up failed", client=name, error=str(outcome))
+    index_found = outcomes[0] is True
+    logger.info(
+        "Warm-up finished" if index_found and not failed else "Warm-up incomplete",
+        failed=failed,
+        pinecone_index_found=index_found,
+        duration_ms=int((time.perf_counter() - began) * 1000),
+    )
+
+
+async def close_services(settings: Settings) -> None:
+    """Close what the shared services hold open (the lifespan calls it at shutdown). Does nothing if no message
+    was ever served, so shutting down never builds the services just to close them."""
+    if _shared_services is not None and _shared_services[0] is settings:
+        await _shared_services[1].bill_votes.close()
+
+
 @dataclass
 class AgentResult:
     """Result from the agent's message processing."""
@@ -204,6 +267,24 @@ class AgentResult:
     bill_votes_tool_used: bool = False
     bill_votes_tool_duration_ms: int | None = None
     bill_votes_result: BillVotesToolResult | None = None
+
+
+@dataclass
+class PreModelContext:
+    """Everything the streaming answer gathers before the model is called (`_gather_premodel_context`)."""
+
+    retrieval_result: RetrievalResult
+    retrieved_context: str
+    rag_confidence: float
+    bill_info_context: str = ""
+    bill_votes_tool_used: bool = False
+    bill_votes_tool_duration_ms: int | None = None
+    legislator_info_context: str = ""
+    vote_verification_context: str = ""
+    org_positions_context: str = ""
+    org_bill_positions_context: str = ""
+    webflow_verification_context: str = ""
+    bill_broker_context: str = ""
 
 
 @dataclass
@@ -1075,113 +1156,20 @@ class VoteBotAgent:
             )
             return
 
-        # Step 1: Retrieve relevant context
-        with timings.phase("retrieval"):
-            retrieval_result = await self.retrieval.retrieve(
-                query=message,
-                page_context=page_context,
-            )
-
-        # Step 2: Format retrieved context
-        retrieved_context = format_retrieved_chunks(
-            [
-                {
-                    "id": chunk.id,
-                    "content": chunk.content,
-                    "metadata": chunk.metadata,
-                }
-                for chunk in retrieval_result.chunks
-            ],
-            current_document_id=retrieval_result.current_document_id,
-        )
-        if retrieval_result.notes:
-            retrieved_context = "\n\n".join([*retrieval_result.notes, retrieved_context])
-
-        # Step 2b: Pre-fetch bill info if query mentions a specific bill
-        # (This is done before streaming since tool calls can't interrupt streams)
-        rag_confidence = self._calculate_rag_confidence(retrieval_result)
-        bill_info_context = ""
-        bill_votes_tool_used_in_stream = False
-        bill_votes_tool_duration_ms: int | None = None
-        if self._should_use_bill_votes_tool(rag_confidence, message, page_context, conversation_history):
-            _bv_start = time.perf_counter()
-            with timings.phase("bill_info_prefetch"):
-                bill_info_context = await self._prefetch_bill_info(message, page_context, conversation_history)
-            bill_votes_tool_duration_ms = int((time.perf_counter() - _bv_start) * 1000)
-            # Tool counts as "used" only if prefetch actually returned live data —
-            # an empty result means the resolution didn't find a bill or OpenStates had nothing.
-            bill_votes_tool_used_in_stream = bool(bill_info_context)
-            if bill_info_context:
-                logger.info(
-                    "Pre-fetched bill info for streaming",
-                    has_info=True,
-                    duration_ms=bill_votes_tool_duration_ms,
-                )
-
-        # Step 2c: Pre-fetch legislator info if query mentions a person on a bill page
-        legislator_info_context = ""
-        if self.settings.bill_filter_key == "ocd_bill_id":
-            with timings.phase("legislator_lookup"):
-                legislator_info_context = await self._legislator_context_from_api_v3(message, page_context)
-        elif page_context and page_context.type == "bill":
-            with timings.phase("legislator_lookup"):
-                legislator_info_context = await self._prefetch_legislator_info(message)
-        if legislator_info_context:
-            logger.info("Pre-fetched legislator info for streaming")
-
-        # Step 2d: If user is disputing/verifying vote info, fetch directly from OpenStates
-        vote_verification_context = ""
-        is_dispute = self._is_dispute_or_correction(message)
-        logger.info(
-            "Checking dispute/verification trigger",
-            message=message[:50],
-            is_dispute=is_dispute,
-            page_type=page_context.type if page_context else None,
-        )
-        if is_dispute:
-            logger.info("Dispute detected, attempting vote verification")
-            with timings.phase("vote_verification"):
-                vote_verification_context = await self._verify_legislator_vote(
-                    message=message,
-                    page_context=page_context,
-                    conversation_history=conversation_history,
-                )
-            if vote_verification_context:
-                logger.info(
-                    "Vote verification successful",
-                    context_length=len(vote_verification_context),
-                )
-            else:
-                logger.warning(
-                    "Vote verification returned empty - could not find legislator or vote",
-                    message=message[:50],
-                )
-
-        # Step 2e: Pre-fetch org positions from Webflow CMS
-        org_positions_context = ""
-        if (page_context and page_context.type == "bill"
-                and self._is_org_position_query(message)):
-            with timings.phase("org_positions"):
-                org_positions_context = await self._prefetch_bill_org_positions(page_context)
-
-        # Step 2f: Pre-fetch bill positions from Webflow CMS for org pages
-        org_bill_positions_context = ""
-        if (page_context and page_context.type == "organization"
-                and self._is_bill_position_query(message)):
-            with timings.phase("org_bill_positions"):
-                org_bill_positions_context = await self._prefetch_org_bill_positions(page_context)
-
-        # Step 2g: Webflow CMS verification for all page types on disputes
-        webflow_verification_context = ""
-        if is_dispute and page_context and page_context.type in ("bill", "legislator", "organization"):
-            with timings.phase("webflow_verification"):
-                webflow_verification_context = await self._verify_from_webflow(page_context)
-
-        # Step 2h: DDP's LegBot analysis (and, when asked about, the concept poll) of the page's bill
-        bill_broker_context = ""
-        if self._wants_bill_broker_data(page_context):
-            with timings.phase("bill_broker_data"):
-                bill_broker_context = await self._prefetch_bill_broker_data(message, page_context)
+        # Steps 1 to 2h: retrieval and every lookup that does not read its result, started together (VOTEBOT-47)
+        pre = await self._gather_premodel_context(message, page_context, conversation_history, timings)
+        retrieval_result = pre.retrieval_result
+        retrieved_context = pre.retrieved_context
+        rag_confidence = pre.rag_confidence
+        bill_info_context = pre.bill_info_context
+        bill_votes_tool_used_in_stream = pre.bill_votes_tool_used
+        bill_votes_tool_duration_ms = pre.bill_votes_tool_duration_ms
+        legislator_info_context = pre.legislator_info_context
+        vote_verification_context = pre.vote_verification_context
+        org_positions_context = pre.org_positions_context
+        org_bill_positions_context = pre.org_bill_positions_context
+        webflow_verification_context = pre.webflow_verification_context
+        bill_broker_context = pre.bill_broker_context
 
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
@@ -1364,6 +1352,150 @@ class VoteBotAgent:
         messages.append({"role": "user", "content": message})
 
         return messages
+
+    async def _gather_premodel_context(
+        self,
+        message: str,
+        page_context: PageContext,
+        conversation_history: list[dict] | None,
+        timings: PhaseTimings,
+    ) -> PreModelContext:
+        """Retrieval, and every lookup that does not read its result, run at the same time (VOTEBOT-47).
+
+        The lookups are started first and awaited after retrieval, so the wait before the model is asked is the
+        slowest of them, not the sum. They all share the message's one enrichment deadline (the tasks inherit it),
+        and a lookup that fails or runs out of time costs only its own context. If retrieval fails, or the caller
+        gives up, the lookups still running are cancelled. The bill-info prefetch is the one with a trigger that
+        looks at retrieval (`rag_confidence`); that trigger only ever adds cases, so it is asked with the best
+        possible confidence first: a "yes" holds whatever retrieval finds and the prefetch starts now, with no
+        call that could turn out unneeded. A trigger that would say "yes" only for a low confidence is asked
+        again once retrieval is in, and then runs after it, as it always did. Phase durations now overlap: they
+        add up to more than the wait.
+        """
+        lookups: list[asyncio.Future] = []
+
+        def start(name: str, make_coro):
+            async def run():
+                with timings.phase(name):
+                    try:
+                        return await make_coro()
+                    except Exception as e:  # noqa: BLE001 -- a lookup costs its own context, never the answer
+                        logger.error("Lookup failed; answering without it", lookup=name, error=str(e))
+                        return ""
+
+            task = asyncio.ensure_future(run())
+            lookups.append(task)
+            return task
+
+        async def prefetch_bill_info() -> tuple[str, int]:
+            began = time.perf_counter()
+            context = await self._prefetch_bill_info(message, page_context, conversation_history)
+            return context, int((time.perf_counter() - began) * 1000)
+
+        try:
+            is_dispute = self._is_dispute_or_correction(message)
+            logger.info(
+                "Checking dispute/verification trigger",
+                message=message[:50],
+                is_dispute=is_dispute,
+                page_type=page_context.type if page_context else None,
+            )
+
+            bill_info_task = None
+            if self._should_use_bill_votes_tool(1.0, message, page_context, conversation_history):
+                bill_info_task = start("bill_info_prefetch", prefetch_bill_info)
+
+            if self.settings.bill_filter_key == "ocd_bill_id":
+                legislator_task = start(
+                    "legislator_lookup", lambda: self._legislator_context_from_api_v3(message, page_context)
+                )
+            elif page_context and page_context.type == "bill":
+                legislator_task = start("legislator_lookup", lambda: self._prefetch_legislator_info(message))
+            else:
+                legislator_task = None
+
+            vote_task = webflow_task = org_task = org_bill_task = broker_task = None
+            if is_dispute:
+                logger.info("Dispute detected, attempting vote verification")
+                vote_task = start(
+                    "vote_verification",
+                    lambda: self._verify_legislator_vote(
+                        message=message, page_context=page_context, conversation_history=conversation_history
+                    ),
+                )
+                if page_context and page_context.type in ("bill", "legislator", "organization"):
+                    webflow_task = start("webflow_verification", lambda: self._verify_from_webflow(page_context))
+            if page_context and page_context.type == "bill" and self._is_org_position_query(message):
+                org_task = start("org_positions", lambda: self._prefetch_bill_org_positions(page_context))
+            if page_context and page_context.type == "organization" and self._is_bill_position_query(message):
+                org_bill_task = start("org_bill_positions", lambda: self._prefetch_org_bill_positions(page_context))
+            if self._wants_bill_broker_data(page_context):
+                broker_task = start(
+                    "bill_broker_data", lambda: self._prefetch_bill_broker_data(message, page_context)
+                )
+
+            # Step 1: Retrieve relevant context (the lookups above run meanwhile)
+            with timings.phase("retrieval"):
+                retrieval_result = await self.retrieval.retrieve(query=message, page_context=page_context)
+
+            # Step 2: Format retrieved context
+            retrieved_context = format_retrieved_chunks(
+                [
+                    {"id": chunk.id, "content": chunk.content, "metadata": chunk.metadata}
+                    for chunk in retrieval_result.chunks
+                ],
+                current_document_id=retrieval_result.current_document_id,
+            )
+            if retrieval_result.notes:
+                retrieved_context = "\n\n".join([*retrieval_result.notes, retrieved_context])
+            rag_confidence = self._calculate_rag_confidence(retrieval_result)
+            pre = PreModelContext(retrieval_result, retrieved_context, rag_confidence)
+
+            # Step 2b: the live bill info (a vote question, a named bill, a status question on a bill page)
+            if bill_info_task is None and self._should_use_bill_votes_tool(
+                rag_confidence, message, page_context, conversation_history
+            ):
+                bill_info_task = start("bill_info_prefetch", prefetch_bill_info)  # only a low confidence asks for it
+            if bill_info_task is not None:
+                pre.bill_info_context, pre.bill_votes_tool_duration_ms = (await bill_info_task) or ("", None)
+                # Tool counts as "used" only if prefetch actually returned live data -- an empty result means the
+                # resolution didn't find a bill or OpenStates had nothing.
+                pre.bill_votes_tool_used = bool(pre.bill_info_context)
+                if pre.bill_info_context:
+                    logger.info(
+                        "Pre-fetched bill info for streaming",
+                        has_info=True,
+                        duration_ms=pre.bill_votes_tool_duration_ms,
+                    )
+
+            # Step 2c: legislator info if the query mentions a person
+            if legislator_task is not None:
+                pre.legislator_info_context = await legislator_task
+                if pre.legislator_info_context:
+                    logger.info("Pre-fetched legislator info for streaming")
+
+            # Step 2d: a disputed or checked vote, fetched directly from OpenStates
+            if vote_task is not None:
+                pre.vote_verification_context = await vote_task
+                if pre.vote_verification_context:
+                    logger.info("Vote verification successful", context_length=len(pre.vote_verification_context))
+                else:
+                    logger.warning(
+                        "Vote verification returned empty - could not find legislator or vote", message=message[:50]
+                    )
+
+            # Steps 2e to 2h: organization positions, CMS verification, and DDP's analysis of the bill
+            if org_task is not None:
+                pre.org_positions_context = await org_task
+            if org_bill_task is not None:
+                pre.org_bill_positions_context = await org_bill_task
+            if webflow_task is not None:
+                pre.webflow_verification_context = await webflow_task
+            if broker_task is not None:
+                pre.bill_broker_context = await broker_task
+            return pre
+        finally:
+            await cancel_and_wait(lookups)
 
     def _extract_page_info(self, page_context: PageContext) -> dict:
         """Extract page info dict from PageContext."""
@@ -2257,40 +2389,47 @@ class VoteBotAgent:
         return format_org_bill_positions(org, positions, self.settings.ddp_site_base_url)
 
     def _wants_bill_broker_data(self, page_context: PageContext | None) -> bool:
-        """A bill page on the canonical-id index that names the bill (the broker keys its analysis by
-        jurisdiction, session and identifier) and a broker to ask."""
+        """A bill page on the canonical-id index that names the bill (the broker keys its analysis by jurisdiction,
+        session and identifier, and its scorecard by the OpenStates id) and a broker to ask."""
         return bool(
             page_context
             and page_context.type == "bill"
             and self.settings.bill_filter_key == "ocd_bill_id"
             and self.settings.ddp_broker_api_root
-            and page_context.jurisdiction
-            and page_context.session
-            and page_context.id
+            and ((page_context.jurisdiction and page_context.session and page_context.id) or page_context.ocd_bill_id)
         )
 
     async def _prefetch_bill_broker_data(self, message: str, page_context: PageContext) -> str:
-        """DDP's LegBot analysis of the page's bill, and its concept poll when the message asks about it,
-        from ddp-broker-py. One time budget with the other lookups; a slow or failing broker costs the
-        extra context, never the answer."""
+        """DDP's LegBot analysis of the page's bill, its concept poll when the message asks about it and its
+        constituent-alignment scorecard when the message asks about that, from ddp-broker-py. One time budget with
+        the other lookups; a slow or failing broker costs the extra context, never the answer."""
         deadline = _enrichment_deadline.get()
         args = (page_context.jurisdiction, page_context.session, page_context.id, deadline)
         asks_about_poll = bool(POLL_QUERY.search(message))
-        try:
-            analysis, poll = await asyncio.wait_for(
-                asyncio.gather(
-                    self.broker_lookup.get_bill_analysis(*args),
-                    self.broker_lookup.get_concept_poll(*args) if asks_about_poll else asyncio.sleep(0),
-                ),
-                _enrichment_budget_left(),
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Broker bill analysis took too long; answering without it")
-            return ""
-        except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
-            logger.error("Broker bill analysis failed; answering without it", error=str(e))
-            return ""
-        parts = [format_bill_analysis(analysis), format_concept_poll(poll if asks_about_poll else None)]
+        asks_about_scorecard = asks_about_alignment(message) and bool(bare_uuid(page_context.ocd_bill_id))
+
+        async def settled(name: str, call):
+            """One lookup's result, or None: a slow or failing one costs only its own context, not its siblings'."""
+            try:
+                return await asyncio.wait_for(call, _enrichment_budget_left())
+            except asyncio.TimeoutError:
+                logger.warning("Broker lookup took too long; answering without it", lookup=name)
+            except Exception as e:  # noqa: BLE001 -- a broker problem costs the extra context, never the answer
+                logger.error("Broker lookup failed; answering without it", lookup=name, error=str(e))
+            return None
+
+        analysis, poll, scorecard = await asyncio.gather(
+            settled("bill analysis", self.broker_lookup.get_bill_analysis(*args)),
+            settled("concept poll", self.broker_lookup.get_concept_poll(*args)) if asks_about_poll else asyncio.sleep(0),
+            settled("bill scorecard", self.broker_lookup.get_bill_scorecard(page_context.ocd_bill_id, deadline))
+            if asks_about_scorecard
+            else asyncio.sleep(0),
+        )
+        parts = [
+            format_bill_analysis(analysis),
+            format_concept_poll(poll if asks_about_poll else None),
+            format_bill_scorecard(scorecard if asks_about_scorecard else None),
+        ]
         return "\n\n".join(p for p in parts if p)
 
     async def _prefetch_bill_org_positions_from_broker(self, page_context: PageContext) -> str:

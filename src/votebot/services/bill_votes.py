@@ -3,8 +3,10 @@
 This service provides real-time vote lookup for bills via the OpenStates API.
 """
 
+import asyncio
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import httpx
@@ -16,6 +18,7 @@ from votebot.services.openstates_client import openstates_base_url, openstates_h
 logger = structlog.get_logger()
 
 PARTY_CACHE_SECONDS = 3600  # the service lives as long as the process (VOTEBOT-37), so a party change must be picked up
+PARTY_RETRY_SECONDS = 60  # after a refresh that failed, the old roster is served this long before the next attempt
 
 
 @dataclass
@@ -93,6 +96,38 @@ class BillVotesService:
         self.settings = settings or get_settings()
         # Cache for legislator lookups: jurisdiction -> (when stored, {name: party})
         self._legislator_cache: dict[str, tuple[float, dict[str, str]]] = {}
+        self._refreshing: dict[str, asyncio.Task] = {}  # roster refreshes running now, one per jurisdiction
+        # One long-lived client for OpenStates and Congress.gov (VOTEBOT-50), made on first use
+        self._http: httpx.AsyncClient | None = None
+        self._http_loop: asyncio.AbstractEventLoop | None = None
+
+    @asynccontextmanager
+    async def _client(self):
+        """The shared HTTP client, so a lookup reuses an open connection instead of starting with a new TCP and TLS
+        handshake. Made on first use and rebuilt if the event loop changed (a client belongs to the loop it was made
+        on): a client whose loop has ended is dropped (its connections died with the loop, there is nothing left to
+        close), and one whose loop is still running is not taken over but refused. Production has one loop; this
+        keeps a service shared across the loops of a test suite from reusing a dead client. The 30 s timeout is the
+        client's, as before, and the pool is sized for a hundred chats at once. Request headers, and so the
+        credential's shape, are chosen per request by the callers, never fixed here."""
+        loop = asyncio.get_running_loop()
+        if self._http is not None and self._http_loop is not loop:
+            if not self._http_loop.is_closed():
+                raise RuntimeError("the shared HTTP client belongs to another running event loop")
+            self._http = None
+        if self._http is None:
+            self._http = httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(max_connections=200, max_keepalive_connections=50, keepalive_expiry=30.0),
+            )
+            self._http_loop = loop
+        yield self._http
+
+    async def close(self) -> None:
+        """Close the shared client (the lifespan does at shutdown). A later lookup makes a new one."""
+        client, self._http, self._http_loop = self._http, None, None
+        if client is not None:
+            await client.aclose()
 
     @property
     def api_base(self) -> str:
@@ -156,16 +191,36 @@ class BillVotesService:
             except ValueError:
                 pass
 
-        for try_session in sessions_to_try:
-            result = await self._fetch_bill_info(jurisdiction, try_session, clean_bill_id)
-            if result and result.found:
-                logger.info(
-                    "Found bill in session",
-                    jurisdiction=jurisdiction,
-                    session=try_session,
-                    bill_identifier=bill_identifier,
-                )
-                return result
+        # The specified session first. Only if it does not have the bill are the older ones asked, and then
+        # together rather than one after another: the newest older session that has the bill still wins, and an
+        # older one still running once a newer one has answered is cancelled (VOTEBOT-50).
+        result = await self._fetch_bill_info(jurisdiction, sessions_to_try[0], clean_bill_id)
+        if result and result.found:
+            logger.info(
+                "Found bill in session",
+                jurisdiction=jurisdiction,
+                session=sessions_to_try[0],
+                bill_identifier=bill_identifier,
+            )
+            return result
+
+        older = sessions_to_try[1:]
+        tasks = [asyncio.ensure_future(self._fetch_bill_info(jurisdiction, s, clean_bill_id)) for s in older]
+        try:
+            for try_session, task in zip(older, tasks, strict=True):
+                result = await task
+                if result and result.found:
+                    logger.info(
+                        "Found bill in session",
+                        jurisdiction=jurisdiction,
+                        session=try_session,
+                        bill_identifier=bill_identifier,
+                    )
+                    return result
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Return not-found result
         return BillInfoResult(
@@ -201,7 +256,7 @@ class BillVotesService:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with self._client() as client:
                 headers = {
                     "accept": "application/json",
                     **openstates_headers(self.settings),
@@ -304,7 +359,9 @@ class BillVotesService:
         """
         Get a mapping of legislator names to their party affiliation.
 
-        Uses caching to avoid repeated API calls for the same jurisdiction.
+        A roster older than `PARTY_CACHE_SECONDS` is still served at once while one background refresh fetches the
+        new one (VOTEBOT-48), so no visitor waits for the download after the first. Only a jurisdiction not yet
+        known to this process is fetched inline (`warm_parties` does that at startup for the federal one).
 
         Args:
             jurisdiction: State code (e.g., 'va', 'fl')
@@ -315,16 +372,37 @@ class BillVotesService:
             Dict mapping legislator names (lowercase) to party name
         """
         cache_key = f"legislators-{jurisdiction.lower()}"
-
-        # Check cache first
         cached = self._legislator_cache.get(cache_key)
-        if cached and time.monotonic() - cached[0] < PARTY_CACHE_SECONDS:
+        if cached:
+            if time.monotonic() - cached[0] >= PARTY_CACHE_SECONDS:
+                self._refresh_parties_in_background(jurisdiction)  # the stale roster answers meanwhile
             return cached[1]
 
+        running = self._refreshing.get(cache_key)
+        if running is not None:
+            # a download of this roster is already under way (the startup warm): wait for that one instead of
+            # starting a second; shielded, so a visitor who leaves does not cancel it
+            await asyncio.shield(running)
+            cached = self._legislator_cache.get(cache_key)
+            if cached:
+                return cached[1]  # and if it failed there is nothing cached: fetch inline, as below
+
         logger.info("Fetching legislators for party info", jurisdiction=jurisdiction)
+        name_to_party, complete = await self._download_parties(jurisdiction, client, headers)
+        if complete:  # a partial roster answers this once and is asked for again next time
+            self._legislator_cache[cache_key] = (time.monotonic(), name_to_party)
+            logger.info("Cached legislator party info", jurisdiction=jurisdiction, count=len(name_to_party))
+        elif cached := self._legislator_cache.get(cache_key):
+            return cached[1]  # a whole roster arrived while this one failed: use it, not the partial one
+        return name_to_party
 
+    async def _download_parties(
+        self, jurisdiction: str, client: httpx.AsyncClient, headers: dict
+    ) -> tuple[dict[str, str], bool]:
+        """The roster from api-v3, both chambers, page by page. The flag is False when a page was refused or a
+        request failed: what came back before it is returned, but it is not the whole roster. (api-v3 answers an
+        empty list, not an error, for a chamber a jurisdiction does not have.)"""
         name_to_party: dict[str, str] = {}
-
         try:
             # Fetch legislators from both chambers
             for org_class in ["upper", "lower"]:
@@ -343,7 +421,7 @@ class BillVotesService:
                     response = await client.get(url, headers=headers, params=params)
 
                     if response.status_code != 200:
-                        break
+                        return name_to_party, False
 
                     data = response.json()
                     results = data.get("results", [])
@@ -361,19 +439,45 @@ class BillVotesService:
                     if offset + len(results) >= total or len(results) < per_page:
                         break
                     offset += per_page
-
-            # Cache the results
-            self._legislator_cache[cache_key] = (time.monotonic(), name_to_party)
-            logger.info(
-                "Cached legislator party info",
-                jurisdiction=jurisdiction,
-                count=len(name_to_party),
-            )
-
         except Exception as e:
             logger.warning("Failed to fetch legislator parties", error=str(e))
+            return name_to_party, False
+        return name_to_party, True
 
-        return name_to_party
+    def _refresh_parties_in_background(self, jurisdiction: str) -> asyncio.Task:
+        """Start the refresh of a roster unless one is already running for it; return the running task."""
+        key = f"legislators-{jurisdiction.lower()}"
+        running = self._refreshing.get(key)
+        if running is not None:
+            return running
+        task = asyncio.ensure_future(self._refresh_parties(jurisdiction))
+        self._refreshing[key] = task
+        task.add_done_callback(lambda _t, k=key: self._refreshing.pop(k, None))
+        return task
+
+    def warm_parties(self, jurisdiction: str = "us") -> asyncio.Task:
+        """Fetch a roster in the background (the lifespan does it for the federal one), so no chat waits for it."""
+        return self._refresh_parties_in_background(jurisdiction)
+
+    async def _refresh_parties(self, jurisdiction: str) -> None:
+        """Replace a roster with a fresh, whole one. A failed or partial download changes nothing: the old roster
+        keeps serving and the next attempt comes after `PARTY_RETRY_SECONDS`, never an empty roster and never an
+        error to a visitor."""
+        key = f"legislators-{jurisdiction.lower()}"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                roster, complete = await self._download_parties(jurisdiction, client, openstates_headers(self.settings))
+        except Exception as e:  # noqa: BLE001 -- a refresh must never reach a visitor
+            roster, complete = {}, False
+            logger.warning("Failed to refresh legislator parties", jurisdiction=jurisdiction, error=str(e))
+        if complete and roster:
+            self._legislator_cache[key] = (time.monotonic(), roster)
+            logger.info("Refreshed legislator party info", jurisdiction=jurisdiction, count=len(roster))
+            return
+        logger.warning("Kept the previous legislator party roster", jurisdiction=jurisdiction)
+        old = self._legislator_cache.get(key)
+        if old:  # try again in PARTY_RETRY_SECONDS, not on every message
+            self._legislator_cache[key] = (time.monotonic() - PARTY_CACHE_SECONDS + PARTY_RETRY_SECONDS, old[1])
 
     def format_bill_info_document(self, result: BillInfoResult, page_url: str | None = None) -> str:
         """Format full bill info into a readable document.
@@ -521,7 +625,7 @@ class BillVotesService:
         url = f"{self.api_base}/bills/{jurisdiction.lower()}/{session}/{clean_bill_id}"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with self._client() as client:
                 headers = {
                     "accept": "application/json",
                     **openstates_headers(self.settings),
@@ -623,7 +727,7 @@ class BillVotesService:
         bill_url = f"https://api.congress.gov/v3/bill/{congress}/{bill_type}/{bill_number}"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with self._client() as client:
                 params = {"api_key": api_key, "format": "json"}
 
                 # Get bill info
