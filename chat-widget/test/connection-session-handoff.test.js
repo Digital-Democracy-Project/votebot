@@ -3,7 +3,9 @@
 // VOTEBOT-62 (step 3 of plans/PLAN-chat-widget-react-and-design-system.md): characterization tests of what the
 // current widget does and no test covered: the visitor id and session storage (keys, 30-minute rule), the
 // WebSocket reconnection and heartbeat, and the human-handoff states. They describe today's behaviour so that
-// whatever replaces the widget can be held to it; they do not change it.
+// whatever replaces the widget can be held to it; they do not change it. They drive DDPWebSocket and DDPChat
+// directly (the handoff tests hand the socket's messages to DDPChat.handleServerMessage, as widget.js does): the
+// wiring inside widget.js itself, which needs the DOM, is not covered here.
 //
 // websocket.js and chat.js are scripts with top-level `const`s, so each test loads them (src) or the whole
 // committed bundle (dist) in a vm with a fake WebSocket, fake storage and fake timers.
@@ -37,7 +39,7 @@ function makeStorage(initial = {}, { throws = false } = {}) {
 }
 
 // One page load. Storage can be handed over to the next load to model a navigation or a new visit.
-function load(target, { local = makeStorage(), session = makeStorage() } = {}) {
+function load(target, { local = makeStorage(), session = makeStorage(), crypto } = {}) {
     const sockets = [];
     class FakeWebSocket {
         constructor(url) {
@@ -70,6 +72,7 @@ function load(target, { local = makeStorage(), session = makeStorage() } = {}) {
         Math,
         JSON,
         WebSocket: FakeWebSocket,
+        crypto,
         localStorage: local,
         sessionStorage: session,
         setTimeout: (fn, ms) => timeouts.push({ fn, ms }),
@@ -111,6 +114,11 @@ for (const target of Object.keys(TARGETS)) {
 
         const nextVisit = load(target, { local: first.local, session: makeStorage() });
         assert.strictEqual(nextVisit.DDPWebSocket.getVisitorId(), id);
+    });
+
+    test(`with crypto.randomUUID the visitor id is v_ and the first 12 hex characters of the uuid [${target}]`, () => {
+        const h = load(target, { crypto: { randomUUID: () => 'a3f7c0d1-1111-4222-8333-444455556666' } });
+        assert.strictEqual(h.DDPWebSocket.getVisitorId(), 'v_a3f7c0d11111');
     });
 
     test(`with storage disabled the visitor id is null and nothing throws [${target}]`, () => {
@@ -164,6 +172,17 @@ for (const target of Object.keys(TARGETS)) {
         assert.strictEqual(h.sockets[0].url, WS_URL);
     });
 
+    test(`with sessionStorage disabled the widget still connects, with no session to resume, and sends [${target}]`, () => {
+        const h = load(target, { session: makeStorage({}, { throws: true }) }); // localStorage still works
+        connect(h);
+        assert.strictEqual(h.sockets[0].url, WS_URL);
+        open(h.sockets[0]);
+        serverSays(h.sockets[0], { type: 'session_info', payload: { session_id: 'abc123' } }); // cannot be stored: no throw
+        assert.strictEqual(h.DDPWebSocket.getSessionId(), 'abc123');
+        assert.strictEqual(h.DDPWebSocket.send({ type: 'user_message' }), true);
+        assert.strictEqual(h.DDPWebSocket.isSessionExpired(), true); // nothing was recorded, so a reload starts fresh
+    });
+
     test(`sending is refused until the socket is open, and a sent message counts as activity [${target}]`, () => {
         const h = load(target);
         connect(h);
@@ -186,6 +205,7 @@ for (const target of Object.keys(TARGETS)) {
         let socket = h.sockets[0];
         for (let attempt = 0; attempt < 4; attempt++) {
             close(socket);
+            assert.strictEqual(h.timeouts.length, attempt + 1); // exactly one retry is scheduled per close
             const retry = h.timeouts[h.timeouts.length - 1];
             delays.push(retry.ms);
             retry.fn();
@@ -234,6 +254,22 @@ for (const target of Object.keys(TARGETS)) {
 
         close(h.sockets[0]);
         assert.strictEqual(h.clearedIntervals.length, 1);
+    });
+
+    test(`after a reconnect there is one live heartbeat, on the new socket [${target}]`, () => {
+        const h = load(target);
+        connect(h);
+        open(h.sockets[0]);
+        close(h.sockets[0]);
+        assert.strictEqual(h.clearedIntervals.length, 1); // the first socket's timer is stopped
+        h.timeouts[0].fn();
+        open(h.sockets[1]);
+        assert.strictEqual(h.intervals.length, 2); // the second socket has its own, started once
+        open(h.sockets[1]); // a repeated open replaces it rather than leaving two running
+        assert.strictEqual(h.clearedIntervals.length, 2);
+        h.intervals[h.intervals.length - 1].fn();
+        assert.deepStrictEqual(plain(h.sockets[1].sent), [{ type: 'ping' }]);
+        assert.deepStrictEqual(plain(h.sockets[0].sent), []);
     });
 
     // --- human handoff (chat.js) ----------------------------------------------------------------------------
@@ -290,6 +326,8 @@ for (const target of Object.keys(TARGETS)) {
         assert.strictEqual(h.DDPChat.getIsStreaming(), false);
         assert.ok(types(ui).includes('input_enable'));
         assert.ok(!types(ui).includes('handoff_suggested'));
+        assert.strictEqual(h.DDPChat.sendMessage('And who supports it?', null), true); // the voter can ask again
+        assert.strictEqual(h.sockets[0].sent[h.sockets[0].sent.length - 1].payload.message, 'And who supports it?');
     });
 
     test(`an answer that asks for a human suggests the handoff, and an agent leaving also frees a stuck stream [${target}]`, () => {
@@ -303,6 +341,7 @@ for (const target of Object.keys(TARGETS)) {
         assert.strictEqual(h.DDPChat.getIsStreaming(), true);
         serverSays(h.sockets[0], { type: 'agent_left', payload: {} });
         assert.strictEqual(h.DDPChat.getIsStreaming(), false);
+        assert.strictEqual(h.DDPChat.sendMessage('Thanks', null), true);
     });
 
     test(`a server error frees the input [${target}]`, () => {
@@ -312,5 +351,7 @@ for (const target of Object.keys(TARGETS)) {
         serverSays(h.sockets[0], { type: 'error', payload: { code: 'processing_error', message: 'Sorry' } });
         assert.strictEqual(h.DDPChat.getIsStreaming(), false);
         assert.deepStrictEqual(types(ui).slice(-2), ['error', 'input_enable']);
+        assert.strictEqual(h.DDPChat.sendMessage('Try again', null), true);
+        assert.strictEqual(h.sockets[0].sent[h.sockets[0].sent.length - 1].payload.message, 'Try again');
     });
 }

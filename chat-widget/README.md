@@ -50,7 +50,7 @@ The built file is committed (`git add -f chat-widget/dist/ddp-chat.min.js`; `dis
 npm test
 ```
 
-Runs every `test/*.test.js` on Node's built-in test runner; no dependencies. Each file loads `src` and the committed `dist/ddp-chat.min.js`, so a stale rebuild fails. They cover page-context normalization and change detection, the quick-action buttons, Markdown link safety, the Webflow-embed title decoding, and (`connection-session-handoff.test.js`) the visitor id and session storage (keys, 30-minute rule), WebSocket reconnection and heartbeat, and the human-handoff states.
+Runs every `test/*.test.js` on Node's built-in test runner; no dependencies. Each file loads `src` and the committed `dist/ddp-chat.min.js`, so a stale rebuild fails. They cover page-context normalization and change detection, the quick-action buttons, Markdown link safety, the Webflow-embed title decoding, and (`connection-session-handoff.test.js`) the visitor id and session storage (keys, 30-minute rule), WebSocket reconnection and heartbeat, and the human-handoff states (these drive `DDPWebSocket` and `DDPChat` directly; the wiring inside `widget.js`, which needs the DOM, is not covered).
 
 ### Local Testing
 
