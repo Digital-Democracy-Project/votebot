@@ -600,7 +600,7 @@ A copy of VoteBot runs on the Mac Studio against the **dev** stack, so a change 
 
 This VoteBot's own `.env` needs `DDP_SITE_BASE_URL=https://dev.digitaldemocracyproject.org` (answer links point at the dev domain) and that origin in `ALLOWED_ORIGINS` (the widget calls the same host, so the browser sees no cross-origin request; it is there for any caller that is not same-origin). The websocket itself has no origin check. Check each hop from the Mac side first: `curl -sk https://localhost/votebot/v1/health/live` (200) and a websocket handshake to `wss://localhost/ws/chat` (101); then the same two against the dev domain.
 
-**Rollback** is the one setting in step 1: `VOTEBOT_WS_URL=wss://mapapp.digitaldemocracyproject.org/ws/chat` and restart ddp-next returns the whole chat, socket and HTTP calls, to the 2.0 service. The nginx changes in steps 2 and 3 are inert until the setting points at them. There is no rate limit on this path (VOTEBOT-14 holds the same open question for the civic host).
+**Rollback** is the one setting in step 1: `VOTEBOT_WS_URL=wss://mapapp.digitaldemocracyproject.org/ws/chat` and restart ddp-next returns the whole chat, socket and HTTP calls, to the 2.0 service. The nginx changes in steps 2 and 3 are inert until the setting points at them; to undo the Mac side as well, remove `VOTEBOT_UPSTREAM` from the broker's `.env` and recreate only its nginx service (the default, the civic host's container, resumes, and the two locations answer 502 on the Mac again). `VOTEBOT_UPSTREAM` is a Mac-only override: no deployed host sets it. There is no rate limit on this path (VOTEBOT-14 holds the same open question for the civic host).
 
 ### Running Tests
 
