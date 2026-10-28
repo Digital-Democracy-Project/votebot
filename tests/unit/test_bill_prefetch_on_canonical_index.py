@@ -1,8 +1,8 @@
-"""VOTEBOT-52: on the canonical-id index (VoteBot 3.0, ddp-next) the live bill lookup never consults Webflow.
+"""VOTEBOT-52: on the canonical-id index (VoteBot 3.0, ddp-next) the live bill lookup never consults the legacy CMS.
 
-Webflow is deprecated and its code goes with VOTEBOT-17. A page context that still carries a `slug` (a Webflow-style
-context sent to the new copy) used to make `_prefetch_bill_info` read the bill from the CMS on every message. On the
-new index the page already names the bill, so nothing is asked of Webflow, configured or not; the legacy index is unchanged.
+The legacy CMS path goes with VOTEBOT-17. A page context that still carries a `slug` used to make
+`_prefetch_bill_info` read the bill from the CMS on every message. On the new index the page already names the
+bill, so nothing is asked of it, configured or not; the legacy index is unchanged.
 """
 
 from __future__ import annotations

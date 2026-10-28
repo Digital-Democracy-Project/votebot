@@ -2109,8 +2109,8 @@ class VoteBotAgent:
         # for identifier so the user can ask about a different bill than the
         # one whose page they're on.
         # Legacy index only (VOTEBOT-52): on the canonical-id index the page already names the bill (identifier,
-        # jurisdiction and session, from ddp-next or /content/resolve) and Webflow is deprecated, so a slug there
-        # is never looked up in the CMS (it used to cost a request to Webflow, refused, on every message).
+        # jurisdiction and session, from ddp-next or /content/resolve), so a slug there is never looked up in the
+        # CMS (it used to cost a refused request on every message).
         openstates_url_from_cms: str | None = None
         session_from_cms: str | None = None
         if page_context and page_context.type == "bill" and self.settings.bill_filter_key != "ocd_bill_id":
