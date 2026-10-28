@@ -290,6 +290,7 @@ class PreModelContext:
     org_bill_positions_context: str = ""
     webflow_verification_context: str = ""
     bill_broker_context: str = ""
+    legislator_scorecard_context: str = ""
 
 
 @dataclass
@@ -1182,12 +1183,7 @@ class VoteBotAgent:
         org_bill_positions_context = pre.org_bill_positions_context
         webflow_verification_context = pre.webflow_verification_context
         bill_broker_context = pre.bill_broker_context
-
-        # Step 2i: DDP's constituent-alignment scorecard of the page's legislator
-        legislator_scorecard_context = ""
-        if self._wants_legislator_scorecard(page_context):
-            with timings.phase("legislator_scorecard"):
-                legislator_scorecard_context = await self._prefetch_legislator_scorecard(message, page_context)
+        legislator_scorecard_context = pre.legislator_scorecard_context
 
         # Step 3: Build page info and system prompt
         page_info = self._extract_page_info(page_context)
@@ -1453,6 +1449,12 @@ class VoteBotAgent:
                 broker_task = start(
                     "bill_broker_data", lambda: self._prefetch_bill_broker_data(message, page_context)
                 )
+            # Step 2i: DDP's constituent-alignment scorecard of the page's legislator, started with the others (VOTEBOT-60)
+            scorecard_task = None
+            if self._wants_legislator_scorecard(page_context):
+                scorecard_task = start(
+                    "legislator_scorecard", lambda: self._prefetch_legislator_scorecard(message, page_context)
+                )
 
             # Step 1: Retrieve relevant context (the lookups above run meanwhile)
             with timings.phase("retrieval"):
@@ -1513,6 +1515,8 @@ class VoteBotAgent:
                 pre.webflow_verification_context = await webflow_task
             if broker_task is not None:
                 pre.bill_broker_context = await broker_task
+            if scorecard_task is not None:
+                pre.legislator_scorecard_context = await scorecard_task
             return pre
         finally:
             await cancel_and_wait(lookups)
