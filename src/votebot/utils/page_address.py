@@ -18,6 +18,7 @@ def page_address(value: object) -> str | None:
         return None
     try:
         parsed = urlparse(value.strip())
+        parsed.port  # raises ValueError for a port that is not a number in range
     except ValueError:  # e.g. an unclosed "[" in the host: the value comes from a browser, so it can be anything
         return None
     if parsed.scheme not in ("http", "https") or not parsed.netloc:

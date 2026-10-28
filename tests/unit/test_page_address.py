@@ -41,7 +41,7 @@ class TestPageAddress:
         assert page_address(value) == expected
 
     @pytest.mark.parametrize(
-        "value", [None, "", "   ", 5, "not a url?token=abc", "javascript:alert(1)//?token=abc", "ftp://example.test/a", "https://", "http://[::1/a?token=abc"]
+        "value", [None, "", "   ", 5, "not a url?token=abc", "javascript:alert(1)//?token=abc", "ftp://example.test/a", "https://", "http://[::1/a?token=abc", "https://example.test:notaport/a?token=abc", "https://example.test:99999/a"]
     )
     def test_anything_that_is_not_an_http_address_is_dropped_not_kept(self, value):
         assert page_address(value) is None
