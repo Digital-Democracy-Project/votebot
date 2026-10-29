@@ -966,7 +966,7 @@ By question, the median first token (client) fell most where several lookups use
 
 What this does not show: **production traffic** (the timing fields have been in production since 2026-10-28 01:21 UTC, `740fc1d`, so the host's `/opt/votebot-logs/queries` has no earlier baseline: run `scripts/latency_report.py` on it after a few days of real traffic and keep the SHA), the 100-client load (the VOTEBOT-35 harness stubs the model), and anything beyond a small sample (18 per instance; p95 on that is decided by the slowest one or two messages).
 
-Which targets are reachable: about 2.9 s of a median answer is the model writing it (2.0 fit: about 1.3 s fixed plus 2.5 s per 1,000 characters), and the plain bill question writes about 3,700 characters, so an end-to-end p50 under 2.5 s is not reachable for long answers whatever VoteBot does. **First token is the target VoteBot's own work controls.** Proposed: keep "first token p50 < 1.5 s" and add "first token p95 < 2.5 s" (1.91 s here), and read end to end by answer length.
+Which targets are reachable: about 2.9 s of a median answer is the model writing it (2.0 fit: about 1.3 s fixed plus 2.5 s per 1,000 characters), and the plain bill question writes about 3,700 characters, so an end-to-end p50 under 2.5 s is not reachable for long answers whatever VoteBot does. **First token is the target VoteBot's own work controls.** **Decided 2026-10-29 (Ramon):** keep "first token p50 < 1.5 s" and add "first token p95 < 2.5 s" (1.91 s on the dev box), and read end to end by answer length; the 7-day production report (VOTEBOT-43) is read against these.
 
 ## Troubleshooting
 
