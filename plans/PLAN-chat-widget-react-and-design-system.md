@@ -2,6 +2,8 @@
 
 Status: **recommendation, for Ramon to agree or change.** Nothing is built. VOTEBOT-62 asks for this first ("decide how the widget is delivered, in a short written recommendation") and says no building starts before it is agreed. Written 2026-10-28.
 
+**Where things stand (2026-10-28, evening):** step 1 is merged (votebot #81, plus the server change #82 and the session tests #84). Step 4 is built and merged in ddp-next (#75, behind `VOTEBOT_CHAT_COMPONENT=1`, on in dev only; #76 refreshed `public/widget/` to the post-#81 bundle, sha256 `7106d2b9...`). Dev is deployed. **Not done:** production deployment of VoteBot, VOTEBOT-54, step 3's missing tests for the old widget (the React side has its own), and steps 5 and 6. The text below is the original recommendation; read steps 1 and 4 as done.
+
 ## Recommendation in five lines
 
 1. **Build the chat once, as a React component that lives in ddp-next** (`src/components/chat/`). No separate Next.js app, no script tag, no global, no Shadow DOM.
@@ -75,10 +77,10 @@ The "none" rows are where a rewrite is most likely to regress without anyone not
 ## Suggested order
 
 1. **VOTEBOT-63** (PR #81): page address, in the current widget. Done first, so the rebuild does not carry it.
-2. **VOTEBOT-54**: the Voatz page on 3.0 with the current bundle. **It must serve a bundle built from `main` after VOTEBOT-63 (PR #81) is merged**, checked by comparing the served file's sha256 with the repo's (the runbook's procedure), or the Voatz page keeps sending full addresses; VOTEBOT-64 (PR #82) is server-side only and ships no bundle.
+2. **VOTEBOT-54**: the Voatz page on 3.0 with the current bundle. In this order: deploy votebot `main` (#81, #82) to production and restart it; from the production hostname, check that the origin is allowed and that one question is asked and answered over the WebSocket; then serve the bundle and switch the name. **The bundle must be built from `main` after VOTEBOT-63 (PR #81)** (today's: sha256 `7106d2b9...`, the one in ddp-next #76), checked by comparing the served file's sha256 with the repo's (the runbook's procedure), or the Voatz page keeps sending full addresses. Merged is not deployed: #82 is server-side and ships no bundle, but the production server must be running it.
 3. Write the missing tests above against the current widget.
 4. Build the component in ddp-next behind a flag, to parity with the table above, and compare side by side on the dev site.
-5. Switch ddp-next from the script tags to the component; delete `public/widget/`. Keep from the bridge what the component still needs (see the context-timing row above); the script-load timing is what goes.
+5. **First fix VOTEBOT-67** (Sources links accept any address scheme) in the old widget and check the React chat has no equivalent, so no public chat ships the gap. Then switch ddp-next from the script tags to the component; delete `public/widget/` once the website's own request log shows nothing asks for it. Keep from the bridge what the component still needs (see the context-timing row above); the script-load timing is what goes.
 6. Voatz route in ddp-next; pass the gate above; repoint the hostname (Ramon's call, see VOTEBOT-54). **Delete `chat-widget/` from this repo only after the host that served `/dist/ddp-chat.min.js` shows no requests for it** (a grep of its nginx access log over a few weeks is enough), and after the Webflow site is retired (VOTEBOT-17). The Webflow pages load their bundle from the old server's own checkout, not from ddp-next, so deleting ddp-next's `public/widget/` cannot affect them. `legacy-webflow` stays frozen.
 
 Steps 4 to 6 are each a ticket's worth of work and should be split off VOTEBOT-62 when it is agreed.
