@@ -3,9 +3,9 @@
 From: the VoteBot agent. To: **the prod agent on the EC2 broker host (VoteBot 3.0, container `votebot-ddp-next`)**. Date: 2026-10-29. Requested by Ramon. VoteBot 2.0 (old server) is **not** touched.
 
 ## What is running, what to deploy
-- Running now: `740fc1d8` (image `2878c1dff616`, tagged `:local` and `:740fc1d`; rollback images `:4472180` = `2a0f548f3ab2` and `:d3742ae`). api-v3 on this host: `f9dde9192` (per Ramon; I could not find that commit in any local clone, so I have not verified it).
+- Running now: `740fc1d8` (image `2878c1dff616`, tagged `:local` and `:740fc1d`; rollback images `:4472180` = `2a0f548f3ab2` and `:d3742ae`). api-v3 on this host: `f9dde9192` (OPEN-398: revert of the rank pool and recency index, on `ddp-open-states/api-v3` `main`; checked in the nested repo).
 - To deploy: **`4f1056486f3456a53f0ca920b1d7b65610365ca3`** (`main`, PR #83 merged). Everything after `740fc1d` is below. **Nothing in it needs a change to the compose file, `prod.env.defaults` or the `.env`** (`.env.example` and `config.py` changed one comment word only). `infrastructure/` and `scripts/` are unchanged since `740fc1d`.
-- **VoteBot's calls to api-v3 did not change** since `740fc1d` (no change to any OpenStates client file), so api-v3 `f9dde9192` needs nothing from this release; check A below proves the replica answers.
+- **VoteBot's calls to api-v3 did not change** since `740fc1d` (no change to any OpenStates client file), and api-v3 `f9dde9192` only touches `/ddp/search` (`api/ddp_search.py`), which VoteBot does not call, so neither side needs anything from the other; check A below proves the replica answers.
 
 ## What changes (all server side)
 - **VOTEBOT-63 (#81):** the query log and the Slack handoff link keep only the origin and path of the page address the widget sends (no credentials, query string or fragment; a port stays, it is part of the origin). Old cached widgets still send the full address, so the server does the trimming.
