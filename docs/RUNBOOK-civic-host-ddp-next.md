@@ -62,11 +62,20 @@ route, 6 the answer).
 **Status after 2026-10-12.** The status paragraph at the top is as of 2026-10-12. `main` has since gained VOTEBOT-44 to 53 (timing
 fields, concurrent lookups, background warm-up, cheaper `/health/ready`), 58 and 59 (OpenStates only from the DDP replica) and 60 (scorecards).
 **Deployed 2026-10-28 01:21 UTC: `740fc1d8b40a66b627b2af2e1907cb6afaf2f434`** (image `2878c1dff616`, tags `:740fc1d` and `:local`; healthy 32 s
-after `up -d`, `WEB_CONCURRENCY=1`). Rollback images on the host: `:4472180` (`2a0f548f3ab2`) and `:d3742ae` (`4b6ffceb9a4c`). The check results are in the
-`ops-handoff` reply of that date. Two things to know: the production broker does not have the scorecard routes yet (BROKER-325; the route answers 404, so
-VoteBot answers as before), and the log shows one traceback after `Finished server process` at shutdown (`aclose(): asynchronous generator is already
-running`, from an HTTP stream closing at interpreter exit; `docker stop` took 1 s and exited 0). Later deploys are not recorded here: read the running SHA
-from the ticket and `docker image ls votebot-ddp-next`. Sections 3.3, 3.5, 3.9, 5 and 6 describe this code.
+after `up -d`, `WEB_CONCURRENCY=1`). The check results are in the `ops-handoff` reply of that date. Two things to know: at that time the production broker did
+not have the scorecard routes (BROKER-325; the route answered 404, so VoteBot answered as before), and the log shows one traceback after `Finished server process`
+at shutdown (`aclose(): asynchronous generator is already running`, from an HTTP stream closing at interpreter exit; `docker stop` took 1 s and exited 0).
+
+**Deployed 2026-10-29 01:39 UTC: `4f1056486f3456a53f0ca920b1d7b65610365ca3`** (image `c5c45bb9abf4`, tags `:4f10564` and `:local`; healthy 32 s after `up -d`; the
+prod agent's reply on `ops-handoff`, checks A to G all pass). What it added to `740fc1d`: VOTEBOT-63 (the query log and the Slack link keep only origin and path
+of the page address), VOTEBOT-64 (`/content/resolve` accepts the new site's `/bill/...` and `/legacy/bills/...` addresses; bill links in answers are built as
+`{DDP_SITE_BASE_URL}/bill/...`; `DDP_SITE_BASE_URL` is `https://dev.digitaldemocracyproject.org` in production), VOTEBOT-66 (organization-page prompt). No change to
+the compose file, `prod.env.defaults` or the `.env`. Rollback images on the host: `:740fc1d` (`2878c1dff616`), `:4472180` (`2a0f548f3ab2`) and `:d3742ae`
+(`4b6ffceb9a4c`). The broker was deployed separately the same night (`39f93594`, checkpoint D 2026-10-29 01:30 UTC, which carries BROKER-325 per its request note);
+after it the dev site's chat answered a scorecard question (AZ HB2086) from the scorecard (checked in a real browser, not read from a prod agent's note). Known and
+unchanged: `/content/resolve` still answers 500 for a `/member-organizations/<slug>` URL (VOTEBOT-31), and a button answer cached before the link change
+(`Summarize this bill` on HB 5601E) still carries `/explore/` links until its cache entry expires or is invalidated. Later deploys are not recorded here: read the
+running SHA from the ticket and `docker image ls votebot-ddp-next`. Sections 3.3, 3.5, 3.9, 5 and 6 describe this code.
 
 Order of work: section 1 (read-only), section 2 (freeze the old copy), section 3 (install the new one),
 section 4 (the website and its origins), then 5 (bot protection and monitoring), 6 (verify), 7 (cutover and rollback).
