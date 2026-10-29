@@ -585,11 +585,11 @@ const DDPUI = (function() {
                 const citationDiv = document.createElement('div');
                 citationDiv.className = 'ddp-citation';
 
-                // The server builds a source's address from text the model writes: it is a link only when safeHref accepts it
-                const href = typeof citation.url === 'string' ? safeHref(citation.url) : null;
-                if (href) {
+                // The server builds a source's address from text the model writes: it is a link only when safeHref accepts it.
+                // The address itself is used as sent (set as a property, not built into HTML, so a quote cannot leave anything).
+                if (typeof citation.url === 'string' && safeHref(citation.url)) {
                     const link = document.createElement('a');
-                    link.href = href;
+                    link.href = citation.url;
                     link.target = '_blank';
                     link.rel = 'noopener noreferrer';
                     link.textContent = citation.source || citation.document_id;

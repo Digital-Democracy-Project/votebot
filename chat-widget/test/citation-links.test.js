@@ -89,6 +89,15 @@ for (const target of Object.keys(TARGETS)) {
         }
     });
 
+    test(`${target}: an accepted address is used exactly as sent (an apostrophe is not rewritten)`, () => {
+        const url = "https://example.test/o'brien/bill?q=it's";
+        const { links } = sourcesFor(target, [{ source: 'Apostrophe', url }]);
+        assert.deepStrictEqual(
+            links.map((a) => a.href),
+            [url]
+        );
+    });
+
     test(`${target}: a source with any other scheme is plain text, not a link`, () => {
         const hostile = [
             'javascript:alert(1)',
