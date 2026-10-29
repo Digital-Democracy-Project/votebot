@@ -3,7 +3,7 @@
 Embeddable chat widget for Digital Democracy Project VoteBot.
 
 > **Status (2026-10-29).** The new website's chat is no longer this widget: it is a React component in ddp-next (VOTEBOT-62, ddp-next #86), and
-> ddp-next does not load this bundle (the copy committed there is to be deleted, VOTEBOT-69). On January 1st the Voatz page
+> ddp-next does not load this bundle and its committed copy was deleted (VOTEBOT-69, ddp-next #89, merged 2026-10-29 04:20 UTC). On January 1st the Voatz page
 > (`votebot.digitaldemocracyproject.org`) becomes the ddp-next route `/voatz-chat` (decision, Ramon 2026-10-29; ddp-next #87), and this
 > directory is then to be removed from `main` (VOTEBOT-70, blocked by VOTEBOT-54). Until then this widget still serves the old server's Webflow pages
 > and Voatz page, from the pinned `legacy-webflow` branch, and the sections below describe it as it is.
