@@ -2,6 +2,12 @@
 
 Embeddable chat widget for Digital Democracy Project VoteBot.
 
+> **Status (2026-10-29).** The new website's chat is no longer this widget: it is a React component in ddp-next (VOTEBOT-62, ddp-next #86), and
+> ddp-next does not load this bundle (the copy committed there is to be deleted, VOTEBOT-69). On January 1st the Voatz page
+> (`votebot.digitaldemocracyproject.org`) becomes the ddp-next route `/voatz-chat` (decision, Ramon 2026-10-29; ddp-next #87), and this
+> directory is then to be removed from `main` (VOTEBOT-70, blocked by VOTEBOT-54). Until then this widget still serves the old server's Webflow pages
+> and Voatz page, from the pinned `legacy-webflow` branch, and the sections below describe it as it is.
+
 ## Live Demo
 
 **Hosted version:** https://votebot.digitaldemocracyproject.org/
@@ -383,8 +389,8 @@ What is known from the repo and past deploys:
 1. Edit `src/`, run `npm run build`, commit the source and `dist/ddp-chat.min.js` (`git add -f`), and push.
 2. Someone with host access updates the checkout on the host and copies the bundle (manual; there is no CI). **Two servers
    serve this file, and they are not deployed the same way:**
-   - **New server (the broker host, `votebot-ddp-next`):** the bundle is served by the new site (ddp-next) or wherever it puts
-     its static files (runbook 4.2); VoteBot itself runs as a container built from `main`.
+   - **New server (the broker host, `votebot-ddp-next`):** nothing serves this bundle any more (the website's chat is the React component in
+     ddp-next since 2026-10-29); VoteBot itself runs as a container built from `main`.
    - **Old server (`votebot.digitaldemocracyproject.org/dist/`, which the Webflow pages load):** frozen on the branch
      **`legacy-webflow`** (currently `7864abc`: the old code plus only the VOTEBOT-1 title decoding). nginx's root is
      `/home/ubuntu/votebot/chat-widget`, so the URL is the git-tracked `chat-widget/dist/ddp-chat.min.js` **in the old checkout**
