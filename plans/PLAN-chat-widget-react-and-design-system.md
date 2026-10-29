@@ -85,12 +85,16 @@ Steps 4 to 6 are each a ticket's worth of work and should be split off VOTEBOT-6
 
 ## Open questions for Ramon
 
-1. **Does anything besides the website and the Voatz page load the chat?** (The widget README mentions "a mobile app"; I take that to be Voatz.)
-2. **Does the Voatz app limit which pages it opens** (a domain list, a WebView with older JavaScript)? A React route is more JavaScript than today's 3.4 KB page plus bundle, and a redirect between hostnames may or may not be allowed. This decides step 6, and it needs a real test in the Voatz app.
-3. **Which host serves `votebot.digitaldemocracyproject.org` at switchover**, and who changes DNS and Cloudflare (VOTEBOT-54 lists it as Ramon's call).
-4. **Component code in ddp-next, or a shared package?** I recommend ddp-next; a package makes sense only if a second product will show the chat.
-5. **Do you want chat pieces (message bubble, panel) added to the design system**, or kept in ddp-next until another product needs them?
-6. **Is the design-system package readable by whoever builds ddp-next?** I could only show that `npm view` works from this machine.
+Answered 2026-10-28:
+
+1. **Does anything besides the website and the Voatz page load the chat?** No. Still check the VoteBot request logs before deleting `public/widget/` and the bundle (hard gate above).
+2. **Does the Voatz app limit which pages it opens?** It opens the link in the phone's built-in browser pop-up (Safari on iOS, the Android in-app browser): no address bar, no buttons, just the page at `votebot.digitaldemocracyproject.org` with the `ddp_url` parameter passed when the poll is created. That is a current system browser, not an old embedded one, so modern JavaScript is expected. It is still not tested; the real-app gate stands, and it must include the phone layout with no browser chrome. A redirect to another hostname is possible in principle but is not needed: keep the hostname.
+3. **Who changes DNS and Cloudflare at switchover?** Ramon. Prepare exact steps and the switch-back steps before the switchover.
+4. **Component code in ddp-next, or a shared package?** Decided: in ddp-next.
+5. **Chat pieces in the design system?** Decided: kept in ddp-next until another product needs them.
+6. **Is the design-system package readable by whoever builds ddp-next?** Yes, per Ramon, on the live build.
+
+Also filed: VOTEBOT-67 (Sources links accept any address scheme), under VOTEBOT-65.
 
 ## What I would not do
 
