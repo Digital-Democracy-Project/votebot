@@ -46,6 +46,7 @@ from votebot.services.webflow_lookup import (
     format_org_verification_context,
 )
 from votebot.utils.ddp_urls import ddp_bill_url
+from votebot.utils.jurisdictions import STATE_NAME_TO_CODE
 from votebot.utils.intent import (
     classify_primary_intent,
     classify_sub_intent,
@@ -2998,25 +2999,10 @@ class VoteBotAgent:
         """Extract state/jurisdiction from message text."""
         message_lower = message.lower()
 
-        # State name to code mapping
-        state_names = {
-            "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
-            "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
-            "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
-            "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
-            "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
-            "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
-            "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
-            "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
-            "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
-            "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
-            "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
-            "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
-            "wisconsin": "WI", "wyoming": "WY",
-        }
+        state_names = STATE_NAME_TO_CODE
 
         # Check for state names: whole words, longest first, so "West Virginia" is WV and not the "virginia" inside it
-        # (retrieval.py's STATE_MAPPINGS matches whole words too, but covers only 11 states; this one needs all 50).
+        # (retrieval.py reads the same table, utils/jurisdictions.py).
         # Words of a multi-word name may be separated by spaces, line breaks or a hyphen ("West-Virginia"), so a
         # formatting variant of "west virginia" does not fall through to the "virginia" inside it.
         for state_name in sorted(state_names, key=len, reverse=True):
