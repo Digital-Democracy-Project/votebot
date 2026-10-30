@@ -75,7 +75,12 @@ the compose file, `prod.env.defaults` or the `.env`. Rollback images on the host
 after it the dev site's chat answered a scorecard question (AZ HB2086) from the scorecard (checked in a real browser, not read from a prod agent's note). Known and
 unchanged: `/content/resolve` still answers 500 for a `/member-organizations/<slug>` URL (VOTEBOT-31), and a button answer cached before the link change
 (`Summarize this bill` on HB 5601E) still carries `/explore/` links until its cache entry expires or is invalidated. Later deploys are not recorded here: read the
-running SHA from the ticket and `docker image ls votebot-ddp-next`. Sections 3.3, 3.5, 3.9, 5 and 6 describe this code.
+running SHA from the ticket and `docker image ls votebot-ddp-next`.
+
+**Deployed 2026-10-30 16:37 UTC: `c691a4c2dcb89bb5db5f80544fd503f0bf94e5ab`** (image `edc8f5a85695`, tags `:c691a4c` and `:local`; healthy 32 s after `up -d`; the
+prod agent's reply on `ops-handoff`, commit `7f6ae1b`, checks A to F all pass). It carries VOTEBOT-3: one 50-state table (`utils/jurisdictions.py`) read by both
+the agent and retrieval, and nine dead scripts deleted. No change to the compose file, `prod.env.defaults` or the `.env`. Check D (read-only, in the container)
+printed `50 103`, `wv va oh None oh fl`, `WV`. Rollback image on the host: `:4f10564` (`c5c45bb9abf4`). Sections 3.3, 3.5, 3.9, 5 and 6 describe this code.
 
 Order of work: section 1 (read-only), section 2 (freeze the old copy), section 3 (install the new one),
 section 4 (the website and its origins), then 5 (bot protection and monitoring), 6 (verify), 7 (cutover and rollback).
