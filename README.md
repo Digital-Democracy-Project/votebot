@@ -673,9 +673,7 @@ votebot/
 │   ├── rag_ground_truth.py      # Ground truth fetcher (Webflow CMS + OpenStates)
 │   ├── test_rag_comprehensive.py # Orchestrated RAG test suite (delegates to modules)
 │   ├── test_rag_quality.py      # Quality tests (static YAML + dynamic ground truth)
-│   ├── test_rag_bills.py        # Bill-focused RAG tests
 │   ├── test_rag_legislators.py  # Legislator-focused RAG tests (with page_context)
-│   ├── test_rag_organizations.py # Organization-focused RAG tests
 │   ├── evaluate_production.py    # Offline evaluation of production query logs
 │   └── latency_report.py         # Percentiles of the query log's timing fields against the targets
 ├── tests/
@@ -697,9 +695,7 @@ VoteBot includes an orchestrated RAG test suite that validates response quality 
 ```
 test_rag_comprehensive.py  (orchestrator — CLI, ground truth, delegates, unified report)
   ├── rag_test_common.py       (shared TestResult, TestReport, VoteBotTestClient, validation)
-  ├── test_rag_bills.py        (bill-focused tests, single + multi-turn)
   ├── test_rag_legislators.py  (legislator tests with page_context)
-  ├── test_rag_organizations.py (organization-focused tests)
   ├── rag_ground_truth.py      (ground truth fetcher from Webflow CMS + OpenStates)
   └── test_rag_quality.py      (static YAML tests + dynamic ground truth validation)
 ```
@@ -709,11 +705,11 @@ Each focused script is independently runnable via `__main__` and exports a unifi
 ### Running the Full Suite
 
 ```bash
-# Run all categories (bills, legislators, organizations, DDP, out-of-system votes)
+# Run all categories (legislators, DDP, out-of-system votes)
 PYTHONPATH=src python scripts/test_rag_comprehensive.py
 
 # Run specific categories
-PYTHONPATH=src python scripts/test_rag_comprehensive.py --category bills --category legislators
+PYTHONPATH=src python scripts/test_rag_comprehensive.py --category legislators --category ddp
 
 # Multi-turn conversations
 PYTHONPATH=src python scripts/test_rag_comprehensive.py --mode both --limit 5
@@ -731,14 +727,8 @@ PYTHONPATH=src python scripts/test_rag_comprehensive.py --dry-run
 ### Running Individual Modules
 
 ```bash
-# Bill tests (standalone)
-PYTHONPATH=src python scripts/test_rag_bills.py --limit 5 --mode single
-
 # Legislator tests (preserves page_context)
 PYTHONPATH=src python scripts/test_rag_legislators.py --sample-size 5 --mode both
-
-# Organization tests
-PYTHONPATH=src python scripts/test_rag_organizations.py --limit 5
 
 # Quality tests (static YAML + dynamic ground truth)
 PYTHONPATH=src python scripts/test_rag_quality.py --dynamic --limit 10

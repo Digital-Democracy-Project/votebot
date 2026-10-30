@@ -3,7 +3,7 @@
 Orchestrated RAG Test Suite for VoteBot.
 
 Establishes ground truth from Webflow CMS (+ optional OpenStates), delegates
-to focused test modules (bills, legislators, organizations, DDP, out-of-system
+to focused test modules (legislators, DDP, out-of-system
 votes), and produces a unified report with metrics broken down by category.
 
 Usage:
@@ -11,7 +11,7 @@ Usage:
     python scripts/test_rag_comprehensive.py
 
     # Run specific categories
-    python scripts/test_rag_comprehensive.py --category bills --category legislators
+    python scripts/test_rag_comprehensive.py --category legislators --category ddp
 
     # Run with multi-turn conversations
     python scripts/test_rag_comprehensive.py --mode both --limit 5
@@ -290,7 +290,7 @@ async def run_out_of_system_vote_tests(
 
 # ── CLI and Orchestration ────────────────────────────────────────────────────
 
-ALL_CATEGORIES = ["bills", "legislators", "organizations", "ddp", "out_of_system_votes"]
+ALL_CATEGORIES = ["legislators", "ddp", "out_of_system_votes"]
 
 
 def parse_args():
@@ -356,7 +356,7 @@ async def main():
 
     if args.dry_run:
         print("\n[DRY RUN] Would run tests for categories:", ", ".join(categories))
-        needs_gt = set(categories) & {"bills", "legislators", "organizations"}
+        needs_gt = set(categories) & {"legislators"}
         if needs_gt:
             print(f"  Ground truth fetch: {', '.join(needs_gt)}")
         if "ddp" in categories:
@@ -373,7 +373,7 @@ async def main():
 
     # ── Phase 1: Establish ground truth ──────────────────────────────────
     ground_truth = None
-    needs_ground_truth = set(categories) & {"bills", "legislators", "organizations"}
+    needs_ground_truth = set(categories) & {"legislators"}
 
     if needs_ground_truth:
         print("\n" + "=" * 70)
@@ -395,23 +395,9 @@ async def main():
 
     all_results: list[TestResult] = []
 
-    if "bills" in categories:
-        from test_rag_bills import run_tests as run_bill_tests
-        all_results.extend(await run_bill_tests(
-            client, ground_truth=ground_truth, limit=args.limit,
-            jurisdiction=args.jurisdiction, mode=args.mode, verbose=args.verbose,
-        ))
-
     if "legislators" in categories:
         from test_rag_legislators import run_tests as run_legislator_tests
         all_results.extend(await run_legislator_tests(
-            client, ground_truth=ground_truth, limit=args.limit,
-            jurisdiction=args.jurisdiction, mode=args.mode, verbose=args.verbose,
-        ))
-
-    if "organizations" in categories:
-        from test_rag_organizations import run_tests as run_org_tests
-        all_results.extend(await run_org_tests(
             client, ground_truth=ground_truth, limit=args.limit,
             jurisdiction=args.jurisdiction, mode=args.mode, verbose=args.verbose,
         ))

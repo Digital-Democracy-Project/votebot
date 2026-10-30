@@ -1534,8 +1534,6 @@ The RAG test suite validates response quality across all content types. Use it t
 PYTHONPATH=src python scripts/test_rag_comprehensive.py --limit 5 --verbose
 
 # Run specific category to isolate issues
-PYTHONPATH=src python scripts/test_rag_comprehensive.py --category bills --limit 10
-PYTHONPATH=src python scripts/test_rag_comprehensive.py --category organizations --limit 10
 PYTHONPATH=src python scripts/test_rag_comprehensive.py --category legislators --limit 10
 ```
 
