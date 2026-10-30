@@ -560,7 +560,7 @@ VoteBot maintains bidirectional linkages between content types:
 | Dispute Verification | Any → CMS | Bill/legislator/org details on disputes | Webflow CMS |
 | Vote Verification | Any → OpenStates | Legislator vote lookup (any page type) | OpenStates API |
 
-> **Note**: The Pinecone rebuild/sync scripts formerly documented here (`scripts/rebuild_pinecone.py`, `scripts/sync.py`, `scripts/seed_data.py`, etc.) depended on the sync/ingestion code that has since moved to DDP-Sync — they are no longer functional against this repo. See [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) for current ingestion, full-rebuild, and CLI tooling.
+> **Note**: The Pinecone rebuild/sync scripts formerly documented here (`scripts/rebuild_pinecone.py`, `scripts/sync.py`, `scripts/seed_data.py`, etc.) depended on the sync/ingestion code that has since moved to DDP-Sync, and were deleted from this repo (VOTEBOT-3). See [DDP-Sync](https://github.com/Digital-Democracy-Project/ddp-sync) for current ingestion, full-rebuild, and CLI tooling.
 
 ### Sync Scheduling
 

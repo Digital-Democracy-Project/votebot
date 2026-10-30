@@ -1052,14 +1052,7 @@ Re-ingest organization documents with one of these strategies:
 2. **Prepend org name**: Add the organization name to every chunk so they're all semantically linked
 3. **Structured metadata**: Store bill positions as metadata rather than chunk content
 
-To re-ingest:
-```bash
-# Re-sync all organizations
-python scripts/sync.py organization --batch --clear-namespace
-
-# Or rebuild the full index
-python scripts/rebuild_pinecone.py --content-types organization --yes
-```
+To re-ingest organizations, use ddp-sync's `POST /trigger/knowledge-base-entities/organizations` (see its README); the sync scripts that lived in this repo were deleted (VOTEBOT-3).
 
 ---
 
@@ -1704,32 +1697,7 @@ async def export_stats():
 
 ### Step 2: Run full rebuild
 
-```bash
-# Non-interactive full rebuild
-python scripts/rebuild_pinecone.py --yes
-
-# Or step-by-step:
-# 1. Wipe index
-python -c "
-import asyncio
-from src.votebot.config import get_settings
-from src.votebot.services.vector_store import VectorStoreService
-
-async def wipe():
-    settings = get_settings()
-    vs = VectorStoreService(settings)
-    await vs.delete(delete_all=True)
-    print('Index wiped')
-
-asyncio.run(wipe())
-"
-
-# 2. Sync all content types
-python scripts/sync.py all
-
-# 3. Build legislator-votes reverse index
-python -m votebot.sync.build_legislator_votes
-```
+There is no rebuild command in this repo any more: `scripts/rebuild_pinecone.py` and `scripts/sync.py` were deleted (VOTEBOT-3). Re-indexing is ddp-sync's job (its README lists the trigger endpoints; it has no one-command wipe and rebuild), so decide with the owner before wiping an index. Then continue below.
 
 ### Step 3: Verify rebuild
 
