@@ -13,6 +13,7 @@ from votebot.services.vector_store import SearchResult, VectorStoreService
 from votebot.services.webflow_lookup import WebflowLookupService
 from votebot.utils.ddp_urls import ddp_bill_url_from_metadata
 from votebot.utils.intent import detect_version_request
+from votebot.utils.jurisdictions import STATE_NAME_TO_CODE
 
 logger = structlog.get_logger()
 
@@ -29,25 +30,24 @@ def _get_federal_cache():
     return _federal_cache
 
 
-# Mapping of state names/abbreviations to jurisdiction codes
+# Mapping of state names/abbreviations to jurisdiction codes (lower case): every state, by name and by code (the
+# table in utils/jurisdictions.py), then the federal words.
 STATE_MAPPINGS = {
-    "florida": "fl", "fl": "fl",
-    "virginia": "va", "va": "va",
-    "washington": "wa", "wa": "wa",
-    "california": "ca", "ca": "ca",
-    "texas": "tx", "tx": "tx",
-    "new york": "ny", "ny": "ny",
-    "arizona": "az", "az": "az",
-    "michigan": "mi", "mi": "mi",
-    "utah": "ut", "ut": "ut",
-    "alabama": "al", "al": "al",
-    "massachusetts": "ma", "ma": "ma",
+    **{name: code.lower() for name, code in STATE_NAME_TO_CODE.items()},
+    **{code.lower(): code.lower() for code in STATE_NAME_TO_CODE.values()},
     "federal": "us", "us": "us", "congress": "us",
 }
 
+# Longest name first, so "west virginia" is WV and not the "virginia" inside it.
+_STATE_MATCH_ORDER = sorted(STATE_MAPPINGS, key=len, reverse=True)
 
-# Two-letter codes that are also ordinary words, so only the capitalised form names a jurisdiction.
-CODES_THAT_ARE_WORDS = frozenset({"us", "ma", "al"})
+# Two-letter codes that are also ordinary words (or too short to trust: "in", "or", "me", "hi", "ok", "co", "ma",
+# "al", "us"), so only the capitalised form names a jurisdiction. The nine codes retrieval has always read in any
+# case ("fl hb 363") keep doing so; every other code needs capitals.
+_CODES_READ_IN_ANY_CASE = frozenset({"fl", "va", "wa", "ca", "tx", "ny", "az", "mi", "ut"})
+CODES_THAT_ARE_WORDS = frozenset(
+    k for k in STATE_MAPPINGS if len(k) == 2 and k not in _CODES_READ_IN_ANY_CASE
+)
 
 # How many chunks the "which bill is this?" lookup reads. A bill has many chunks, so a small top_k
 # can be filled by one session's and never see the other's, defeating the ambiguity check.
@@ -926,7 +926,8 @@ class RetrievalService:
 
         # Extract jurisdiction from query
         jurisdiction = None
-        for name, code in STATE_MAPPINGS.items():
+        for name in _STATE_MATCH_ORDER:
+            code = STATE_MAPPINGS[name]
             # Whole words only: "al" is not in "actually", nor "ma" in "summarize". Codes that are
             # also ordinary words ("tell us about HB 5") count only when written in capitals.
             haystack = query if name in CODES_THAT_ARE_WORDS else query_lower
