@@ -9,6 +9,14 @@ from votebot.core.prompts import (
 )
 
 
+def _base_with_states_unknown() -> str:
+    """The base prompt as built when the broker's live states are not known (VOTEBOT-73): the marker filled with the
+    sentence that names no state."""
+    from votebot.core.prompts import LIVE_STATES_MARKER, live_states_sentence
+
+    return SYSTEM_PROMPT_BASE.replace(LIVE_STATES_MARKER, live_states_sentence(None))
+
+
 class TestBuildSystemPrompt:
     """Tests for build_system_prompt function."""
 
@@ -16,7 +24,7 @@ class TestBuildSystemPrompt:
         """Test prompt for general context."""
         prompt = build_system_prompt(page_type="general")
 
-        assert SYSTEM_PROMPT_BASE in prompt
+        assert _base_with_states_unknown() in prompt
         assert "General Browsing" in prompt
 
     def test_bill_context_prompt(self):
@@ -62,7 +70,7 @@ class TestBuildSystemPrompt:
         assert SYSTEM_PROMPT_BASE.count(LEGACY_LINK_EXAMPLES) == 1
         prompt = build_system_prompt(page_type="general", version_aware=True)
         assert prompt.count(CANONICAL_LINK_RULE) == 1
-        assert SYSTEM_PROMPT_BASE.replace(LEGACY_LINK_EXAMPLES, CANONICAL_LINK_RULE) in prompt
+        assert _base_with_states_unknown().replace(LEGACY_LINK_EXAMPLES, CANONICAL_LINK_RULE) in prompt
 
     def test_a_canonical_bill_chunk_shows_our_page_as_its_source_url_and_no_old_style_ddp_url(self):
         # what "Source URL" means on the new index (the rule allows it only for a source about the same bill):
@@ -120,7 +128,7 @@ class TestBuildSystemPrompt:
     def test_the_legacy_prompt_keeps_its_examples_unchanged(self):
         prompt = build_system_prompt(page_type="bill", page_info={"id": "HB 1", "title": "T"})
 
-        assert SYSTEM_PROMPT_BASE in prompt
+        assert _base_with_states_unknown() in prompt
         assert "digitaldemocracyproject.org/bills/education-funding-act" in prompt
         assert "Never write any other bill URL" not in prompt
 

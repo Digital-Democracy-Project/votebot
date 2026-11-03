@@ -12,6 +12,8 @@ live in the broker now. These are its public, unauthenticated reads:
 * `GET /api/bill-artifacts/current/?jurisdiction=&session=&gov_id=` (VOTEBOT-59): LegBot's analysis of the
   bill's current version (`{"found", "artifacts": {type: {content, origin, ...}}}`)
 * `GET /api/concept-statements/?jurisdiction=&session=&gov_id=`: the bill's concept poll and its tallies
+* `GET /api/jurisdictions/` (VOTEBOT-73): the jurisdictions DDP has tracked bills with scorecards for (`[{id, iso2, name}]`), the
+  live-states sentence in the system prompt
 * `GET /api/bills/{uuid}/scorecard/` and `GET /api/legislators/{uuid}/scorecard/` (VOTEBOT-60): DDP's
   constituent-alignment scorecard of a bill or a legislator, read by the bare OpenStates UUID VoteBot already holds
   (`ocd_bill_id`; the legislator's `ocd-person/` id with its prefix stripped) (BROKER-325; the broker's own integer
@@ -31,6 +33,7 @@ import structlog
 
 from votebot.config import Settings, get_settings
 from votebot.utils.ddp_urls import ddp_bill_url
+from votebot.utils.jurisdictions import STATE_NAME_TO_CODE
 
 logger = structlog.get_logger()
 
@@ -38,6 +41,8 @@ TIMEOUT_SECONDS = 5.0  # one request; these run before the answer starts streami
 BUDGET_SECONDS = 8.0  # ALL the enrichment lookups for one message together (broker, legislators), paging included
 POSITIONS_PAGE_SIZE = 200  # the broker's maximum
 MAX_POSITION_PAGES = 3
+ACTIVE_STATES_TTL_SECONDS = 300  # a state that goes live reaches the prompt at most this late; saves a call per chat message
+ACTIVE_STATES_FAILURE_TTL_SECONDS = 45  # while the broker is unreachable, retry this often rather than on every message
 
 
 @dataclass
@@ -329,10 +334,13 @@ class BrokerLookupService:
 
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
+        self._active_states_cache: tuple[float, list[str] | None] | None = None  # None inside = recent failure
 
-    async def _get(self, path: str, params: dict | None = None, deadline: float | None = None) -> dict | None:
+    async def _get(
+        self, path: str, params: dict | None = None, deadline: float | None = None, allow_list: bool = False
+    ) -> dict | list | None:
         """GET a broker endpoint. `deadline` is a `time.monotonic()` value shared by everything one
-        message looks up, so a request never waits past it."""
+        message looks up, so a request never waits past it. A JSON list body is returned only when `allow_list`."""
         root = self.settings.ddp_broker_api_root.rstrip("/")
         if not root:
             logger.debug("DDP_BROKER_API_ROOT is not set; skipping broker lookup", path=path)
@@ -346,10 +354,44 @@ class BrokerLookupService:
         except Exception as e:  # noqa: BLE001 -- see the module docstring
             logger.warning("Broker lookup failed", path=path, error=str(e))
             return None
-        if not isinstance(body, dict):
+        if not isinstance(body, dict) and not (allow_list and isinstance(body, list)):
             logger.warning("Broker returned a non-object body", path=path)
             return None
         return body
+
+    async def get_active_states(self, deadline: float | None = None) -> list[str] | None:
+        """The names of the states DDP is running statewide voting in, for the system prompt (VOTEBOT-73).
+
+        Read from the broker (`GET /api/jurisdictions/`), never typed here: a state that goes live reaches the prompt within
+        `ACTIVE_STATES_TTL_SECONDS` with no VoteBot edit or restart. The federal jurisdiction (`US`) is left out (the prompt
+        has its own federal line), and so is anything that is not the name of a US state (VoteBot's one state table,
+        `utils/jurisdictions.py`; the name is written from that table, so the broker's text never reaches the prompt as
+        typed). Returns None when the broker is unconfigured, unreachable or answers nothing usable, and
+        the prompt then says nothing about which states are covered; it never falls back to a list typed in the code. A
+        failure is remembered for `ACTIVE_STATES_FAILURE_TTL_SECONDS`, so a broker outage costs one short call, not one per
+        chat message."""
+        cached = self._active_states_cache
+        if cached is not None:
+            ttl = ACTIVE_STATES_TTL_SECONDS if cached[1] is not None else ACTIVE_STATES_FAILURE_TTL_SECONDS
+            if time.monotonic() - cached[0] < ttl:
+                return cached[1]
+        body = await self._get("/api/jurisdictions/", deadline=deadline, allow_list=True)
+        names: list[str] | None = None
+        if isinstance(body, list):
+            found = []
+            for row in body:
+                if not isinstance(row, dict) or str(row.get("iso2") or "").strip().upper() == "US":
+                    continue
+                name = _line(row.get("name"), 60).lower()
+                if name not in STATE_NAME_TO_CODE:  # broker text goes into the system prompt: only a known state's name does
+                    if name:
+                        logger.warning("Broker jurisdiction is not a known state; left out of the prompt", name=name)
+                    continue
+                if name.title() not in found:
+                    found.append(name.title())
+            names = sorted(found) or None  # an empty answer says nothing, so it is not a list of states
+        self._active_states_cache = (time.monotonic(), names)
+        return names
 
     async def get_bill_org_positions(
         self, jurisdiction: str | None, session: str | None, gov_id: str | None, deadline: float | None = None

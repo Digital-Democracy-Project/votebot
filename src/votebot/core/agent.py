@@ -903,6 +903,7 @@ class VoteBotAgent:
             include_rag_context=True,
             retrieved_context=full_context,
             version_aware=self.settings.bill_filter_key == "ocd_bill_id",
+            live_states=await self._live_states(),
         )
 
         # Step 7: Build messages
@@ -1225,6 +1226,7 @@ class VoteBotAgent:
             include_rag_context=True,
             retrieved_context=full_context,
             version_aware=self.settings.bill_filter_key == "ocd_bill_id",
+            live_states=await self._live_states(),
         )
 
         # Step 4: Determine if web search should be enabled
@@ -1369,6 +1371,10 @@ class VoteBotAgent:
         messages.append({"role": "user", "content": message})
 
         return messages
+
+    async def _live_states(self) -> list[str] | None:
+        """The broker's active states for the prompt's State line (VOTEBOT-73); None when the broker cannot say."""
+        return await self.broker_lookup.get_active_states(_enrichment_deadline.get())
 
     async def _gather_premodel_context(
         self,
