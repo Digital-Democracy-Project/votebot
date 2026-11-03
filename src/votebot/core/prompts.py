@@ -70,7 +70,7 @@ When users ask about signing up or verification, explain:
 - This guarantees all participants are real voters (not bots or malicious actors) so legislators can trust the results
 - DDP is currently available for registered voters in the United States
 - **Federal**: All U.S. voters can vote on Congressional bills (House and Senate)
-- **State**: DDP is actively running statewide legislative voting in Florida, Virginia, Washington, Utah, Arizona, Michigan, and Massachusetts
+- **State**: <<LIVE_STATES>>
 
 Links to the Voatz app: https://digitaldemocracyproject.org/vote
 
@@ -96,6 +96,32 @@ If you cannot answer a question, direct users to: info@digitaldemocracyproject.o
 """
 if SYSTEM_PROMPT_BASE.count(LEGACY_LINK_EXAMPLES) != 1:  # build_system_prompt swaps this block on the canonical-id index
     raise RuntimeError("LEGACY_LINK_EXAMPLES must appear exactly once in SYSTEM_PROMPT_BASE")
+
+# VOTEBOT-73: which states have live statewide voting is read from the broker (BrokerLookupService.get_active_states), never
+# typed here, so a state going live needs no edit. `build_system_prompt` swaps this marker for the sentence below.
+LIVE_STATES_MARKER = "<<LIVE_STATES>>"
+if SYSTEM_PROMPT_BASE.count(LIVE_STATES_MARKER) != 1:
+    raise RuntimeError("LIVE_STATES_MARKER must appear exactly once in SYSTEM_PROMPT_BASE")
+# Said when the broker's list is not available: no state is named as covered or not covered, and nothing typed in the code stands in for it.
+LIVE_STATES_UNKNOWN = (
+    "DDP runs statewide legislative voting in some states, and the list changes as states are added. You do not have the "
+    "current list, so do not say that any particular state is or is not covered; point people to "
+    "https://digitaldemocracyproject.org or info@digitaldemocracyproject.org for the states that are open now"
+)
+
+
+def live_states_sentence(states: list[str] | None) -> str:
+    """The prompt's State line: the broker's active states, or LIVE_STATES_UNKNOWN when there are none to give."""
+    names = [name for name in (states or []) if name]
+    if not names:
+        return LIVE_STATES_UNKNOWN
+    if len(names) == 1:
+        listed = names[0]
+    elif len(names) == 2:
+        listed = f"{names[0]} and {names[1]}"
+    else:
+        listed = ", ".join(names[:-1]) + f", and {names[-1]}"
+    return f"DDP is actively running statewide legislative voting in {listed}"
 
 # Context-specific prompts
 BILL_CONTEXT_PROMPT = """## Current Context: Bill Page
@@ -247,6 +273,7 @@ def build_system_prompt(
     include_rag_context: bool = True,
     retrieved_context: str | None = None,
     version_aware: bool = False,
+    live_states: list[str] | None = None,
 ) -> str:
     """
     Build the complete system prompt based on context.
@@ -257,12 +284,14 @@ def build_system_prompt(
         include_rag_context: Whether to include RAG context section
         retrieved_context: Retrieved documents to include
         version_aware: True on the canonical-id index, whose sources are grouped by bill version
+        live_states: the broker's active states (VOTEBOT-73); None or empty gives the sentence that names no state
 
     Returns:
         Complete system prompt string
     """
     # The new site (canonical-id index) has no slug URLs to imitate: give it the rule, not the old-site examples.
     base = SYSTEM_PROMPT_BASE.replace(LEGACY_LINK_EXAMPLES, CANONICAL_LINK_RULE) if version_aware else SYSTEM_PROMPT_BASE
+    base = base.replace(LIVE_STATES_MARKER, live_states_sentence(live_states))
     prompt_parts = [base]
 
     # Add context-specific prompt

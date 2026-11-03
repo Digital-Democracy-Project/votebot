@@ -20,6 +20,16 @@ from votebot.config import Settings, get_settings
 from votebot.main import app
 
 
+@pytest.fixture(autouse=True)
+def _stub_live_states():
+    """VOTEBOT-73: the agent reads the live states from the broker for the system prompt. No test that is not about that
+    should reach for the network, so the read answers "unknown" (None) unless a test overrides this fixture by name."""
+    from votebot.core.agent import VoteBotAgent
+
+    with patch.object(VoteBotAgent, "_live_states", AsyncMock(return_value=None)):
+        yield
+
+
 @pytest.fixture
 def settings() -> Settings:
     """Get test settings."""
