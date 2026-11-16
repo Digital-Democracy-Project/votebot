@@ -12,6 +12,8 @@ Before sketching new dataclasses, retrieval phases, helpers, or conventions in a
 grep -rn "class <Name>\|def <name>" src/votebot/
 ```
 
+**State rules (OPEN-537): no new per-state rule here; fix it in the ETL.** A state's data quirk (action order, labels, vote names, version text) is fixed in openstates-scrapers or openstates-core, or a value in the manifest, not in VoteBot (ddp-infra `PLAN-state-specific-handling.md` §4.1 and §4.2; what may stay here, such as prompt lines, is in its §4.3).
+
 ---
 
 ## Pinecone layer (`services/vector_store.py`)
