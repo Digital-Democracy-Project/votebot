@@ -664,7 +664,6 @@ votebot/
 │   │   └── slack.py         # Slack human handoff
 │   └── utils/               # Utility modules
 │       ├── timings.py       # Per-message phase timings for the query log
-│       ├── legislative_calendar.py  # Session date lookup (live OpenStates + hardcoded fallback)
 │       ├── federal_legislator_cache.py  # Federal legislator ID cache (only sync-adjacent file VoteBot still owns)
 │       └── intent.py         # Two-level intent classification (primary + sub) with controlled enums
 ├── scripts/
