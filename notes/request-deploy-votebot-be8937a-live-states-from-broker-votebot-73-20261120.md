@@ -43,11 +43,11 @@
       ```
       docker exec votebot-ddp-next python - <<'PY'
       import asyncio
-      from votebot.services.broker_lookup import BrokerLookup
-      print(asyncio.run(BrokerLookup().get_active_states()))
+      from votebot.services.broker_lookup import BrokerLookupService
+      print(asyncio.run(BrokerLookupService().get_active_states()))
       PY
       ```
-      Paste the list it prints, and the broker's own `GET /api/jurisdictions/` (the iso2 codes) beside it. The names must match those codes minus `US`. I don't predict the list: it is whatever the broker serves today. If the class or method name differs in `be8937a`, say so and paste what you ran instead.
+      Paste the list it prints, and the broker's own `GET /api/jurisdictions/` (the iso2 codes) beside it. The names must match those codes minus `US`. I don't predict the list: it is whatever the broker serves today. (`BrokerLookupService` with no arguments reads the container's settings.)
     * **E.** `/votebot/v1/content/resolve` for the FL HB 5601E address still returns `"id":"HB 5601E"`, as in `c691a4c`'s check E.
     * **F. Anything that differed.**
 
