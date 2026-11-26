@@ -23,3 +23,11 @@ The 2026-11-26 outage (VOTEBOT-77) was Pinecone's monthly read-egress limit (10 
 If a step would change anything, or exposes text you think should not be shared (cut it and say what you cut). Do not raise any limit, restart anything, or run a "load test" to get a number: one query per shape is the whole measurement.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+## Update 2026-11-26 evening: aim the counts at 23 to 26 November (UTC)
+Pinecone's usage export (1 to 24 November) shows the month's egress was a **burst**, not steady traffic: an ordinary day reads about 11 MB and 700 read units; **23 Nov read 0.86 GB (57,000 read units) and 24 Nov read 4.02 GB (276,000 read units), almost all on the knowledge-base index**, and the same two days wrote about 300,000 write units each. The export does not have 25 or 26 November yet, and the 10 GB limit was reached on 26 November, so about 4.9 GB was probably read on 25 and 26 November as well. So item 2 above matters most for **those four days, per hour if the logs allow**, and the answer I need is "what read the knowledge-base index then", not a monthly average. Read-only, counts only, no addresses:
+- **The broker:** site searches per hour on 23, 24, 25 and 26 Nov (UTC), how many answered with "semantic (rate limited)" and how many reached the semantic leg; whether one caller (as "one address made N% of searches", no address) or a user-agent family (crawler, script, browser) dominates. If the ceiling counter's refusals show on those days, say how many.
+- **Each chat server:** "Querying Pinecone" lines per hour on the same four days, with the share at `top_k` 100.
+- **Anything that read the knowledge-base index by hand or on a timer on those days:** a script, benchmark, load test, backfill or probe, from shell history, cron, scheduled tasks or ECS task runs on any host you can see (names and times only). In particular: a run of `build_legislator_votes.py`, a search-coverage measurement (`measure_search_coverage`), or any bulk question run against the chat or the search endpoint.
+- **For converting read units to queries:** the knowledge-base index's size in GB (`describe_index_stats`, one call) and its dimension, so I can turn 276,000 read units into a number of queries.
+If the log retention does not reach 23 Nov, say how far it does.
