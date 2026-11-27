@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,6 +12,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from votebot.config import Settings, get_settings
 from votebot.services.embeddings import EmbeddingService
+from votebot.services.llm import HEALTH_FAIL_TTL, HEALTH_OK_TTL  # the readiness windows are the model check's
 
 logger = structlog.get_logger()
 
@@ -51,6 +53,8 @@ class VectorStoreService:
         self.namespace = self.settings.pinecone_namespace
         self._index = None
         self._index_lock = threading.Lock()  # the index is looked up on worker threads (see `query`)
+        self._health_lock = asyncio.Lock()
+        self._health: tuple[float, Exception | None] | None = None  # (when, the failure, or None when healthy)
         self.embedding_service = EmbeddingService(self.settings)
 
     @property
@@ -319,22 +323,43 @@ class VectorStoreService:
 
     async def health_check(self) -> bool:
         """
-        Check if Pinecone is accessible.
+        Check that Pinecone can answer a read, at most one real request per window (VOTEBOT-78).
+
+        Readiness here means chat can retrieve: the check runs one real query, the smallest one there is (one match,
+        no metadata, no values, so a few dozen bytes back), because an index-statistics call kept answering while
+        Pinecone refused every query (the 2026-11-26 monthly read limit, VOTEBOT-77). The query vector is a fixed unit
+        vector of the embedding dimension, so the check does not call OpenAI. The outcome is kept for
+        `HEALTH_OK_TTL` seconds (a failure for `HEALTH_FAIL_TTL`, so a recovery is seen soon) and checks that arrive
+        together share one request, so polling `/health/ready` makes at most one read a minute per process.
 
         Returns:
             True if healthy, raises exception otherwise
         """
-        try:
-            # Describe index to verify connectivity
-            stats = await asyncio.to_thread(lambda: self.index.describe_index_stats())
-            logger.debug(
-                "Pinecone health check passed",
-                total_vectors=stats.total_vector_count,
-            )
+        async with self._health_lock:
+            cached = self._health
+            if cached is not None:
+                age = time.monotonic() - cached[0]
+                if age < (HEALTH_FAIL_TTL if cached[1] is not None else HEALTH_OK_TTL):
+                    if cached[1] is not None:
+                        raise cached[1]
+                    return True
+            try:
+                probe = [1.0] + [0.0] * (EmbeddingService.get_dimension() - 1)
+                await asyncio.to_thread(
+                    lambda: self.index.query(
+                        vector=probe,
+                        top_k=1,
+                        include_values=False,
+                        include_metadata=False,
+                        namespace=self.namespace,
+                    )
+                )
+            except Exception as e:
+                self._health = (time.monotonic(), e)
+                logger.error("Pinecone health check failed", error=str(e))
+                raise
+            self._health = (time.monotonic(), None)
             return True
-        except Exception as e:
-            logger.error("Pinecone health check failed", error=str(e))
-            raise
 
 
 class VectorStoreServiceFactory:

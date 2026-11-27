@@ -170,7 +170,7 @@ GET /votebot/v1/health/ready # Readiness check (verifies dependencies)
 GET /votebot/v1/health/live  # Liveness check
 ```
 
-`/health/ready` reports `pinecone`, `openai`, `ddp_openstates_replica` (the replica's `/healthz`) and `redis` (`unavailable`, not a failure, when Redis is not reachable). The OpenAI check is a real completion so that readiness means chat can be served, but it makes **at most one model call a minute** (a healthy result is kept 60 s, a failure 10 s), however often the endpoint is polled.
+`/health/ready` reports `pinecone`, `openai`, `ddp_openstates_replica` (the replica's `/healthz`) and `redis` (`unavailable`, not a failure, when Redis is not reachable). The OpenAI check is a real completion so that readiness means chat can be served, but it makes **at most one model call a minute** (a healthy result is kept 60 s, a failure 10 s), however often the endpoint is polled. **The Pinecone check is one real query too** (VOTEBOT-78: one match, no metadata, no values, a few dozen bytes back, from a fixed unit vector so OpenAI is not called), kept the same way, so a refused read (the 2026-11-26 monthly read limit) shows as `pinecone: unhealthy` instead of "Online" with every message failing; it costs **at most one Pinecone read a minute per process while healthy (1,440 a day), and one every 10 seconds while failing (at most 8,640 a day)** however often the endpoint is polled, times the number of processes (a refused read returns no data). **Known limit:** the Pinecone client has no query timeout set here (the old check had none either), so a hung Pinecone makes the readiness call wait instead of answering `degraded`; a poller's own timeout is what reports it.
 
 ### WebSocket
 
@@ -930,7 +930,7 @@ What keeps the wait before the model short (VOTEBOT-45 to 51; the code names are
 - The party roster used for vote breakdowns is refreshed in the background (served stale after 1 hour, one refresh per jurisdiction), and the federal one is fetched at startup.
 - At startup, Pinecone and the embedding client are warmed in a background task that never delays or stops startup.
 - One long-lived HTTP client serves OpenStates and Congress.gov, and a bill missing from the asked session is looked up in older sessions together.
-- `/health/ready` makes at most one model call a minute.
+- `/health/ready` makes at most one model call and one Pinecone query a minute (per process).
 
 Per-phase timings are in the query log (see `query_processed` above); `scripts/latency_report.py` reads them.
 
