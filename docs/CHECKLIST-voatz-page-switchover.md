@@ -54,13 +54,13 @@ The page works on any address of the new website at `/voatz-chat`, so you can te
 The page calls two things on VoteBot from the browser (`/votebot/v1/content/resolve` and `/votebot/v1/features`), and VoteBot only answers addresses on its allowed list. The list is one line in `infrastructure/docker/prod.env.defaults`:
 
 ```
-ALLOWED_ORIGINS=["https://dev.digitaldemocracyproject.org"]
+ALLOWED_ORIGINS=["https://dev.digitaldemocracyproject.org","https://stage.digitaldemocracyproject.org"]
 ```
 
-It becomes (the production website's own address is a separate cutover item, NEXT-36):
+(The stage site was added by VOTEBOT-83: its chat calls VoteBot from the browser too.) It becomes (the production website's own address is a separate cutover item, NEXT-36):
 
 ```
-ALLOWED_ORIGINS=["https://dev.digitaldemocracyproject.org","https://votebot.digitaldemocracyproject.org"]
+ALLOWED_ORIGINS=["https://dev.digitaldemocracyproject.org","https://stage.digitaldemocracyproject.org","https://votebot.digitaldemocracyproject.org"]
 ```
 
 That is a pull request on the votebot repo, then the prod agent re-renders the env and restarts the container (runbook sections 3.2 to 3.5). It can ship any time before January 1st: an extra allowed address is harmless. **Check it worked** (nothing changes, safe from any machine):
