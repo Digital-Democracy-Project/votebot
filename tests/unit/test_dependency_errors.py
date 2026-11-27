@@ -11,6 +11,7 @@ import httpx
 import openai
 import pytest
 import redis.exceptions
+from fastapi import HTTPException
 from pinecone.errors.exceptions import ApiError, RateLimitError, ServiceError
 from tenacity import RetryError
 
@@ -45,7 +46,9 @@ UNAVAILABLE = {
     "redis timeout": redis.exceptions.TimeoutError("slow"),
     "builtin connection": ConnectionResetError("reset"),
     "builtin timeout": TimeoutError("slow"),
-    "an older pinecone client's `status`": type("PineconeApiException", (Exception,), {"status": 429})(),
+    "an older pinecone client's `status`": type(
+        "PineconeApiException", (Exception,), {"status": 429, "__module__": "pinecone.core.client.exceptions"}
+    )(),
 }
 
 NOT_UNAVAILABLE = {
@@ -57,6 +60,11 @@ NOT_UNAVAILABLE = {
     "openai bad request (400)": openai.BadRequestError("bad", response=httpx.Response(400, request=_REQUEST), body=None),
     "replica not found (404)": httpx.HTTPStatusError("404", request=_REQUEST, response=httpx.Response(404, request=_REQUEST)),
     "a `status` that is not a number": type("Odd", (Exception,), {"status": "429"})(),
+    # a status proves something about a dependency only on an error that comes from a dependency's library
+    "fastapi's own HTTPException (500)": HTTPException(status_code=500),
+    "an error of our own that carries a 503": type("OurError", (Exception,), {"status_code": 503})(),
+    "an error of our own with a `status` of 429": type("OurError", (Exception,), {"status": 429})(),
+    "an error of our own with a response of 502": type("OurError", (Exception,), {"response": httpx.Response(502, request=_REQUEST)})(),
 }
 
 

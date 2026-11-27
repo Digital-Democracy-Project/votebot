@@ -5,7 +5,10 @@ On 2026-11-26 Pinecone refused every read (its monthly read limit, VOTEBOT-77) a
 not help, so the websocket sends a different code for it (`service_unavailable`) and the widget words it plainly.
 
 A failure counts only when the evidence is in the error itself: an HTTP status that means a limit, a quota or a service
-that is down (402, 429, 5xx), or a connection or timeout error. Everything else stays a `processing_error`.
+that is down (402, 429, 5xx) **on an error that comes from a dependency's own library** (a status on an error of our own,
+or of FastAPI, proves nothing about a dependency), or a connection or timeout error. Everything else stays a
+`processing_error`. The builtin `ConnectionError` and `TimeoutError` count because nothing in VoteBot raises them
+itself (its own `asyncio.wait_for` timeouts are caught where they are made); what raises them is a socket.
 """
 
 from __future__ import annotations
@@ -16,6 +19,9 @@ import redis.exceptions
 from tenacity import RetryError
 
 _MAX_DEPTH = 8  # how far down a chain of "raised from" errors to look
+
+# The libraries whose errors say something about a dependency (the clients of Pinecone, OpenAI, Redis and the HTTP calls).
+_DEPENDENCY_LIBRARIES = frozenset({"openai", "pinecone", "httpx", "httpcore", "urllib3", "redis"})
 
 # Errors that mean the other end could not be reached or did not answer in time.
 _UNREACHABLE = (
@@ -28,9 +34,15 @@ _UNREACHABLE = (
 )
 
 
+def _from_a_dependency_library(error: BaseException) -> bool:
+    return any(base.__module__.partition(".")[0] in _DEPENDENCY_LIBRARIES for base in type(error).__mro__)
+
+
 def _status(error: BaseException) -> int | None:
-    """The HTTP status an error carries, whichever way its library names it (`status_code` for OpenAI and
-    Pinecone 10, `status` for older Pinecone, `response.status_code` for httpx)."""
+    """The HTTP status an error from a dependency's library carries, whichever way the library names it
+    (`status_code` for OpenAI and Pinecone 10, `status` for older Pinecone, `response.status_code` for httpx)."""
+    if not _from_a_dependency_library(error):
+        return None
     for holder, name in ((error, "status_code"), (error, "status"), (getattr(error, "response", None), "status_code")):
         value = getattr(holder, name, None)
         if isinstance(value, int) and not isinstance(value, bool):
