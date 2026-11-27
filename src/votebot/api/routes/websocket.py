@@ -15,9 +15,13 @@ from votebot.config import get_settings
 from votebot.core.agent import CACHED_ANSWER_CONFIDENCE, VoteBotAgent
 from votebot.services.redis_store import get_redis_store
 from votebot.services.slack import get_slack_service, SlackService
+from votebot.utils.dependency_errors import is_dependency_unavailable
 
 logger = structlog.get_logger()
 router = APIRouter()
+
+# What the widget shows when a service VoteBot depends on is refusing or down (`service_unavailable`, VOTEBOT-79).
+SERVICE_UNAVAILABLE_MESSAGE = "VoteBot can't answer right now. Please try again in a little while."
 
 # Conversation boundary: inactivity timeout in seconds
 _CONVERSATION_INACTIVITY_TIMEOUT = 600  # 10 minutes
@@ -962,13 +966,16 @@ async def handle_user_message(
 
     except Exception as e:
         logger.exception("Error processing message", session_id=session_id)
-        await manager.send_json(session_id, {
-            "type": "error",
-            "payload": {
+        # A service VoteBot depends on refusing (a limit or quota) or down is not something a retry fixes: say so
+        # with its own code, so the widget can word it plainly (VOTEBOT-79).
+        if is_dependency_unavailable(e):
+            payload = {"code": "service_unavailable", "message": SERVICE_UNAVAILABLE_MESSAGE}
+        else:
+            payload = {
                 "code": "processing_error",
                 "message": "Sorry, I encountered an error processing your message. Please try again."
             }
-        })
+        await manager.send_json(session_id, {"type": "error", "payload": payload})
 
 
 def calculate_confidence(
