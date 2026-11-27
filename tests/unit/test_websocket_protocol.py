@@ -8,11 +8,14 @@ page context reaches the agent.
 
 from __future__ import annotations
 
+import concurrent.futures
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
+from pinecone.errors.exceptions import RateLimitError
 from starlette.testclient import TestClient
+from tenacity import RetryError
 
 from votebot.api.routes import websocket as ws
 from votebot.api.schemas.chat import Citation, ResponseMetadata
@@ -46,7 +49,7 @@ class FakeAgent:
     async def process_message_stream(self, **kwargs):
         FakeAgent.calls.append(kwargs)
         if FakeAgent.fail:
-            raise RuntimeError("boom")
+            raise FakeAgent.fail if isinstance(FakeAgent.fail, BaseException) else RuntimeError("boom")
         answer, tool_used = (
             FakeAgent.responder(kwargs["message"]) if FakeAgent.responder else (FakeAgent.answer, FakeAgent.votes_tool_used)
         )
@@ -190,6 +193,31 @@ class TestStreaming:
             frames = _read_until(conn, "error")
         assert [f["type"] for f in frames] == ["stream_start", "error"]
         assert frames[-1]["payload"]["code"] == "processing_error"
+        assert frames[-1]["payload"]["message"] == "Sorry, I encountered an error processing your message. Please try again."
+
+    def test_a_refusing_dependency_is_reported_as_service_unavailable(self, client):
+        # what the 11-26 chat saw: Pinecone's monthly read limit, after tenacity's retries (VOTEBOT-77, VOTEBOT-79)
+        attempt: concurrent.futures.Future = concurrent.futures.Future()
+        attempt.set_exception(RateLimitError("egress limit", status_code=429))
+        FakeAgent.fail = RetryError(attempt)
+        with client.websocket_connect("/ws/chat?session_id=s1") as conn:
+            conn.receive_json()
+            conn.send_json(_user_message("What does this bill do?"))
+            frames = _read_until(conn, "error")
+        assert [f["type"] for f in frames] == ["stream_start", "error"]
+        assert frames[-1]["payload"] == {"code": "service_unavailable", "message": ws.SERVICE_UNAVAILABLE_MESSAGE}
+        assert "error" not in ws.SERVICE_UNAVAILABLE_MESSAGE.lower() and "processing" not in ws.SERVICE_UNAVAILABLE_MESSAGE.lower()
+
+    def test_the_session_keeps_working_after_a_service_unavailable_error(self, client):
+        FakeAgent.fail = ConnectionError("refused")
+        with client.websocket_connect("/ws/chat?session_id=s1") as conn:
+            conn.receive_json()
+            conn.send_json(_user_message("first"))
+            _read_until(conn, "error")
+            FakeAgent.fail = False
+            conn.send_json(_user_message("second"))
+            frames = _read_until(conn, "stream_end")
+        assert frames[-1]["type"] == "stream_end"
 
 
 class TestValidationAndPing:
