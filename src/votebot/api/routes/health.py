@@ -38,11 +38,11 @@ async def readiness_check(settings: Settings = Depends(get_settings)) -> HealthR
 
     # Check Pinecone connectivity
     try:
-        # Import here to avoid circular imports
-        from votebot.services.vector_store import VectorStoreService
+        from votebot.core.agent import _services_for
 
-        vector_store = VectorStoreService()
-        await vector_store.health_check()
+        # the shared service, so the check's result is kept between requests (VOTEBOT-78: a new one each time would
+        # keep nothing, and would make one real query per poll)
+        await _services_for(settings).retrieval.vector_store.health_check()
         dependencies["pinecone"] = "healthy"
     except Exception as e:
         logger.warning("Pinecone health check failed", error=str(e))

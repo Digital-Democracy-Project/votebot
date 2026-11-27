@@ -102,10 +102,8 @@ class TestItStillFailsWhenChatCouldNotBeServed:
 class TestReadinessUsesTheSharedService:
     async def _readiness(self, llm: LLMService):
         ok = AsyncMock(return_value=True)
-        shared = SimpleNamespace(llm=llm)
-        with patch("votebot.core.agent._services_for", return_value=shared), patch(
-            "votebot.services.vector_store.VectorStoreService.__init__", lambda self, *a, **k: None
-        ), patch("votebot.services.vector_store.VectorStoreService.health_check", ok), patch.object(
+        shared = SimpleNamespace(llm=llm, retrieval=SimpleNamespace(vector_store=SimpleNamespace(health_check=ok)))
+        with patch("votebot.core.agent._services_for", return_value=shared), patch.object(
             health, "openstates_base_url", return_value="http://api-v3.test"
         ), patch.object(health.httpx, "AsyncClient") as client:
             client.return_value.__aenter__.return_value.get = AsyncMock(return_value=SimpleNamespace(raise_for_status=lambda: None))
